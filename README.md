@@ -2,9 +2,9 @@
 
 ![Phoenix](addon/PhoenixFreeCADMCP/Resources/icons/phoenix-wing-mark.svg)
 
-让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中文工作台工具。当前版本 **0.2.1**，采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
+让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中英文工作台工具。当前代码版本 **0.3.0**，采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
 
-聊天继续由客户端管理。FreeCAD 中的 **Phoenix Tools** 提供普通工具和桥接启停；Node 服务负责 16 个 MCP 工具，不要求在插件内填写聊天 API Key。
+聊天继续由客户端管理。FreeCAD 中的 **Phoenix Tools** 提供普通工具、语言设置和桥接启停；Node 服务提供 21 个 MCP 工具，不要求在插件内填写聊天 API Key。
 
 [接入说明](docs/CODEX.md) · [接口协议](docs/PROTOCOL.md) · [架构](docs/ARCHITECTURE.md) · [能力计划](docs/CAPABILITY-PLAN.md) · [验证记录](docs/VERIFICATION.md)
 
@@ -12,14 +12,14 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| MCP 连接 | 已真实发现 16 个工具，在 FreeCAD 1.1.0 完成连接和只读脚本调用；另一聊天的只读联测已通过 |
+| 0.3.0 MCP | 已实现 21 个工具；新增选择、显隐、显式重算及复用 MVC 的业务预览/应用，最终真实验收见验证记录 |
 | 参数化零件 | 已实测新建 60 × 40 mm 板、4 × Ø6 mm 通孔，保留 Body、全约束草图和 Pad/Pocket；厚度从 6 改为 8 mm 后校核几何 |
 | STEP | 已实测已知参数样例的导出、导入、参数化重建及几何对比；不代表任意 STEP 能自动恢复原始特征历史 |
 | TechDraw | 四视图和关联实际几何的 6 mm 孔径尺寸已验收；PDF/SVG/PNG/FCStd 导出、独立重开、模板/坐标/尺寸保留及缩略图检查通过，PDF 渲染目视确认无视图遮挡和越界 |
-| 工作台 | MVC 分层、命名修正、正式属性填写、Link 名称同步和单按钮 MCP 启停已实现；具体 GUI 验收见验证记录 |
+| 工作台 | MVC 分层、命名修正、正式属性填写、Link 名称同步和单按钮 MCP 启停；0.3.0 新增本机中文/English 设置 |
 | 本机接入清理 | 原桥接已停用并备份移出 FreeCAD 加载目录，对应 Codex 旧服务条目已移除 |
 
-接口实现、自动化测试和真实场景验收分别记录。测试数量、详细结果和归档状态以 [验证记录](docs/VERIFICATION.md) 为准；以上公开人工样例不代表任意工程均已验证，也不代替生产图纸审签。中英文界面切换、内嵌聊天和大型 Tool 服务集成仍是后续任务。
+接口实现、自动化测试和真实场景验收分别记录。测试数量、0.3.0 新接口/语言的实际结果和归档状态以 [验证记录](docs/VERIFICATION.md) 为准；既有公开人工样例不代表任意工程均已验证，也不代替生产图纸审签。0.2.0/0.2.1 的证据与归档保留原样。内嵌聊天、大型 Tool 服务集成及语言覆盖扩展仍是后续任务。
 
 ## 安装与启动
 
@@ -83,7 +83,7 @@ node scripts/call-tool.mjs get_connection_status /absolute/path/to/connection.ar
 
 默认桥接地址为 `http://127.0.0.1:9876/`；`PHOENIX_FREECAD_URL` 可指定允许的本机 HTTP 根地址，`PHOENIX_TIMEOUT_MS` 可调整 Node 等待时间。程序不自动读取 `.env`。
 
-## 16 个 MCP 工具
+## 21 个 MCP 工具
 
 | 分组 | 工具 |
 | --- | --- |
@@ -92,6 +92,8 @@ node scripts/call-tool.mjs get_connection_status /absolute/path/to/connection.ar
 | 几何 | `measure_geometry` |
 | 图纸检查 | `list_drawing_pages`、`inspect_drawing_page` |
 | 相机 | `fit_view`、`set_axonometric_view`、`set_view` |
+| 通用操作 `general_actions` | `set_selection`、`set_visibility`、`recompute_document` |
+| Phoenix 业务 `phoenix` | `prepare_part_changes`、`apply_part_changes` |
 | 图像 | `capture_view` |
 | 高级脚本 | `execute_script`、`get_script_status` |
 
@@ -100,6 +102,20 @@ node scripts/call-tool.mjs get_connection_status /absolute/path/to/connection.ar
 `execute_script` 在 GUI 主线程执行，与 FreeCAD Python 控制台同权限，**不是沙箱**。脚本可修改模型、访问文件、自行保存或关闭文档，调用必须符合具体任务授权。框架不额外保存，也不承诺异常自动回滚。
 
 脚本使用 `requestId` 去重和查询；超时不代表取消。先查询原 ID，重放使用相同 ID 和相同代码。记录仅限当前桥接服务会话，以 `script_session_id` 识别；重载桥接模块或重启 FreeCAD 会重置。完整终态结果保留最近 20 份，最多记住 4096 个历史 ID；结果过期的 ID 在同一会话中仍拒绝重新执行。状态和容量边界见 [协议](docs/PROTOCOL.md)。
+
+### 通用操作与业务差异预览
+
+三个通用操作均要求明确指定已经活动且空闲的文档。`set_selection` 只替换该文档的完整对象选择，空数组清除此文档选择，保留其他文档；`set_visibility` 对明确对象设显隐，事务可撤销；`recompute_document` 显式执行原生重算并检查失败状态，可能更新几何缓存。三者均不自动保存，也不自动切换目标文档。
+
+Phoenix 业务通过 `prepare_part_changes` / `apply_part_changes` 复用工作台 Model/Controller。支持命名修正、Link Label 同步、属性初始化/推荐和正式字段填写。先准备完整差异，例如对虚构对象预览命名：
+
+```json
+{"document":"ExampleDocument","objects":["ExamplePart"],"operation":"normalize_names"}
+```
+
+将返回的 `rows` 中旧值、新值、冲突及 `can_apply` 展示给用户，核对本次授权后才应用返回的 token。预览不修改模型，但会创建内存记录；有效期五分钟，最多保留 32 份。完整预览超过 128 KiB 会拒绝，不会截断差异后仍允许应用。
+
+应用前重新验证文档实例、快照和来源，写入可撤销、不保存。成功 token 在仍保留且未过期时可返回 `replayed:true` 的历史摘要，**不会再次执行，也不会在用户撤销后自动重做**；该摘要不证明对象当前状态，应以 `get_object_info` 核对。超时、失败、过期或未知 token 不盲目重放或换 token 自动应用，先检查结果，再重新预览。操作示例和细则见 [接入说明](docs/CODEX.md) 与 [协议](docs/PROTOCOL.md)。
 
 ## 独立工作台工具
 
@@ -111,7 +127,13 @@ node scripts/call-tool.mjs get_connection_status /absolute/path/to/connection.ar
 
 正式字段为 `PartNumber`、`PartVersion`、`TypeCode`、`ModelSeries`、`PartName`，属性组为 `CustomDefine`。推荐不覆盖已有非空值；属性填写不向 Link 来源转发写入。普通按钮经事务修改，默认不保存，不依赖 Node、MCP 或大型 Tool 服务。
 
-实现按 Model、Controller、View、Facade 分工，详见 [架构](docs/ARCHITECTURE.md)。这些按钮当前不是额外注册的 MCP 工具。
+实现按 Model、Controller、View、Facade 分工，详见 [架构](docs/ARCHITECTURE.md)。聊天通过两个业务 MCP 工具调用同一份规则和 Controller，普通按钮仍可独立使用。
+
+### 中文 / English 设置
+
+在 **Phoenix Tools** 菜单选择 **设置 / Settings**，选择“简体中文”或“English”，点击“保存并应用”。默认中文，确认后保存本机偏好，立即刷新已有菜单、按钮、提示和 MCP 状态文字，不重启、不启停 MCP、不改模型；新打开的业务对话框使用所选语言。取消不保存。
+
+设置命令为 `PhoenixTools_Settings`，只在菜单增加入口，不增加工具栏按钮。机器命令、MCP 工具/参数及正式字段名保持不变。本轮未实现跟随 FreeCAD 语言；部分动态业务校验和原生错误仍可能显示原文，设置中已说明。
 
 ## 公开演示与验证
 
@@ -151,7 +173,7 @@ npm run addon:uninstall -- --mod-dir "/absolute/path/to/FreeCAD/Mod"
 
 安装器只管理带本项目标记且内容校验通过的安装，不覆盖未知文件或用户修改。当前未发布远端；发布和收录另行安排。
 
-后续优先完善真实设计和图纸闭环，再封装高频写入、扩展工作台和业务适配。中英文切换尚未实现，列在 [TODO](docs/TODO.md)；内嵌聊天见 [路线图](docs/ROADMAP.md)，长期方向见 [愿景](docs/VISION.md)。大型 Tool 的下载、编译和启动后置，不是当前轻量插件的运行依赖。
+后续优先扩展真实设计和图纸案例，再封装高频建模/出图写入，并完善业务和语言覆盖，见 [TODO](docs/TODO.md)。内嵌聊天见 [路线图](docs/ROADMAP.md)，长期方向见 [愿景](docs/VISION.md)。大型 Tool 的下载、编译和启动后置，不是当前轻量插件的运行依赖。
 
 源码许可见 [LICENSE](LICENSE)，依赖、移植规则和组织 Logo 来源见 [NOTICE](NOTICE) 与 [品牌资源](docs/BRANDING.md)。桥接仅绑定本机，拒绝浏览器 Origin/Sec-Fetch 请求，但没有本机进程身份认证或多用户隔离，仅用于可信本机环境。
 

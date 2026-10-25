@@ -23,12 +23,11 @@ def _load_helper(name):
 
 _operations = _load_helper("phoenix_freecad_operations")
 _runtime = _load_helper("phoenix_freecad_runtime")
-_OPERATION_METHODS = {
-    "get_document_info", "list_objects", "get_object_info", "get_selection",
-    "measure_geometry", "list_drawing_pages", "inspect_drawing_page", "view_standard",
-}
-SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS)
-ADDON_VERSION = "0.2.1"
+_business = _load_helper("phoenix_freecad_business")
+_OPERATION_METHODS = set(_operations.METHODS)
+_BUSINESS_METHODS = set(_business.METHODS)
+SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS | _BUSINESS_METHODS)
+ADDON_VERSION = "0.3.0"
 PROTOCOL_VERSION = 1
 DEFAULT_PORT = 9876
 MAX_PAYLOAD_BYTES = 262144
@@ -79,6 +78,7 @@ def get_status():
             "addon_version": ADDON_VERSION,
             "supported_methods": SUPPORTED_METHODS,
             "script_session_id": _runtime.SESSION_ID,
+            "part_previews": {"ttl_seconds": _business.TTL_SECONDS, "max_plans": _business.MAX_PLANS, "max_preview_bytes": _business.MAX_PREVIEW_BYTES, "storage": "memory_only"},
             "running": bool(running),
             "stopping": bool(_stop_thread is not None and _stop_thread.is_alive()),
             "host": "127.0.0.1",
@@ -93,11 +93,12 @@ def _validate_request(payload):
     method = payload.get("method")
     allowed = set(SUPPORTED_METHODS)
     if not isinstance(method, str) or method not in allowed:
-        raise BridgeError("METHOD_NOT_FOUND", "该方法未开放；不支持任意代码或任意 FreeCAD 命令。")
+        raise BridgeError("METHOD_NOT_FOUND", "该方法未开放；请先检查 supported_methods。")
     params = payload.get("params", {})
     if not isinstance(params, dict):
         raise BridgeError("INVALID_PARAMS", "params 必须是 JSON 对象。")
-    if _operations.validate(method, params, BridgeError) or _runtime.validate(method, params, BridgeError):
+    if (_operations.validate(method, params, BridgeError) or _runtime.validate(method, params, BridgeError)
+            or _business.validate(method, params, BridgeError)):
         return method, params
     keys = {"docName"} if method == "view_fit" else {"docName", "fit"} if method == "view_axonometric" else set()
     if set(params) - keys:
@@ -117,6 +118,8 @@ def _perform_gui(method, params):
 
     if method in _OPERATION_METHODS:
         return _operations.perform(method, params, App, Gui, BridgeError)
+    if method in _BUSINESS_METHODS:
+        return _business.perform(method, params, App, Gui, BridgeError)
     if method == "execute_script":
         return _runtime.execute(params, App, Gui, BridgeError)
     if method == "capture_view":
@@ -321,7 +324,7 @@ class _BridgeHttpServer(ThreadingHTTPServer):
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
-    server_version = "PhoenixFreeCADMCP/0.2.1"
+    server_version = "PhoenixFreeCADMCP/0.3.0"
     sys_version = ""
 
     def log_message(self, format, *args):

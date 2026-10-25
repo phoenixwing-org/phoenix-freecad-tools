@@ -60,6 +60,12 @@ class Timer:
     def deleteLater(self): self.deleted = True
 
 
+class Preferences:
+    def __init__(self): self.values = {}
+    def GetString(self, key, default=""): return self.values.get(key, default)
+    def SetString(self, key, value): self.values[key] = value
+
+
 class WorkbenchToggleTests(unittest.TestCase):
     def setUp(self):
         self.status = {"running": False, "stopping": False, "port": 9876}
@@ -72,7 +78,8 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.window.findChildren = lambda kind: [button for button in self.window.buttons if isinstance(button, kind)]
         self.window.statusBar = lambda: types.SimpleNamespace(showMessage=lambda *args: None)
         self.window.findChild = lambda kind, name: next((timer for timer in self.window.timers if timer.name == name and not timer.deleted), None)
-        self.app = types.SimpleNamespace(Console=types.SimpleNamespace(PrintMessage=lambda text: None, PrintError=lambda text: None))
+        self.preferences = Preferences()
+        self.app = types.SimpleNamespace(Console=types.SimpleNamespace(PrintMessage=lambda text: None, PrintError=lambda text: None), ParamGet=lambda group: self.preferences)
 
         class BridgeError(Exception):
             def __init__(self, message): self.message = message
@@ -100,6 +107,10 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.addCleanup(self.module_patch.stop)
         initial_path = list(sys.path)
         self.addCleanup(lambda: sys.path.__setitem__(slice(None), initial_path))
+        sys.path.insert(0, str(INIT_GUI.parent))
+        from phoenix_workbench_i18n import get_language, set_language
+        self.addCleanup(set_language, get_language())
+        set_language("zh")
 
         class Workbench:
             def appendMenu(self, name, commands): self.menu_commands = list(commands)
@@ -133,9 +144,10 @@ class WorkbenchToggleTests(unittest.TestCase):
 
     def test_registration_keeps_only_one_mcp_command_without_starting_service(self):
         workbench, command, action = self.initialize()
-        expected = ["PhoenixTools_NormalizeNames", "PhoenixTools_SyncLinkLabels", "PhoenixTools_EditPartProperties", "PhoenixTools_ToggleMCP"]
+        toolbar = ["PhoenixTools_NormalizeNames", "PhoenixTools_SyncLinkLabels", "PhoenixTools_EditPartProperties", "PhoenixTools_ToggleMCP"]
+        expected = toolbar + ["PhoenixTools_Settings"]
         self.assertEqual(workbench.menu_commands, expected)
-        self.assertEqual(workbench.toolbar_commands, expected)
+        self.assertEqual(workbench.toolbar_commands, toolbar)
         self.assertEqual(list(self.commands), expected)
         self.assertEqual(self.calls, [])
         self.assertEqual(action.text, "启动 MCP · 已停止")
@@ -226,6 +238,40 @@ class WorkbenchToggleTests(unittest.TestCase):
         own.style = "icons-only"
         command.refresh_actions(force=True)
         self.assertEqual(own.style, "text-beside-icon")
+
+    def test_language_change_refreshes_existing_actions_without_service_or_timer_changes(self):
+        workbench, command, action = self.initialize()
+        self.status["running"] = True
+        command._timer.callback()
+        before_commands = dict(self.commands)
+        timer = command._timer
+        self.namespace["settings"].save_language(self.app, "en")
+        workbench.refresh_language()
+        self.assertEqual(action.text, "Stop MCP · Running")
+        self.assertEqual(action.icon_text, "Stop MCP · Running")
+        self.assertEqual(self.actions["PhoenixTools_NormalizeNames"].text, "Normalize labels")
+        self.assertEqual(self.actions["PhoenixTools_EditPartProperties"].text, "Edit part properties")
+        self.assertEqual(self.actions["PhoenixTools_Settings"].text, "Settings / 设置")
+        self.assertIn("Click to stop", action.tooltip)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.commands, before_commands)
+        self.assertIs(command._timer, timer)
+        self.assertEqual(len([item for item in self.window.timers if not item.deleted]), 1)
+        self.assertTrue(self.status["running"])
+        self.namespace["settings"].save_language(self.app, "zh")
+        workbench.refresh_language()
+        self.assertEqual(action.text, "停止 MCP · 运行中")
+        self.assertEqual(self.actions["PhoenixTools_NormalizeNames"].text, "命名修正")
+        self.assertEqual(self.commands["PhoenixTools_NormalizeNames"].title, "命名修正")
+        self.assertEqual(self.calls, [])
+
+    def test_persisted_language_is_loaded_without_starting_mcp(self):
+        self.preferences.values["Language"] = "en"
+        workbench, command, action = self.initialize()
+        self.assertEqual(action.text, "Start MCP · Stopped")
+        self.assertEqual(self.commands["PhoenixTools_NormalizeNames"].GetResources()["MenuText"], "Normalize labels")
+        self.assertEqual(self.commands["PhoenixTools_Settings"].GetResources()["ToolTip"], "Choose the Phoenix Tools interface language.")
+        self.assertEqual(self.calls, [])
 
     def test_stop_svg_is_a_red_square_instead_of_a_circle(self):
         import xml.etree.ElementTree as ET

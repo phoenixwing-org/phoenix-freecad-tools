@@ -14,10 +14,13 @@ if _workbench_base is None:
 
 import phoenix_freecad_bridge
 import phoenix_workbench_tools
+import phoenix_workbench_settings as settings
+from phoenix_workbench_i18n import get_language, tr
 
 
 def _feedback(message, error=False):
     printer = App.Console.PrintError if error else App.Console.PrintMessage
+    message = tr(message)
     printer("[Phoenix Tools] " + message + "\n")
     Gui.getMainWindow().statusBar().showMessage(message, 12000)
 
@@ -29,7 +32,7 @@ class _Command:
         self.callback = callback
 
     def GetResources(self):
-        return {"MenuText": self.title, "ToolTip": self.tooltip}
+        return {"MenuText": tr(self.title), "ToolTip": tr(self.tooltip)}
 
     def IsActive(self):
         return True
@@ -40,7 +43,7 @@ class _Command:
         except phoenix_freecad_bridge.BridgeError as error:
             _feedback(error.message, error=True)
         except Exception as error:
-            _feedback("操作失败（%s）。" % type(error).__name__, error=True)
+            _feedback(tr("操作失败（%s）。") % type(error).__name__, error=True)
 
 
 class _ToggleMCPCommand:
@@ -56,16 +59,16 @@ class _ToggleMCPCommand:
         stopping = bool(status.get("stopping"))
         running = bool(status.get("running"))
         if stopping:
-            title = "MCP 正在停止"
-            tooltip = "当前 MCP 正在后台停止；完成后可再次启动。"
+            title = tr("MCP 正在停止")
+            tooltip = tr("当前 MCP 正在后台停止；完成后可再次启动。")
         elif running:
-            title = "停止 MCP · 运行中"
-            tooltip = "当前 MCP 运行中；点击停止本机 Phoenix MCP 服务。"
+            title = tr("停止 MCP · 运行中")
+            tooltip = tr("当前 MCP 运行中；点击停止本机 Phoenix MCP 服务。")
         else:
-            title = "启动 MCP · 已停止"
-            tooltip = "当前 MCP 已停止；点击启动本机服务（127.0.0.1:9876）。"
+            title = tr("启动 MCP · 已停止")
+            tooltip = tr("当前 MCP 已停止；点击启动本机服务（127.0.0.1:9876）。")
         icon = "mcp-stop.svg" if running or stopping else "mcp-start.svg"
-        return (running, stopping), {
+        return (running, stopping, get_language()), {
             "MenuText": title,
             "ToolTip": tooltip,
             "Pixmap": os.path.join(_addon_dir, "Resources", "icons", icon),
@@ -178,15 +181,15 @@ class _ToggleMCPCommand:
             else:
                 result = phoenix_freecad_bridge.start_server()
             if result.get("stopping"):
-                _feedback("MCP 服务正在停止。")
+                _feedback(tr("MCP 服务正在停止。"))
             elif result.get("running"):
-                _feedback("MCP 服务已启动：127.0.0.1:%s。" % result["port"])
+                _feedback(tr("MCP 服务已启动：127.0.0.1:%s。") % result["port"])
             else:
-                _feedback("MCP 服务已停止。")
+                _feedback(tr("MCP 服务已停止。"))
         except phoenix_freecad_bridge.BridgeError as error:
             _feedback(error.message, error=True)
         except Exception as error:
-            _feedback("MCP 操作失败（%s）。" % type(error).__name__, error=True)
+            _feedback(tr("MCP 操作失败（%s）。") % type(error).__name__, error=True)
         finally:
             self.refresh_actions(force=True)
 
@@ -197,25 +200,60 @@ class PhoenixFreeCADMCPWorkbench(_workbench_base):
     ToolTip = "Phoenix 的 FreeCAD 工具入口；通过 MCP 提供聊天控制能力。"
 
     def Initialize(self):
+        try:
+            settings.load_language(App)
+        except settings.SettingsError as error:
+            _feedback(str(error), error=True)
         definitions = [
             ("PhoenixTools_NormalizeNames", "命名修正", "预览所选对象的 Label 命名修正，确认后可撤销。", phoenix_workbench_tools.show_rename_dialog),
             ("PhoenixTools_SyncLinkLabels", "同步链接名称", "预览所选 App::Link 与直接来源的名称差异，确认后仅修改链接实例 Label。", phoenix_workbench_tools.show_link_labels_dialog),
             ("PhoenixTools_EditPartProperties", "填写零件属性", "编辑所选对象的五个 BOM 字符串字段，确认后写入。", phoenix_workbench_tools.show_properties_dialog),
         ]
         commands = []
+        self._commands = {}
         for identifier, title, tooltip, callback in definitions:
-            Gui.addCommand(identifier, _Command(title, tooltip, callback))
+            command = _Command(title, tooltip, callback)
+            self._commands[identifier] = command
+            Gui.addCommand(identifier, command)
             commands.append(identifier)
         self._mcp_command = _ToggleMCPCommand()
         Gui.addCommand(self._mcp_command.IDENTIFIER, self._mcp_command)
         commands.append(self._mcp_command.IDENTIFIER)
-        self.appendMenu("Phoenix Tools", commands)
+        settings_id = "PhoenixTools_Settings"
+        settings_command = _Command("设置 / Settings", "配置 Phoenix Tools 的界面语言。", self._show_settings)
+        self._commands[settings_id] = settings_command
+        Gui.addCommand(settings_id, settings_command)
+        self.appendMenu("Phoenix Tools", commands + [settings_id])
         self.appendToolbar("Phoenix Tools", commands)
         self._mcp_command.start_polling()
 
+    def _show_settings(self):
+        return phoenix_workbench_tools.show_settings_dialog(self.refresh_language)
+
+    def refresh_language(self):
+        """Refresh existing actions only; keep timers, documents and MCP state."""
+        self.ToolTip = tr("Phoenix 的 FreeCAD 工具入口；通过 MCP 提供聊天控制能力。")
+        for identifier, command in self._commands.items():
+            try:
+                actions = Gui.Command.get(identifier).getAction()
+                if hasattr(actions, "setText"):
+                    actions = [actions]
+                resources = command.GetResources()
+                for action in actions or []:
+                    action.setText(resources["MenuText"])
+                    if callable(getattr(action, "setIconText", None)):
+                        action.setIconText(resources["MenuText"])
+                    action.setToolTip(resources["ToolTip"])
+                    action.setStatusTip(resources["ToolTip"])
+            except (AttributeError, RuntimeError, KeyError):
+                # A hidden workbench may not have created actions yet.
+                # GetResources will supply the current language when it does.
+                continue
+        self._mcp_command.refresh_actions(force=True)
+
     def Activated(self):
         if hasattr(self, "_mcp_command"):
-            self._mcp_command.refresh_actions(force=True)
+            self.refresh_language()
 
     def Deactivated(self):
         pass

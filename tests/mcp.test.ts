@@ -9,10 +9,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const TOOL_NAMES = ['get_capabilities', 'get_connection_status', 'list_documents', 'fit_view', 'set_axonometric_view',
   'get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'list_drawing_pages',
-  'inspect_drawing_page', 'set_view', 'capture_view', 'execute_script', 'get_script_status'];
+  'inspect_drawing_page', 'set_view', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'apply_part_changes'];
 const METHODS = ['get_status', 'list_documents', 'view_fit', 'view_axonometric', 'get_document_info', 'list_objects',
   'get_object_info', 'get_selection', 'measure_geometry', 'list_drawing_pages', 'inspect_drawing_page',
-  'view_standard', 'capture_view', 'execute_script', 'get_script_status'];
+  'view_standard', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'apply_part_changes'];
 type Call = { method: string; params: Record<string, unknown> };
 
 /** A complete synthetic PNG, with independent fixture CRCs and compressed rows. */
@@ -44,7 +44,7 @@ async function session(t: TestContext) {
       res.end(JSON.stringify({ ok: false, error: { code: body.params.requestId === 'fail' ? 'SCRIPT_FAILED' : 'DOCUMENT_NOT_FOUND', message: '测试业务错误' } })); return;
     }
     let data: unknown;
-    if (body.method === 'get_status') data = { protocol_version: 1, running: true, addon_version: '0.2.1', ...(state.methods === undefined ? {} : { supported_methods: state.methods }) };
+    if (body.method === 'get_status') data = { protocol_version: 1, running: true, addon_version: '0.3.0', ...(state.methods === undefined ? {} : { supported_methods: state.methods }) };
     else if (body.method === 'list_documents') data = ['PublicSample'];
     else if (body.method === 'capture_view') {
       const width = Number(body.params.width), height = Number(body.params.height), image = png(width, height).toString('base64');
@@ -59,24 +59,27 @@ async function session(t: TestContext) {
   const port = (bridge.address() as { port: number }).port;
   const transport = new StdioClientTransport({ command: process.execPath,
     args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url))], env: { PHOENIX_FREECAD_URL: `http://127.0.0.1:${port}/` }, stderr: 'pipe' });
-  const client = new Client({ name: 'phoenix-integration-test', version: '0.2.1' });
+  const client = new Client({ name: 'phoenix-integration-test', version: '0.3.0' });
   await client.connect(transport); t.after(() => client.close());
   return { client, calls, state };
 }
 
-test('真实 stdio 发现 16 工具；离线清单区分插件运行时能力和工具作用', async (t) => {
+test('真实 stdio 发现 21 工具；离线清单区分插件运行时能力和工具作用', async (t) => {
   const { client, calls } = await session(t), list = await client.listTools();
   assert.deepEqual(list.tools.map(tool => tool.name).sort(), [...TOOL_NAMES].sort());
   assert.equal(calls.length, 0);
   const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
-  assert.equal(capabilities.structuredContent?.version, '0.2.1');
+  assert.equal(capabilities.structuredContent?.version, '0.3.0');
   assert.equal(capabilities.structuredContent?.runtime_supported_checked, false);
   assert.deepEqual(capabilities.structuredContent?.script_history, { scope: 'bridge_service_session', session_id_field: 'script_session_id', full_results: 20, remembered_request_ids: 4096, expired_requests_reexecute: false });
   assert.equal(calls.length, 0);
-  for (const name of ['get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'list_drawing_pages', 'inspect_drawing_page', 'capture_view', 'get_script_status']) {
+  for (const name of ['get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'list_drawing_pages', 'inspect_drawing_page', 'capture_view', 'get_script_status', 'prepare_part_changes']) {
     assert.equal(list.tools.find(tool => tool.name === name)?.annotations?.readOnlyHint, true, name);
   }
   assert.equal(list.tools.find(tool => tool.name === 'set_view')?.annotations?.readOnlyHint, false);
+  assert.equal(list.tools.find(tool => tool.name === 'prepare_part_changes')?.annotations?.idempotentHint, false);
+  assert.equal(list.tools.find(tool => tool.name === 'apply_part_changes')?.annotations?.readOnlyHint, false);
+  assert.equal(list.tools.find(tool => tool.name === 'apply_part_changes')?.annotations?.idempotentHint, true);
   assert.deepEqual(list.tools.find(tool => tool.name === 'execute_script')?.annotations, {
     readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true,
   });
@@ -102,6 +105,12 @@ test('MCP 调用保留原视图工具，并准确映射所有新增参数与默�
     { name: 'set_view', args: { view: 'front' }, method: 'view_standard', params: { view: 'front', fit: false } },
     { name: 'execute_script', args: { code: 'print("sample")', requestId: 'script_1' }, method: 'execute_script', params: { code: 'print("sample")', requestId: 'script_1' } },
     { name: 'get_script_status', args: { requestId: 'script_1' }, method: 'get_script_status', params: { requestId: 'script_1' } },
+    { name: 'set_selection', args: { document: 'PublicSample', objects: [] }, method: 'set_selection', params: { docName: 'PublicSample', objectNames: [] } },
+    { name: 'set_visibility', args: { document: 'PublicSample', objects: ['Body'], visible: false }, method: 'set_visibility', params: { docName: 'PublicSample', objectNames: ['Body'], visible: false } },
+    { name: 'recompute_document', args: { document: 'PublicSample' }, method: 'recompute_document', params: { docName: 'PublicSample' } },
+    { name: 'prepare_part_changes', args: { document: 'PublicSample', objects: ['Body'], operation: 'initialize_properties' }, method: 'prepare_part_changes', params: { docName: 'PublicSample', objectNames: ['Body'], operation: 'initialize_properties' } },
+    { name: 'prepare_part_changes', args: { document: 'PublicSample', objects: ['Body'], operation: 'set_properties', values: { Body: { PartName: 'Demo' } } }, method: 'prepare_part_changes', params: { docName: 'PublicSample', objectNames: ['Body'], operation: 'set_properties', values: { Body: { PartName: 'Demo' } } } },
+    { name: 'apply_part_changes', args: { token: 'a'.repeat(32) }, method: 'apply_part_changes', params: { token: 'a'.repeat(32) } },
   ];
   for (const item of cases) {
     const result = await client.callTool({ name: item.name, arguments: item.args });
@@ -122,6 +131,18 @@ test('MCP 调用保留原视图工具，并准确映射所有新增参数与默�
 test('严格 schema 拒绝未知字段、越界值和错误类型，且不派发任何桥请求', async (t) => {
   const { client, calls } = await session(t);
   const invalid: Array<[string, Record<string, unknown>]> = [
+
+    ['set_selection', { objects: ['Body'] }], ['set_selection', { document: 'Doc', objects: ['Body', 'Body'] }],
+    ['set_visibility', { document: 'Doc', objects: [], visible: false }], ['set_visibility', { document: 'Doc', objects: ['Body'], visible: 1 }],
+    ['recompute_document', { document: 'Doc', save: true }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body'], operation: 'run_code' }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body'], operation: 'set_properties' }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body'], operation: 'initialize_properties', values: { Body: { PartName: 'x' } } }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body'], operation: 'set_properties', values: { Other: { PartName: 'x' } } }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body'], operation: 'set_properties', values: { Body: { Label: 'x' } } }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body'], operation: 'set_properties', values: { Body: { PartName: 'x'.repeat(2049) } } }],
+    ['prepare_part_changes', { document: 'Doc', objects: ['Body','Link'], operation: 'set_properties', values: { Body: { PartName: 'x' }, Link: { PartNumber: 'y' } } }],
+    ['apply_part_changes', { token: 'short' }], ['apply_part_changes', { token: 'a'.repeat(32), code: 'pass' }],
     ['get_document_info', { document: 'PublicSample', code: 'print(1)' }], ['list_objects', { limit: 101 }],
     ['list_objects', { offset: -1 }], ['list_objects', { offset: 0.5 }], ['list_objects', { limit: '50' }],
     ['list_objects', { offset: 2147483648 }], ['list_objects', { typeId: 'Part Design' }], ['list_objects', { typeId: '1Part' }],

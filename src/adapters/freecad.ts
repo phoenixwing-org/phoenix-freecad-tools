@@ -13,6 +13,11 @@ export type GeometryInput = DocumentInput & { object: string; subelement?: strin
 export type DrawingPageInput = DocumentInput & { page: string };
 export type ViewInput = DocumentInput & { view: StandardView; fit?: boolean | undefined };
 export type CaptureInput = DocumentInput & { width?: number | undefined; height?: number | undefined };
+export type ObjectsInput = { document: string; objects: string[] };
+export type VisibilityInput = ObjectsInput & { visible: boolean };
+export type PartOperation = 'normalize_names' | 'sync_link_labels' | 'initialize_properties' | 'recommend_properties' | 'set_properties';
+export type BomField = 'PartNumber' | 'PartVersion' | 'TypeCode' | 'ModelSeries' | 'PartName';
+export type PartChangesInput = ObjectsInput & { operation: PartOperation; values?: Record<string, Partial<Record<BomField, string | undefined>>> | undefined };
 export type CapturedView = { document: string; mime_type: 'image/png'; data: string; width: number; height: number };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -140,6 +145,21 @@ export class FreeCadClient {
   async captureView({ document, width = 800, height = 600 }: CaptureInput = {}): Promise<CapturedView> {
     const result = await this.feature('capture_view', { ...documentParams(document), width, height });
     return captureResult(result, width, height);
+  }
+  setSelection({ document, objects }: ObjectsInput): Promise<unknown> {
+    return this.feature('set_selection', { docName: document, objectNames: objects });
+  }
+  setVisibility({ document, objects, visible }: VisibilityInput): Promise<unknown> {
+    return this.feature('set_visibility', { docName: document, objectNames: objects, visible });
+  }
+  recomputeDocument(document: string): Promise<unknown> {
+    return this.feature('recompute_document', { docName: document });
+  }
+  preparePartChanges({ document, objects, operation, values }: PartChangesInput): Promise<unknown> {
+    return this.feature('prepare_part_changes', { docName: document, objectNames: objects, operation, ...(values === undefined ? {} : { values }) });
+  }
+  applyPartChanges(token: string): Promise<unknown> {
+    return this.feature('apply_part_changes', { token });
   }
   executeScript(code: string, requestId: string): Promise<unknown> {
     return this.feature('execute_script', { code, requestId });

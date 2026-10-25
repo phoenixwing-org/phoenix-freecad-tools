@@ -23,7 +23,7 @@ class ProtocolTests(unittest.TestCase):
         status = bridge.process_request({"method": "get_status", "params": {}})
         self.assertTrue(status["ok"])
         self.assertEqual(status["data"]["protocol_version"], 1)
-        self.assertEqual(status["data"]["addon_version"], "0.2.1")
+        self.assertEqual(status["data"]["addon_version"], "0.3.0")
         self.assertFalse(status["data"]["running"])
 
     def test_rejects_code_unknown_fields_and_wrong_types(self):

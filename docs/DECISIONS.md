@@ -1,12 +1,12 @@
 # 讨论与架构决定
 
-日期：2026-10-24。记录当前明确的方向，不复制私有工程信息。当前能力以 [验证记录](VERIFICATION.md) 为准。
+更新：2026-10-25。记录当前明确的方向，不复制私有工程信息。当前能力以 [验证记录](VERIFICATION.md) 为准。
 
 ## 名称与界面
 
 项目目录为 `phoenix-freecad-tools`，表达持续扩展的工具集合。npm 包/CLI 保持 `phoenix-freecad-mcp`，插件目录为 `PhoenixFreeCADMCP`，技术类名为 `PhoenixFreeCADMCPWorkbench`；工作台显示名为 **Phoenix Tools**，GUI 命令使用 `PhoenixTools_` 前缀，完整对应见 [命名](NAMING.md)。
 
-工作台同时提供独立工具和一个 MCP 启停按钮。绿色三角表示启动动作，红色方块表示停止动作，旁边文字写明当前状态；选择工作台不自动启动桥接。fit 与轴测是实际 MCP 能力，不在工具栏重复设置示例按钮。中英文切换列为后续任务。
+工作台同时提供独立工具和一个 MCP 启停按钮。绿色三角表示启动动作，红色方块表示停止动作，旁边文字写明当前状态；选择工作台不自动启动桥接。fit 与轴测是实际 MCP 能力，不在工具栏重复设置示例按钮。中文/English 基础设置已实现，动态业务错误全翻译和跟随 FreeCAD 语言后置。
 
 ## Node.js / TypeScript 与 Python 分工
 

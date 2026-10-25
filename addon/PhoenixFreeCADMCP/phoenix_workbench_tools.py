@@ -52,3 +52,10 @@ def _table_item(widgets, core, text, editable=False):
 def _report(gui, message, error=False):
     from phoenix_workbench_views import _report as report
     return report(gui, message, error)
+
+
+def show_settings_dialog(on_applied=None):
+    import FreeCAD as app
+    import FreeCADGui as gui
+    from phoenix_workbench_views import show_settings_dialog as show
+    return show(app, gui, on_applied)

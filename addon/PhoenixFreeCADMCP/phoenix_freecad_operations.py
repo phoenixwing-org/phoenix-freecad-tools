@@ -14,6 +14,7 @@ import unicodedata
 METHODS = frozenset({
     "get_document_info", "list_objects", "get_object_info", "get_selection",
     "measure_geometry", "list_drawing_pages", "inspect_drawing_page", "view_standard",
+    "set_selection", "set_visibility", "recompute_document",
 })
 MAX_ITEMS = 100
 MAX_PROPERTY_ITEMS = 50
@@ -31,6 +32,9 @@ _KEYS = {
     "list_drawing_pages": {"docName"},
     "inspect_drawing_page": {"docName", "pageName"},
     "view_standard": {"docName", "view", "fit"},
+    "set_selection": {"docName", "objectNames"},
+    "set_visibility": {"docName", "objectNames", "visible"},
+    "recompute_document": {"docName"},
 }
 
 
@@ -51,6 +55,17 @@ def validate(method, params, ErrorClass):
     required = "objectName" if method in {"get_object_info", "measure_geometry"} else "pageName" if method == "inspect_drawing_page" else None
     if required and required not in params:
         raise ErrorClass("INVALID_PARAMS", "缺少 " + required + "。")
+    if method in {"set_selection", "set_visibility", "recompute_document"} and "docName" not in params:
+        raise ErrorClass("INVALID_PARAMS", "修改操作必须明确指定 docName。")
+    if method in {"set_selection", "set_visibility"}:
+        names = params.get("objectNames")
+        if (not isinstance(names, list) or len(names) > MAX_ITEMS
+                or method == "set_visibility" and not names
+                or any(not _valid_name(value) for value in names)
+                or len(set(names)) != len(names)):
+            raise ErrorClass("INVALID_PARAMS", "objectNames 必须是最多100个不重复内部名称；显隐操作不能为空。")
+    if method == "set_visibility" and type(params.get("visible")) is not bool:
+        raise ErrorClass("INVALID_PARAMS", "visible 必须是布尔值。")
     if "offset" in params and (type(params["offset"]) is not int or not 0 <= params["offset"] <= 2147483647):
         raise ErrorClass("INVALID_PARAMS", "offset 必须是非负整数。")
     if "limit" in params and (type(params["limit"]) is not int or not 1 <= params["limit"] <= MAX_ITEMS):
@@ -303,6 +318,90 @@ def _view(document, Gui, ErrorClass, required=()):
     raise ErrorClass("VIEW_UNAVAILABLE", "没有可确定的三维视图；请先激活目标文档的三维视图。")
 
 
+def _guard_action(document, App, Gui, ErrorClass, undo=False):
+    if App.ActiveDocument is not document:
+        raise ErrorClass("DOCUMENT_NOT_ACTIVE", "请先激活明确指定的目标文档。")
+    check = _attr(App, "getActiveTransaction")
+    if not callable(check) or check():
+        raise ErrorClass("DOCUMENT_BUSY", "无法确认事务空闲，或当前已有未完成事务。")
+    gui_document = Gui.getDocument(document.Name)
+    editing = _attr(gui_document, "getInEdit")
+    if not callable(editing) or editing():
+        raise ErrorClass("DOCUMENT_BUSY", "无法确认编辑状态，或当前正在编辑。")
+    if undo and _attr(document, "UndoMode", 0) == 0:
+        raise ErrorClass("UNDO_DISABLED", "目标文档没有启用撤销，未执行修改。")
+
+
+def _selection_snapshot(selection, doc_name):
+    # ResolveMode=0 retains selected Link instances instead of their sources.
+    records = selection.getSelectionEx(doc_name, 0)
+    if len(records) > 1000:
+        raise ValueError("selection too large")
+    return [(record.ObjectName, tuple(record.SubElementNames)) for record in records]
+
+
+def _replace_selection(selection, doc_name, records):
+    selection.clearSelection(doc_name, False)
+    for name, subelements in records:
+        for sub in subelements or ("",):
+            selection.addSelection(doc_name, name, sub, 0, 0, 0, False)
+
+
+def _perform_action(method, params, document, App, Gui, ErrorClass):
+    _guard_action(document, App, Gui, ErrorClass, undo=method == "set_visibility")
+    result = {"document": document.Name, "saved": False}
+    if method == "recompute_document":
+        native_success = document.recompute()
+        invalid = [obj.Name for obj in document.Objects if any("invalid" in str(state).lower() or "error" in str(state).lower() for state in _sequence(_attr(obj, "State", [])))]
+        if native_success is False or invalid:
+            raise ErrorClass("RECOMPUTE_FAILED", "重算未通过，请读取对象状态。" + (" 对象：" + ", ".join(invalid[:20]) if invalid else ""))
+        result.update(recomputed=True, native_success=native_success if type(native_success) is bool else None, invalid_objects=[])
+        return result
+    # Resolve every object before changing selection, visibility or transactions.
+    objects = [_object(document, name, ErrorClass) for name in params["objectNames"]]
+    if method == "set_selection":
+        selection = Gui.Selection
+        try:
+            before = _selection_snapshot(selection, document.Name)
+        except Exception:
+            raise ErrorClass("SELECTION_UNAVAILABLE", "无法完整记录目标文档的现有选择，未修改选择。")
+        desired = [(obj.Name, ()) for obj in objects]
+        try:
+            _replace_selection(selection, document.Name, desired)
+            after = _selection_snapshot(selection, document.Name)
+            if sorted(after) != sorted(desired):
+                raise ValueError("selection rejected")
+        except Exception:
+            try:
+                _replace_selection(selection, document.Name, before)
+                if sorted(_selection_snapshot(selection, document.Name)) != sorted(before):
+                    raise ValueError("selection restore rejected")
+            except Exception:
+                raise ErrorClass("SELECTION_RESTORE_FAILED", "选择修改失败且未能完整恢复，请检查当前选择。")
+            raise ErrorClass("SELECTION_FAILED", "选择修改未通过，已恢复目标文档原选择。")
+        result.update(objects=[obj.Name for obj in objects], selection_scope="target_document_whole_objects", changed=sorted(before) != sorted(desired))
+        return result
+    target = params["visible"]
+    for obj in objects:
+        if type(_attr(_attr(obj, "ViewObject"), "Visibility")) is not bool:
+            raise ErrorClass("VISIBILITY_UNAVAILABLE", "部分目标没有可用的可见性属性，未修改。")
+    before = [obj.ViewObject.Visibility for obj in objects]
+    changed = [obj for obj in objects if obj.ViewObject.Visibility != target]
+    if changed:
+        document.openTransaction("Phoenix: set object visibility")
+        try:
+            for obj in changed:
+                obj.ViewObject.Visibility = target
+            if any(obj.ViewObject.Visibility is not target for obj in objects):
+                raise ValueError("visibility rejected")
+            document.commitTransaction()
+        except Exception:
+            document.abortTransaction()
+            raise ErrorClass("VISIBILITY_FAILED", "显隐修改未通过，工具事务已撤销。")
+    result.update(objects=[{"name": obj.Name, "before": old, "visible": obj.ViewObject.Visibility} for obj, old in zip(objects, before)], changed_count=len(changed), undoable=bool(changed))
+    return result
+
+
 def _summary(obj, document, serializer):
     group = _sequence(_attr(obj, "Group", []))
     parents = []
@@ -444,6 +543,8 @@ def perform(method, params, App, Gui, ErrorClass):
     if not validate(method, params, ErrorClass):
         raise ErrorClass("METHOD_NOT_FOUND", "本操作模块没有开放该方法。")
     document = _document(App, params, ErrorClass)
+    if method in {"set_selection", "set_visibility", "recompute_document"}:
+        return _perform_action(method, params, document, App, Gui, ErrorClass)
     serializer = _Json()
     document_name = _name(document)
     result = {"document": document_name, "source_kind": "live_freecad_gui"}
