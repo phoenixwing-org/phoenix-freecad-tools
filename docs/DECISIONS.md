@@ -4,9 +4,9 @@
 
 ## 名称与界面
 
-项目目录为 `phoenix-freecad-tools`，表达持续扩展的工具集合。npm 包/CLI 保持 `phoenix-freecad-mcp`，插件目录为 `PhoenixFreeCADMCP`，技术类名为 `PhoenixFreeCADMCPWorkbench`；工作台显示名为 **Phoenix Tools**，GUI 命令使用 `PhoenixTools_` 前缀，完整对应见 [命名](NAMING.md)。
+项目目录为 `phoenix-freecad-tools`，表达持续扩展的工具集合。npm 包/CLI 保持 `phoenix-freecad-mcp`，插件目录为 `PhoenixFreeCADTools`，技术类名为 `PftWorkbench`，Python 模块/测试采用 pft_ / test_pft_，自有类采用 Pft；工作台显示名为 **Phoenix Tools**，GUI 命令使用 `PhoenixTools_` 前缀，完整对应见 [命名](NAMING.md)。
 
-工作台同时提供独立工具和一个 MCP 启停按钮。绿色三角表示启动动作，红色方块表示停止动作，旁边文字写明当前状态；选择工作台不自动启动桥接。fit 与轴测是实际 MCP 能力，不在工具栏重复设置示例按钮。中文/English 基础设置已实现，动态业务错误全翻译和跟随 FreeCAD 语言后置。
+工作台同时提供独立工具和一个 MCP 启停按钮。状态圆点显示运行状态，灰色三角/方块表示启动/停止动作，文字保留在菜单、悬停和状态详情；选择工作台不自动启动桥接。轴测与Fit合为一个常用工具条图标，外观另用一个图标打开紧凑非模态随机色/透明度窗口；文档面板不重复这些大按钮。全部业务图标默认配文字，设置可仅图标，MCP三控件固定图标。中文/English 基础设置已实现，动态业务错误全翻译和跟随 FreeCAD 语言后置。
 
 ## Node.js / TypeScript 与 Python 分工
 
@@ -28,4 +28,8 @@ Node 服务使用官方 MCP SDK 向聊天客户端注册工具，便于未来复
 
 原创应用代码采用 Apache-2.0，完整文本见 [LICENSE](../LICENSE)，组织 Logo 和小型规则来源见 [NOTICE](../NOTICE)。FreeCAD、官方 MCP SDK 及未来引入代码分别保留适用许可和声明。
 
-本阶段仅本地提交、标记与归档，不远程发布；跨平台和 Addon Manager 收录后续另行验收。聊天由现有客户端管理，不要求插件另填 API Key；复用本机客户端与同一会话的内嵌界面仍需调查官方支持方式，见 [路线图](ROADMAP.md)。
+本阶段仅本地提交、标记与归档，不远程发布；跨平台和 Addon Manager 收录后续另行验收。聊天可由外部客户端或现有独立原生app-server面板管理，不要求Platform API Key；复用桌面当前同一会话仍需调查官方支持方式，见 [路线图](ROADMAP.md)。
+
+## 版本收敛
+
+0.3.1基线后的未推送改进统一为0.3.2候选，不再为每项界面修正或测试升号。0.4–0.10只作历史内部标签，实际运行桥接与Desk产品版本保留，见[版本约定](VERSIONING.md)。本轮最终原生、包及归档由验证记录确认，跨平台与正式发布另行验收。

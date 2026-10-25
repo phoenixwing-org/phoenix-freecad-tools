@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: Apache-2.0; original Phoenix Tools artwork -->
+  <title>当前文档工具</title>
+  <path d="M5 2.5h9l5 5v14H5Z" fill="#edf4fa" stroke="#52738b" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M14 2.5v5h5" fill="#c6ddec" stroke="#52738b" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M8 11h8M8 14.5h8M8 18h5" stroke="#5286ad" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

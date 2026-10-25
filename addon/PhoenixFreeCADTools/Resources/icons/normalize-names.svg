@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: Apache-2.0; original Phoenix Tools artwork -->
+  <title>命名修正</title>
+  <path d="M3 3.5h12v17H3Z" fill="#edf4fa" stroke="#61778a" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="m5.5 12 2-5.5 2 5.5M6.2 10.3h2.7M5.5 16h5" fill="none" stroke="#527b9b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m12.4 15.8 6.7-8.2 2.5 2-6.7 8.2-3.7 1.3Z" fill="#e7bd5c" stroke="#917442" stroke-width="1.3" stroke-linejoin="round"/>
+  <path d="m18 9 2.5 2" stroke="#917442" stroke-width="1.3"/>
+</svg>

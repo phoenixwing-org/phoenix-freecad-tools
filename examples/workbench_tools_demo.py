@@ -3,8 +3,8 @@
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
-import phoenix_workbench_tools as tools
-import phoenix_workbench_views as views
+import pft_workbench_tools as tools
+import pft_workbench_views as views
 
 name = 'PhoenixToolsUIDemo'
 if name in App.listDocuments():

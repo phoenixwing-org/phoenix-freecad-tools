@@ -1,0 +1,33 @@
+name: Build installation packages
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:python
+      - run: npm run addon:pack
+      - run: npm pack --ignore-scripts --pack-destination artifacts
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum *.zip *.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-freecad-installation-packages
+          path: artifacts/*
+          if-no-files-found: error

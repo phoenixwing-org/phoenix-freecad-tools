@@ -19,4 +19,5 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run test:python
+      - run: npm run addon:pack
       - run: npm pack --dry-run

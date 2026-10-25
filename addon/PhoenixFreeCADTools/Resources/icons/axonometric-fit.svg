@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: Apache-2.0; original Phoenix Tools artwork -->
+  <title>轴测并适合视图</title>
+  <g stroke="#536778" stroke-width="1.6" stroke-linejoin="round">
+    <path d="M10 2 2.5 6.2 10 10.5 17.5 6.2Z" fill="#c9e3ee"/>
+    <path d="M2.5 6.2V15L10 19.3V10.5Z" fill="#89b7ce"/>
+    <path d="M10 10.5 17.5 6.2V15L10 19.3Z" fill="#e5f0f5"/>
+  </g>
+  <circle cx="18" cy="18" r="5.3" fill="#f5f8fa"/>
+  <path d="M18 14.5v7M14.5 18h7" fill="none" stroke="#32834d" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

@@ -10,10 +10,10 @@ if (!name || !argumentsFile || extra.length) {
   console.error('用法：node scripts/call-tool.mjs <工具名> <参数JSON文件> [新建PNG输出文件]');
   process.exit(1);
 }
-const client = new Client({ name: 'phoenix-local-tool-client', version: '0.3.0' });
+const client = new Client({ name: 'phoenix-local-tool-client', version: '0.3.2' });
 const transport = new StdioClientTransport({ command: process.execPath,
   args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url))],
-  env: { ...(process.env.PHOENIX_FREECAD_URL ? { PHOENIX_FREECAD_URL: process.env.PHOENIX_FREECAD_URL } : {}), ...(process.env.PHOENIX_TIMEOUT_MS ? { PHOENIX_TIMEOUT_MS: process.env.PHOENIX_TIMEOUT_MS } : {}) }, stderr: 'inherit' });
+  env: { ...(process.env.PHOENIX_FREECAD_URL ? { PHOENIX_FREECAD_URL: process.env.PHOENIX_FREECAD_URL } : {}), ...(process.env.PHOENIX_TIMEOUT_MS ? { PHOENIX_TIMEOUT_MS: process.env.PHOENIX_TIMEOUT_MS } : {}), ...Object.fromEntries(['PHOENIX_FREECAD_TOOL_SCOPE', 'PHOENIX_DESK_NODE', 'PHOENIX_DESK_CLI', 'PHOENIX_DESK_STATE_DIR', 'PHOENIX_DESK_CHAT_READS'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])) }, stderr: 'inherit' });
 try {
   const args = JSON.parse(await readFile(argumentsFile, 'utf8'));
   await client.connect(transport);

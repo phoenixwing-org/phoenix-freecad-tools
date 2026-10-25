@@ -5,11 +5,16 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const ADDON_NAME = 'PhoenixFreeCADMCP';
-// Recognized only to migrate an owned installation, never as a runtime alias.
-const LEGACY_ADDON_NAME = 'PhoenixMCP';
-export const INSTALL_MARKER = '.phoenix-freecad-mcp-install.json';
-const OWNER = 'phoenix-freecad-mcp';
+export const ADDON_NAME = 'PhoenixFreeCADTools';
+export const INSTALL_MARKER = '.phoenix-freecad-tools-install.json';
+const OWNER = 'phoenix-freecad-tools';
+const CURRENT_IDENTITY = { addon: ADDON_NAME, marker: INSTALL_MARKER, owner: OWNER };
+// Recognized only for one-time migration of an owned tree, never runtime aliases.
+const LEGACY_IDENTITIES = ['PhoenixFreeCADMCP', 'PhoenixMCP'].map((addon) => ({
+  addon, marker: '.phoenix-freecad-mcp-install.json', owner: 'phoenix-freecad-mcp',
+}));
+const IDENTITIES = [CURRENT_IDENTITY, ...LEGACY_IDENTITIES];
+const INSTALL_MARKERS = [...new Set(IDENTITIES.map((identity) => identity.marker))];
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const defaultSource = path.join(packageRoot, 'addon', ADDON_NAME);
 const present = (filename) => { try { fs.lstatSync(filename); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
@@ -25,7 +30,7 @@ function realDirectory(filename) {
 
 /** Snapshot every file and directory; never follow symlinks. Only regular
  * Python bytecode directly inside __pycache__ is ignored, and backups retain it. */
-function snapshot(root) {
+function snapshot(root, markerName = INSTALL_MARKER) {
   realDirectory(root);
   const files = Object.create(null), directories = [];
   function walk(folder, prefix = '') {
@@ -34,7 +39,7 @@ function snapshot(root) {
       if (!safeRelative(relative)) throw new Error('插件包含不安全路径。');
       const filename = path.join(folder, name), stat = fs.lstatSync(filename);
       if (stat.isSymbolicLink()) throw new Error('插件包含符号链接，保留原目录：' + relative);
-      if (relative === INSTALL_MARKER) { if (!stat.isFile()) throw new Error('安装标记不是普通文件。'); continue; }
+      if (relative === markerName) { if (!stat.isFile()) throw new Error('安装标记不是普通文件。'); continue; }
       if (stat.isDirectory() && name === '__pycache__') {
         for (const cached of fs.readdirSync(filename)) {
           const cachedStat = fs.lstatSync(path.join(filename, cached));
@@ -53,23 +58,65 @@ function snapshot(root) {
   return { files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))), directories: directories.sort() };
 }
 
-function readOwned(root, expectedAddon = ADDON_NAME) {
+// The Python-only addon has its own NOTICE and instructions. Never copy the
+// Node package's broader NOTICE into an independently installed addon tree.
+const PACKAGED_DOCUMENTS = {
+  LICENSE: 'LICENSE', NOTICE: 'docs/ADDON-NOTICE.txt', 'README.md': 'docs/ADDON-MANAGED-INSTALL.md',
+};
+
+function packagedDocument(root, relative) {
+  let filename = root;
+  const parts = relative.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    filename = path.join(filename, parts[i]);
+    let stat;
+    try { stat = fs.lstatSync(filename); }
+    catch { throw new Error('缺少必需分发材料：' + relative); }
+    if (stat.isSymbolicLink()) throw new Error('分发材料不允许符号链接：' + relative);
+    if (i < parts.length - 1 ? !stat.isDirectory() : !stat.isFile()) throw new Error('分发材料类型无效：' + relative);
+    if (i === parts.length - 1 && (stat.size === 0 || stat.size > 2 * 1024 * 1024)) throw new Error('分发材料大小无效：' + relative);
+  }
+  let data;
+  try { data = fs.readFileSync(filename); }
+  catch { throw new Error('无法读取分发材料：' + relative); }
+  if (data.length === 0 || data.length > 2 * 1024 * 1024) throw new Error('分发材料大小无效：' + relative);
+  return { filename, hash: createHash('sha256').update(data).digest('hex') };
+}
+
+function installInputs(source, packaged) {
+  const desired = snapshot(source);
+  const inputs = Object.assign(Object.create(null), Object.fromEntries(Object.keys(desired.files).map(name => [name, path.join(source, name)])));
+  if (packaged) {
+    const root = realDirectory(packageRoot);
+    for (const [target, relative] of Object.entries(PACKAGED_DOCUMENTS)) {
+      const document = packagedDocument(root, relative);
+      if (desired.directories.includes(target)) throw new Error('插件源码与分发材料冲突：' + target);
+      if (desired.files[target] && desired.files[target] !== document.hash) throw new Error('插件源码与分发材料冲突：' + target);
+      desired.files[target] = document.hash;
+      inputs[target] = document.filename;
+    }
+    desired.files = Object.fromEntries(Object.entries(desired.files).sort(([a], [b]) => a.localeCompare(b)));
+  }
+  return { desired, inputs };
+}
+
+function readOwned(root, identity = CURRENT_IDENTITY) {
   realDirectory(root);
-  const filename = path.join(root, INSTALL_MARKER);
+  const filename = path.join(root, identity.marker);
   if (!present(filename) || fs.lstatSync(filename).isSymbolicLink() || !fs.lstatSync(filename).isFile()) {
-    throw new Error('已有 ' + expectedAddon + ' 无本项目安装标记；保留原目录。');
+    throw new Error('已有 ' + identity.addon + ' 无本项目安装标记；保留原目录。');
   }
   let marker;
   try { if (fs.statSync(filename).size > 1024 * 1024) throw new Error(); marker = JSON.parse(fs.readFileSync(filename, 'utf8')); }
   catch { throw new Error('安装标记无效；保留原目录。'); }
-  if (marker?.owner !== OWNER || marker.schema_version !== 1 || marker.addon !== expectedAddon
+  if (marker?.owner !== identity.owner || marker.schema_version !== 1 || marker.addon !== identity.addon
     || !marker.files || typeof marker.files !== 'object' || Array.isArray(marker.files) || !Array.isArray(marker.directories)
-    || !Object.keys(marker.files).length || Object.entries(marker.files).some(([name, hash]) => !safeRelative(name) || name === INSTALL_MARKER || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))
+    || !Object.keys(marker.files).length || Object.entries(marker.files).some(([name, hash]) => !safeRelative(name) || INSTALL_MARKERS.includes(name) || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))
     || marker.directories.some((name) => !safeRelative(name)) || new Set(marker.directories).size !== marker.directories.length) {
     throw new Error('安装标记不属于本项目或清单无效；保留原目录。');
   }
   const expected = { files: Object.fromEntries(Object.entries(marker.files).sort(([a], [b]) => a.localeCompare(b))), directories: [...marker.directories].sort() };
-  if (!same(snapshot(root), expected)) throw new Error('插件内有用户新增、删除或修改的内容；保留原目录，请先备份并核对。');
+  if (!same(snapshot(root, identity.marker), expected)) throw new Error('插件内有用户新增、删除或修改的内容；保留原目录，请先备份并核对。');
   return { marker, expected };
 }
 
@@ -101,7 +148,7 @@ function context(modDir) {
 }
 
 function storageDirectory(modDir) {
-  const folder = path.join(path.dirname(modDir), '.phoenix-freecad-mcp');
+  const folder = path.join(path.dirname(modDir), '.phoenix-freecad-tools');
   if (present(folder)) realDirectory(folder);
   else fs.mkdirSync(folder, { mode: 0o700 });
   return folder;
@@ -110,25 +157,27 @@ function storageDirectory(modDir) {
 const uniqueName = (prefix) => prefix + '-' + new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID();
 
 export function installAddon({ modDir, sourceDir = defaultSource, dryRun = false } = {}) {
-  const ctx = context(modDir), legacyTarget = path.join(ctx.modDir, LEGACY_ADDON_NAME);
-  if (present(ctx.target) && present(legacyTarget)) throw new Error('新旧插件目录同时存在；保留两者，请先核对安装。');
+  const ctx = context(modDir);
+  const existingIdentities = () => IDENTITIES.filter((identity) => present(path.join(ctx.modDir, identity.addon)));
+  const existing = existingIdentities();
+  if (existing.length > 1) throw new Error('新旧插件目录同时存在；保留所有目录，请先核对安装。');
   const source = realDirectory(sourceDir);
-  if (present(path.join(source, INSTALL_MARKER))) throw new Error('源码目录含安装标记，请使用干净的 addon/' + ADDON_NAME + ' 源码。');
-  const desired = snapshot(source);
+  if (INSTALL_MARKERS.some((marker) => present(path.join(source, marker)))) throw new Error('源码目录含安装标记，请使用干净的 addon/' + ADDON_NAME + ' 源码。');
+  const { desired, inputs } = installInputs(source, sourceDir === defaultSource || source === path.resolve(defaultSource));
   if (!desired.files['InitGui.py']) throw new Error('插件源码缺少 InitGui.py。');
-  const migrating = present(legacyTarget);
-  const previousTarget = migrating ? legacyTarget : ctx.target;
-  const previousName = migrating ? LEGACY_ADDON_NAME : ADDON_NAME;
+  const previousIdentity = existing[0] || CURRENT_IDENTITY;
+  const migrating = previousIdentity !== CURRENT_IDENTITY;
+  const previousTarget = path.join(ctx.modDir, previousIdentity.addon);
   let old;
-  if (present(previousTarget)) {
-    old = readOwned(previousTarget, previousName);
+  if (existing.length) {
+    old = readOwned(previousTarget, previousIdentity);
     if (!migrating && same(old.expected, desired)) {
-      if (present(legacyTarget)) throw new Error('新旧插件目录同时存在；保留两者，请先核对安装。');
+      if (existingIdentities().length !== 1) throw new Error('新旧插件目录同时存在；保留所有目录，请先核对安装。');
       return { ...ctx, action: 'unchanged', dryRun };
     }
   }
   const action = migrating ? 'migrate' : old ? 'update' : 'install';
-  const migration = migrating ? { migratedFrom: legacyTarget } : {};
+  const migration = migrating ? { migratedFrom: previousTarget } : {};
   if (dryRun) return { ...ctx, ...migration, action, dryRun: true, backup: old ? '更新前将在 Mod 目录之外备份旧版本。' : null };
   fs.mkdirSync(ctx.modDir, { recursive: true });
   realDirectory(ctx.modDir);
@@ -140,22 +189,26 @@ export function installAddon({ modDir, sourceDir = defaultSource, dryRun = false
     for (const relative of Object.keys(desired.files)) {
       const filename = path.join(stage, relative);
       fs.mkdirSync(path.dirname(filename), { recursive: true });
-      fs.copyFileSync(path.join(source, relative), filename, fs.constants.COPYFILE_EXCL);
+      fs.copyFileSync(inputs[relative], filename, fs.constants.COPYFILE_EXCL);
     }
     if (!same(snapshot(stage), desired)) throw new Error('复制期间源码变化；未替换插件。');
     const marker = { schema_version: 1, owner: OWNER, addon: ADDON_NAME, installed_at: new Date().toISOString(), ...desired };
     fs.writeFileSync(path.join(stage, INSTALL_MARKER), JSON.stringify(marker, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     if (old) {
-      if (present(ctx.target) && present(legacyTarget)) throw new Error('安装期间新旧目录同时出现；保留两者。');
-      const current = readOwned(previousTarget, previousName);
+      const currentIdentities = existingIdentities();
+      if (currentIdentities.length !== 1 || currentIdentities[0] !== previousIdentity) throw new Error('安装期间新旧目录同时出现或原目录变化；保留现有目录。');
+      const current = readOwned(previousTarget, previousIdentity);
       if (!same(current.expected, old.expected) || !same(current.marker, old.marker)) throw new Error('安装期间旧插件已变化；保留原目录。');
-      backup = path.join(storage, uniqueName('backup-' + previousName));
+      backup = path.join(storage, uniqueName('backup-' + previousIdentity.addon));
       fs.renameSync(previousTarget, backup);
-      try { readOwned(backup, previousName); }
-      catch (error) { fs.renameSync(backup, previousTarget); backup = undefined; throw error; }
+      try { readOwned(backup, previousIdentity); }
+      catch (error) {
+        if (!present(previousTarget)) { fs.renameSync(backup, previousTarget); backup = undefined; }
+        throw error;
+      }
     }
     try {
-      if (present(ctx.target) || present(legacyTarget)) throw new Error('安装期间目的目录已出现；保留现有目录。');
+      if (existingIdentities().length) throw new Error('安装期间目的目录已出现；保留现有目录。');
       fs.renameSync(stage, ctx.target);
     } catch (error) {
       if (backup && !present(previousTarget)) { fs.renameSync(backup, previousTarget); backup = undefined; }
@@ -189,7 +242,7 @@ export function addonCli(operation, args = process.argv.slice(2)) {
     for (let i = 0; i < args.length; i++) {
       const argument = args[i];
       if (argument === '--help' || argument === '-h') {
-        console.log(`用法：node scripts/${operation === 'install' ? 'install' : 'uninstall'}-addon.mjs [--mod-dir /absolute/FreeCAD/Mod] [--dry-run]\n默认仅自动使用 macOS 已存在的 FreeCAD/v1-1/Mod。备份位于 Mod 目录外的 .phoenix-freecad-mcp。`);
+        console.log(`用法：node scripts/${operation === 'install' ? 'install' : 'uninstall'}-addon.mjs [--mod-dir /absolute/FreeCAD/Mod] [--dry-run]\n默认仅自动使用 macOS 已存在的 FreeCAD/v1-1/Mod。备份位于 Mod 目录外的 .phoenix-freecad-tools。`);
         return;
       }
       if (argument === '--dry-run') dryRun = true;

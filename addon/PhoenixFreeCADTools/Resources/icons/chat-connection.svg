@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: Apache-2.0; original Phoenix Tools artwork -->
+  <title>AI 聊天</title>
+  <path d="M4 3.5h16a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H10L5 21v-3.5H4A1.5 1.5 0 0 1 2.5 16V5A1.5 1.5 0 0 1 4 3.5Z" fill="#e1f2eb" stroke="#618674" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="m12.3 6.5 1.1 2.7 2.8 1.1-2.8 1.1-1.1 2.7-1.1-2.7-2.7-1.1 2.7-1.1Z" fill="#63a58a"/>
+  <circle cx="6.2" cy="10.5" r=".8" fill="#618674"/><circle cx="18.3" cy="10.5" r=".8" fill="#618674"/>
+</svg>

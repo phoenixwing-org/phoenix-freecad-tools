@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Phoenix Tools</name>
+  <description>原创本机 JSON 桥接：模型查询、测量、视图、图纸检查与显式 Python 脚本。</description>
+  <version>0.3.2</version>
+  <date>2026-10-25</date>
+  <license>Apache-2.0</license>
+  <icon>Resources/icons/phoenix-wing-mark.svg</icon>
+  <url type="repository" branch="develop">https://github.com/phoenixwing-org/phoenix-freecad-tools</url>
+  <content>
+    <workbench>
+      <classname>PftWorkbench</classname>
+      <name>Phoenix Tools</name>
+      <subdirectory>./</subdirectory>
+    </workbench>
+  </content>
+</package>

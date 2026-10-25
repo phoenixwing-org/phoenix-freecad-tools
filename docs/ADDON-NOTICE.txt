@@ -1,0 +1,18 @@
+Phoenix FreeCAD Tools — Python Addon distribution
+Copyright 2026 Phoenix contributors
+
+Original application code is licensed under Apache-2.0.
+FreeCAD is an external application and is not distributed in this ZIP.
+The Node MCP service, SDK dependencies and verification images are not included.
+
+Phoenix organization mark:
+Copyright 2024-2026 PhoenixWing contributors. Apache-2.0.
+Source: phoenix-wing/assets/phoenix-wing-mark.svg (unchanged).
+
+BOM label rule port:
+Phoenix Wing CAD Core
+Copyright 2025-2026 上海锟钛
+Licensed under the Apache License, Version 2.0.
+Source: phoenix-wing/packages/cad-core/src/index.ts, pnwComposeBomLabel.
+The small rule is ported to the standalone Python workbench helper; this is not
+an inclusion of or runtime dependency on the TypeScript package or full Tool app.

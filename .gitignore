@@ -14,3 +14,13 @@ coverage/
 __pycache__/
 *.py[cod]
 archives/
+artifacts/
+
+# Runtime databases and query logs are private inputs, never source fixtures.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+*.jsonl

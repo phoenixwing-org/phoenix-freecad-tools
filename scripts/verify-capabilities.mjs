@@ -11,8 +11,8 @@ import { fileURLToPath } from 'node:url';
 const DOCUMENT = 'PhoenixParametricDemo';
 const PAGE = 'PhoenixDemoPage';
 const TOOLS = ['get_capabilities', 'get_connection_status', 'list_documents', 'fit_view', 'set_axonometric_view',
-  'get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry',
-  'list_drawing_pages', 'inspect_drawing_page', 'set_view', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'apply_part_changes'];
+  'get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design',
+  'list_drawing_pages', 'inspect_drawing_page', 'set_view', 'set_appearance', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'apply_part_changes', 'request_part_change_approval', 'get_part_change_status'];
 const TIMEOUT = { timeout: 20_000, maxTotalTimeout: 20_000 };
 const USAGE = '用法：node scripts/verify-capabilities.mjs [--image <新PNG文件>] [--report <新JSON文件>]';
 
@@ -98,18 +98,18 @@ async function main(args) {
   const output = options(args);
   await requireNewFile(output.image);
   await requireNewFile(output.report);
-  const client = new Client({ name: 'phoenix-capabilities-verifier', version: '0.3.0' });
+  const client = new Client({ name: 'phoenix-capabilities-verifier', version: '0.3.2' });
   const transport = new StdioClientTransport({
     command: process.execPath, args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url))],
     env: { ...(process.env.PHOENIX_FREECAD_URL ? { PHOENIX_FREECAD_URL: process.env.PHOENIX_FREECAD_URL } : {}),
-      PHOENIX_TIMEOUT_MS: '20000' }, stderr: 'ignore',
+      PHOENIX_TIMEOUT_MS: '20000', PHOENIX_FREECAD_TOOL_SCOPE: 'full' }, stderr: 'ignore',
   });
   let step = 'connect';
   try {
     await client.connect(transport, TIMEOUT);
     step = 'list_tools';
     const tools = (await client.listTools({}, TIMEOUT)).tools.map(tool => tool.name).sort();
-    requireThat(JSON.stringify(tools) === JSON.stringify([...TOOLS].sort()), '必须发现当前 21 个 MCP 工具。');
+    requireThat(JSON.stringify(tools) === JSON.stringify([...TOOLS].sort()), '必须发现当前 full 范围的25个 MCP 工具。');
     const calls = [];
     const call = async (name, arguments_ = {}) => {
       step = name;
@@ -127,8 +127,8 @@ async function main(args) {
       return { data, response };
     };
     const { data: status } = await call('get_connection_status');
-    requireThat(status.protocol_version === 1 && status.running === true && status.addon_version === '0.3.0', '需要运行中的 0.3.0 协议 v1 插件。');
-    const needed = ['get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'list_drawing_pages', 'inspect_drawing_page', 'view_standard', 'capture_view'];
+    requireThat(status.protocol_version === 1 && status.running === true && status.addon_version === '0.3.2', '需要运行中的 0.3.2 协议 v1 插件。');
+    const needed = ['get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design', 'list_drawing_pages', 'inspect_drawing_page', 'view_standard', 'capture_view'];
     requireThat(Array.isArray(status.supported_methods) && needed.every(name => status.supported_methods.includes(name)), '插件未声明全部待验能力。');
 
     const { data: document } = await call('get_document_info', { document: DOCUMENT });
