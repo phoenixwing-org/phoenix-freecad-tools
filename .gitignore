@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.env
+.env.*
+!.env.example
+*.FCStd
+*.FCStd1
+*.pdf
+*.log
+.DS_Store
+
+__pycache__/
+*.py[cod]
+archives/

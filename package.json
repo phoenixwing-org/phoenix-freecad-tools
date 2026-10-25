@@ -1,0 +1,49 @@
+{
+  "name": "phoenix-freecad-mcp",
+  "version": "0.1.0",
+  "description": "Phoenix 的 Node.js/TypeScript FreeCAD MCP 服务",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "phoenix-freecad-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "docs",
+    "addon/PhoenixFreeCADMCP/*.py",
+    "addon/PhoenixFreeCADMCP/package.xml",
+    "scripts/*.mjs",
+    "addon/PhoenixFreeCADMCP/Resources/icons/*.svg"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "check": "node dist/cli.js --check",
+    "prepack": "npm run build",
+    "demo": "node dist/cli.js --demo",
+    "addon:install": "node scripts/install-addon.mjs",
+    "addon:uninstall": "node scripts/uninstall-addon.mjs",
+    "test:python": "python3 -m unittest discover -s tests/python -v",
+    "verify:mcp": "node scripts/verify-mcp.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,19 @@
+Phoenix FreeCAD MCP
+Copyright 2026 Phoenix contributors
+
+Original application code is licensed under Apache-2.0.
+
+Reference projects:
+- modelcontextprotocol/typescript-sdk: official MCP SDK and examples.
+  Runtime dependency @modelcontextprotocol/server; consult its distributed licenses.
+- phoenix-desk-tools / phoenix-wing (Apache-2.0): future integration reference.
+  Not dependencies of this minimal example.
+- phoenix-freecad-study (MIT): external public verification models.
+  Models are not copied into this package. A derived verification image is included
+  under docs/images with the original MIT notice in STUDY-LICENSE.txt.
+
+FreeCAD is an external application and is not distributed with this package.
+
+Phoenix organization mark:
+Copyright 2024-2026 PhoenixWing contributors. Apache-2.0.
+Source: phoenix-wing/assets/phoenix-wing-mark.svg (unchanged).
