@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
-  <name>Phoenix FreeCAD MCP</name>
-  <description>原创本机 JSON 桥接：使用现有聊天检测连接、查看文档、适合窗口与轴测。</description>
-  <version>0.1.0</version>
+  <name>Phoenix Tools</name>
+  <description>原创本机 JSON 桥接：模型查询、测量、视图、图纸检查与显式 Python 脚本。</description>
+  <version>0.2.1</version>
   <date>2026-10-24</date>
   <license>Apache-2.0</license>
   <content>
     <workbench>
       <classname>PhoenixFreeCADMCPWorkbench</classname>
-      <name>Phoenix FreeCAD</name>
+      <name>Phoenix Tools</name>
       <subdirectory>./</subdirectory>
     </workbench>
   </content>

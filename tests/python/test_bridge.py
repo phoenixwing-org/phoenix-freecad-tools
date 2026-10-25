@@ -23,7 +23,7 @@ class ProtocolTests(unittest.TestCase):
         status = bridge.process_request({"method": "get_status", "params": {}})
         self.assertTrue(status["ok"])
         self.assertEqual(status["data"]["protocol_version"], 1)
-        self.assertEqual(status["data"]["addon_version"], "0.1.0")
+        self.assertEqual(status["data"]["addon_version"], "0.2.1")
         self.assertFalse(status["data"]["running"])
 
     def test_rejects_code_unknown_fields_and_wrong_types(self):
@@ -46,6 +46,28 @@ class ProtocolTests(unittest.TestCase):
             result = bridge.process_request({"method": "view_axonometric", "params": {"docName": "Doc", "fit": False}})
             self.assertTrue(result["ok"])
             dispatch.assert_called_once_with("view_axonometric", {"docName": "Doc", "fit": False})
+
+    def test_script_replay_queries_cached_result_without_dispatch(self):
+        params = {"requestId":"bridge-replay", "code":"App.counter += 1\nresult = App.counter"}
+        app = types.SimpleNamespace(counter=0)
+        with patch.object(bridge,"_dispatch_gui",side_effect=lambda method,args:bridge._runtime.execute(args,app,types.SimpleNamespace(),bridge.BridgeError)) as dispatch:
+            first = bridge.process_request({"method":"execute_script","params":params})
+            again = bridge.process_request({"method":"execute_script","params":params})
+            queried = bridge.process_request({"method":"get_script_status","params":{"requestId":"bridge-replay"}})
+        self.assertTrue(first["ok"])
+        self.assertEqual(first,again)
+        self.assertEqual(first,queried)
+        self.assertEqual(app.counter,1)
+        dispatch.assert_called_once()
+
+    def test_script_queued_and_started_timeouts_have_distinct_states(self):
+        for code, expected in [("GUI_QUEUE_TIMEOUT","cancelled"),("GUI_TIMEOUT","starting")]:
+            request = "timeout-" + code
+            with patch.object(bridge,"_dispatch_gui",side_effect=bridge.BridgeError(code,"timeout")):
+                result = bridge.process_request({"method":"execute_script","params":{"requestId":request,"code":"pass"}})
+            self.assertFalse(result["ok"])
+            queried = bridge.process_request({"method":"get_script_status","params":{"requestId":request}})
+            self.assertEqual(queried["data"]["state"],expected)
 
     def test_business_error_retains_machine_code(self):
         with patch.object(bridge, "_dispatch_gui", side_effect=bridge.BridgeError("GUI_QUEUE_TIMEOUT", "timeout")):
@@ -72,10 +94,10 @@ class WorkbenchLoaderTests(unittest.TestCase):
                 if include_file:
                     namespace["__file__"] = str(init_gui)
                 exec(compile(init_gui.read_text(), str(init_gui), "exec"), namespace)
-                self.assertEqual(namespace["_addon_dir"], str(BRIDGE_PATH.parent))
+                self.assertEqual(sys.modules["phoenix_workbench_gui"]._addon_dir, str(BRIDGE_PATH.parent))
             start.assert_not_called()
         self.assertEqual(len(registered), 2)
-        self.assertEqual(registered[0].MenuText, "Phoenix FreeCAD")
+        self.assertEqual(registered[0].MenuText, "Phoenix Tools")
 
 
 class GuiOperationTests(unittest.TestCase):
@@ -106,6 +128,11 @@ class GuiOperationTests(unittest.TestCase):
         result = bridge._perform_gui("view_axonometric", {})
         self.assertFalse(result["fit"])
         self.assertEqual(self.calls, ["fit", "axo"])
+
+    def test_legacy_camera_methods_resolve_existing_3d_view_behind_drawing(self):
+        self.gui.getDocument = lambda name: types.SimpleNamespace(activeView=lambda: object(), mdiViewsOfType=lambda kind: [self.view])
+        bridge._perform_gui("view_axonometric", {"fit": True})
+        self.assertEqual(self.calls, ["axo", "fit"])
 
     def test_explicit_document_and_optional_fit(self):
         result = bridge._perform_gui("view_axonometric", {"docName": "Other", "fit": True})

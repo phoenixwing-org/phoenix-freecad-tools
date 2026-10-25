@@ -1,50 +1,64 @@
-# 原型验证记录
+# 0.2.1 原型验证记录
 
-日期：2026-10-24。平台：macOS，Node 22.23.1，FreeCAD 1.1.0，嵌入 Python 3.11.14。
+日期：2026-10-24。平台：macOS，Node 22.23.1，FreeCAD 1.1.0，嵌入 Python 3.11.14。链路为官方 MCP SDK 的 stdio → Node.js → 本机 JSON HTTP → FreeCAD Qt 主线程。
 
-## 自动化验证
+## 自动化与包检查
 
-- 在最终项目目录独立执行 `npm ci` 与 TypeScript 构建，通过。
-- Node 测试 **10/10 通过**：真实 stdio MCP 握手、工具发现、相机调用、错误回传、连接异常与安装保护。
-- Python 测试 **19/19 通过**：协议、HTTP、浏览器请求拦截、视图stub、GUI线程派发、排队取消、运行超时与防重入。
-- 发布包清单经复核，排除 Python 缓存、模型文件、个人路径、凭据和本地配置。
+最终构建与类型检查通过，Node **21/21**、Python **106/106** 测试通过。npm 实际包按文件白名单复核，排除模型、凭据、运行状态和 Python 缓存。本次仅本地提交、标签 `v0.2.0`、源码 ZIP 和 npm 包归档。没有运行远端 CI，也没有做 Windows/Linux 的真实 GUI 安装验收。
 
-## 真实 FreeCAD 联调
+## 真实 MCP
 
-独立 `PhoenixFreeCADMCP` 已安装，并在当前 FreeCAD 中启动于 `127.0.0.1:9876`，无重启。工作台注册成功，用户已确认看到界面。工作台界面仅提供服务启动/停止，fit和轴测作为MCP调用能力。
+插件 `PhoenixFreeCADMCP` 的协议为 1、实现为 0.2.0，桥接运行于 `127.0.0.1:9876`。Node 发现 16 个工具。当前聊天通过真正的 MCP stdio helper 调用，另一聊天也完成只读联测；旧桥接已停止、备份并移出 FreeCAD 加载目录，旧 Codex 服务条目已移除。
 
-通过官方 TypeScript MCP 客户端完成以下真实链路：
+文档、对象、属性、空选择、实体及子元素测量、图纸来源、标准视图和 PNG 内容逐项核验。高级脚本实测了同 ID 同代码只执行一次、状态查询结果一致及同 ID 不同代码拒绝。测试时未重启 FreeCAD，没有保存或修改原有生产工程。
 
-`MCP stdio → Node.js 服务 → JSON HTTP → FreeCAD Qt 主线程`。
+只读联测发现并修正了单面负“体积”：非实体现在返回不适用。原生包围盒仅作内核包络报告，明确提示近似误差和精确间隙边界。量值按真实八维 Signature 返回与内部 Value 一致的单位，8 mm Pad 已核对；不将原生调试字符串当单位，也不将显示单位配给未换算的内部值。工程图前台时，相机可使用目标文档唯一的已有三维视图，多候选拒绝猜测。截图需在目标文档的三维视图处于前台时执行；后台文档可能生成空白 PNG，因此改为明确拒绝；窗口显示并刷新后，前台重验图像已目视确认包含四孔板。
 
-已发现5个工具，连接状态与文档查询成功；对指定公开样例执行 `set_axonometric_view` 和 `fit_view`，均成功返回目标文档。随后独立读取相机方向，并检查实际渲染图，确认模型以轴测图适合窗口显示。
+## 新建公开参数板
 
-公开样例来自 `phoenix-freecad-study`，相对路径为 `04-自动出图/样本/8101.001-H-PX-连接板.FCStd`。样例源文件 SHA256 前后均为：
+`examples/parametric_plate.py` 创建独立、未保存的 `PhoenixParametricDemo`：
 
-```text
-74741befb86a263fe0e35590651cc01822d98bff682a2a9948dcb16f5ebfbbed
-```
+- 60 × 40 mm，4 × Ø6 mm 通孔，Body / OutlineSketch / Pad / HoleSketch / Pocket 可编辑。
+- 两个草图完全约束，厚度从 6 改为 8 mm 后孔平面随表达式更新。
+- 最终单个有效实体，边界为 X ±30、Y ±20、Z 0–8 mm。
+- 实测体积 18295.221315766135 mm³，与解析值误差小于 1e-8 mm³。
 
-未保存或修改模型文件。在验收检查时，预先记录的其他文档对象名称、标签及状态保持一致；不记录那些工程的名称或路径。机器可读结果见 [verification.json](verification.json)。
+## 受控 STEP 重建
 
-![公开连接板轴测图](images/study-axonometric.png)
+`examples/step_parametric.py` 实测临时 STEP 导出、重新导入 BRep 和已知参数的特征重建。导入对象没有原始草图或特征历史；重建结果核对有效实体、尺寸、体积及双向布尔差，几何差体积为零。临时 STEP 已清理，演示文档未保存。
 
-初次以 White 模式导出的预览为空白，未纳入交付。刷新当前视图并使用 Current 背景导出后，图像已人工确认。截图导出不是本版 MCP 工具。
+这个案例验证已知参数重建路径，不包括任意 STEP 的自动特征识别或原设计树恢复。
 
-## Codex 适配边界
+## TechDraw 与重开
 
-已添加独立 `phoenix-freecad` 配置，CLI读取确认其为启用的stdio服务，现有MCP配置保留。真实协议与FreeCAD调用通过。尚未另开Codex模型会话验证自然语言选工具，客户端需重新加载MCP后使用。
+`examples/techdraw_plate.py` 在参数板演示文档创建 A4 横向页面，使用 FreeCAD 自带图框，生成 Front / Top / Right / Iso 四视图。Ø6 尺寸引用真实投影圆边 `Edge4`，原生测量为 6 mm。
 
-## 命名迁移复验（2026-10-24）
+PDF、SVG、PNG 和 FCStd 副本均实际导出；副本独立打开后，模板、四视图位置及 6 mm 关联尺寸保留，验证副本随后关闭。FCStd 内置缩略图存在、可解码且非单色，源模型几何保持。
 
-- 构建通过；Node 16项、Python 19项测试通过，包含新增的安装身份迁移与回滚测试。
-- 合法旧安装已完整校验并移到 Mod 外备份。当前 Mod 仅保留新 `PhoenixFreeCADMCP` 安装目录。
-- 当前会话未重启，活动工作台为 `PhoenixFreeCADMCPWorkbench`，显示名为 `Phoenix FreeCAD`；仅有 `PhoenixTools_StartMCP` / `PhoenixTools_StopMCP` 服务按钮。
-- 新 Python 模块从新安装目录加载，状态返回 `addon_name: PhoenixFreeCADMCP`、`running: true`，端口仍为9876。
-- 旧工作台已注销，当前会话遗留的旧命令对象已禁用；历史控制台文本保持不变。
-- npm 实际打包清单包含新插件、模块和logo，不含旧目录和Python缓存。历史v0.1.0归档保留原样。
-- 项目目录改为 `phoenix-freecad-tools`，npm/CLI 身份保持稳定；Codex 的既有服务条目已指向新目录入口。新增零件与图纸能力仅列入计划，不计为已通过的功能。
+实际 PDF 经 Poppler 渲染目视检查，四视图分离、标注清晰，无视图遮挡或越界。首次发现原生页面初始化重置位置后，已将布局应用移到初始化之后，并增加导出前与重开后的坐标断言。这是公开演示验收，不是生产图纸审签。
 
-## 已知边界
+## 工作台原生回归
 
-首版只含状态、文档列表和相机操作，不支持模型写入、任意代码、截图、自动启动或内嵌聊天。Windows/Linux 尚无真实GUI安装验收；CI配置已提供，本次未运行远端CI。
+显示名为 **Phoenix Tools**。单命令 `PhoenixTools_ToggleMCP` 按真实状态显示绿色三角“启动 MCP · 已停止”或红色方块“停止 MCP · 运行中”，只对自身按钮启用图标旁文字。
+
+`examples/workbench_tools_demo.py` 在新建人工零件中实测：
+
+- 缺失的五个正式字符串属性初始化为空；原生撤销移除、重做恢复。
+- 从人工 Label 保守推荐 PartNumber / PartVersion / PartName，填写后修正 Label。
+- 两个 App::Link 与直接来源完全同名，撤销恢复旧名称、重做恢复新名称。
+- 仅在同步事务内临时启用重复 Label，原有偏好值或缺失状态精确还原；不使用低层恢复接口。
+- 三个实际 Qt 对话框已构造并模拟取消，取消后对象快照保持。没有通过点击确认修改生产工程。
+
+Controller 在实际 Label 不等于预览时整笔回滚；测试另覆盖唯一性自动编号、预览失效、表达式和冲突、Link 来源保护、偏好异常恢复及后台线程拒绝。实际安装启动时发现的 FreeCAD globals/locals 入口隔离问题已修复，并有引导回归。
+
+## 保护范围与后续
+
+原有工程的对象名称、标签与状态对照基线核验；不把工程名、文件路径或聊天 ID 写入开源记录。另一聊天只读联测另外核对了正式文件指纹保持。当前能力边界见 [协议](PROTOCOL.md)；中英文切换、复杂特征、通用写入工具、内嵌聊天及大型 Tool 集成仍见 [TODO](TODO.md)。
+
+历史 0.1.0 证据保留在 [verification.json](verification.json) 和已有本地标签中，其五工具与旧显示名称不代表当前版本。0.2.0 完整演示机器证据见 [verification-v0.2.json](verification-v0.2.json)；0.2.1 补丁另行记录最终重名检查与事务顺序。
+
+## 0.2.1 最终重名复核补丁
+
+Link 批量写入后，在临时允许重复仍开启时复核实际 Label、直接来源身份/Label 与最终重名集合。只允许直接来源及同来源 Link 同名；无关对象或不同来源冲突整笔回滚，不静默编号。失败先回滚事务，再恢复偏好；成功完成检查并恢复偏好后才提交。新增回调引入冲突/来源变更和事件顺序测试。
+
+最终构建、Node 21 项、Python 106 项通过，原生两 Link 同名、撤销重做、偏好还原和三个窗口取消复验通过。0.2.0 原始归档保留；0.2.1 另行本地提交、标签与 ZIP/npm 归档。机器证据见 [verification-v0.2.1.json](verification-v0.2.1.json)。

@@ -6,16 +6,32 @@ or alter a document. Call start_server() from FreeCAD's Python console or menu.
 """
 
 import itertools
+import importlib.util
+from pathlib import Path
 import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-ADDON_VERSION = "0.1.0"
+def _load_helper(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_operations = _load_helper("phoenix_freecad_operations")
+_runtime = _load_helper("phoenix_freecad_runtime")
+_OPERATION_METHODS = {
+    "get_document_info", "list_objects", "get_object_info", "get_selection",
+    "measure_geometry", "list_drawing_pages", "inspect_drawing_page", "view_standard",
+}
+SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS)
+ADDON_VERSION = "0.2.1"
 PROTOCOL_VERSION = 1
 DEFAULT_PORT = 9876
-MAX_PAYLOAD_BYTES = 65536
+MAX_PAYLOAD_BYTES = 262144
 GUI_TIMEOUT_SECONDS = 15.0
 
 _state_lock = threading.RLock()
@@ -61,6 +77,8 @@ def get_status():
             "protocol_version": PROTOCOL_VERSION,
             "addon_name": "PhoenixFreeCADMCP",
             "addon_version": ADDON_VERSION,
+            "supported_methods": SUPPORTED_METHODS,
+            "script_session_id": _runtime.SESSION_ID,
             "running": bool(running),
             "stopping": bool(_stop_thread is not None and _stop_thread.is_alive()),
             "host": "127.0.0.1",
@@ -73,12 +91,14 @@ def _validate_request(payload):
     if not isinstance(payload, dict) or set(payload) - {"method", "params"}:
         raise BridgeError("INVALID_REQUEST", "请求必须是仅包含 method 和 params 的 JSON 对象。")
     method = payload.get("method")
-    allowed = {"ping", "get_status", "list_documents", "view_fit", "view_axonometric"}
+    allowed = set(SUPPORTED_METHODS)
     if not isinstance(method, str) or method not in allowed:
         raise BridgeError("METHOD_NOT_FOUND", "该方法未开放；不支持任意代码或任意 FreeCAD 命令。")
     params = payload.get("params", {})
     if not isinstance(params, dict):
         raise BridgeError("INVALID_PARAMS", "params 必须是 JSON 对象。")
+    if _operations.validate(method, params, BridgeError) or _runtime.validate(method, params, BridgeError):
+        return method, params
     keys = {"docName"} if method == "view_fit" else {"docName", "fit"} if method == "view_axonometric" else set()
     if set(params) - keys:
         raise BridgeError("INVALID_PARAMS", "参数包含未支持的字段。")
@@ -95,6 +115,12 @@ def _perform_gui(method, params):
     import FreeCAD as App
     import FreeCADGui as Gui
 
+    if method in _OPERATION_METHODS:
+        return _operations.perform(method, params, App, Gui, BridgeError)
+    if method == "execute_script":
+        return _runtime.execute(params, App, Gui, BridgeError)
+    if method == "capture_view":
+        return _runtime.capture(params, App, Gui, BridgeError)
     if method == "list_documents":
         return list(App.listDocuments().keys())
     doc_name = params.get("docName")
@@ -109,11 +135,8 @@ def _perform_gui(method, params):
         document = App.ActiveDocument
         if document is None:
             raise BridgeError("NO_ACTIVE_DOCUMENT", "FreeCAD 没有活动文档。")
-    try:
-        gui_document = Gui.getDocument(document.Name)
-        view = gui_document.activeView() if gui_document is not None else None
-    except Exception:
-        raise BridgeError("VIEW_UNAVAILABLE", "该文档没有可用的三维视图。")
+    required = ("fitAll",) if method == "view_fit" else ("viewAxonometric",) + (("fitAll",) if params.get("fit", False) else ())
+    view = _operations._view(document, Gui, BridgeError, required=required)
     if method == "view_fit":
         if view is None or not callable(getattr(view, "fitAll", None)):
             raise BridgeError("VIEW_UNAVAILABLE", "当前视图不支持适合窗口。")
@@ -190,7 +213,7 @@ def _create_gui_dispatcher():
             except BridgeError as error:
                 job.error = error
             except BaseException as error:
-                job.error = BridgeError("GUI_OPERATION_FAILED", "FreeCAD 视图操作失败（%s）。" % type(error).__name__)
+                job.error = BridgeError("GUI_OPERATION_FAILED", "FreeCAD 操作失败（%s）。" % type(error).__name__)
             finally:
                 with _state_lock:
                     if _health["job_id"] == job.id:
@@ -256,6 +279,20 @@ def process_request(payload):
             return _success({"pong": True})
         if method == "get_status":
             return _success(get_status())
+        if method == "get_script_status":
+            return _success(_runtime.status(params["requestId"], BridgeError))
+        if method == "execute_script":
+            fresh, snapshot = _runtime.claim(params, BridgeError)
+            if not fresh:
+                if snapshot["state"] in {"failed", "cancelled"}:
+                    error = snapshot["error"]
+                    raise BridgeError(error["code"], error["message"])
+                return _success(snapshot)
+            try:
+                return _success(_dispatch_gui(method, params))
+            except BridgeError as error:
+                _runtime.dispatch_error(params["requestId"], error)
+                raise
         return _success(_dispatch_gui(method, params))
     except BridgeError as error:
         return _failure(error.code, error.message)
@@ -284,7 +321,7 @@ class _BridgeHttpServer(ThreadingHTTPServer):
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
-    server_version = "PhoenixFreeCADMCP/0.1.0"
+    server_version = "PhoenixFreeCADMCP/0.2.1"
     sys_version = ""
 
     def log_message(self, format, *args):
@@ -295,7 +332,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(5.0)
 
     def _reply(self, status, payload):
-        body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

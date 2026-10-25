@@ -1,6 +1,6 @@
 {
   "name": "phoenix-freecad-mcp",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Phoenix 的 Node.js/TypeScript FreeCAD MCP 服务",
   "type": "module",
   "license": "Apache-2.0",
@@ -20,7 +20,8 @@
     "addon/PhoenixFreeCADMCP/*.py",
     "addon/PhoenixFreeCADMCP/package.xml",
     "scripts/*.mjs",
-    "addon/PhoenixFreeCADMCP/Resources/icons/*.svg"
+    "addon/PhoenixFreeCADMCP/Resources/icons/*.svg",
+    "examples/*.py"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -34,7 +35,8 @@
     "addon:install": "node scripts/install-addon.mjs",
     "addon:uninstall": "node scripts/uninstall-addon.mjs",
     "test:python": "python3 -m unittest discover -s tests/python -v",
-    "verify:mcp": "node scripts/verify-mcp.mjs"
+    "verify:mcp": "node scripts/verify-mcp.mjs",
+    "call": "node scripts/call-tool.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",

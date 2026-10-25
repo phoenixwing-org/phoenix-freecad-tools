@@ -1,0 +1,2335 @@
+{
+  "version": "0.2.0",
+  "date": "2026-10-24",
+  "environment": {
+    "node": "22.23.1",
+    "freecad": "1.1.0",
+    "embedded_python": "3.11.14",
+    "platform": "macOS"
+  },
+  "automated_checks": {
+    "typescript_build": "passed",
+    "typecheck": "passed",
+    "node_tests": {
+      "passed": 21,
+      "failed": 0
+    },
+    "python_tests": {
+      "passed": 102,
+      "failed": 0
+    },
+    "remote_ci_run": false
+  },
+  "mcp_checks": {
+    "summary": {
+      "ok": true,
+      "document": "PhoenixParametricDemo",
+      "counts": {
+        "tools": 16,
+        "objects": 20,
+        "selected": 0,
+        "sketchGeometry": 4,
+        "sketchConstraints": 12,
+        "drawingPages": 1,
+        "views": 4,
+        "dimensions": 1
+      },
+      "actualVolume": 18295.221315766135,
+      "volumeUnit": "mm^3",
+      "boundingBoxMM": {
+        "XMin": -30,
+        "YMin": -20,
+        "ZMin": 0,
+        "XMax": 30,
+        "YMax": 20,
+        "ZMax": 8,
+        "XLength": 60,
+        "YLength": 40,
+        "ZLength": 8
+      },
+      "featureFieldUnits": {
+        "padLength": {
+          "value": 8,
+          "unit": "mm",
+          "unitSystem": "freecad_internal",
+          "signature": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "type": "Length"
+        },
+        "sketchGeometry": "mm",
+        "sketchConstraints": [
+          "mm"
+        ],
+        "faceArea": "mm^2"
+      },
+      "pageSourceRefCounts": {
+        "views": 4,
+        "dimensions": 1,
+        "total": 5
+      },
+      "capturePNGSize": 9128
+    },
+    "connection": {
+      "running": true,
+      "protocol_version": 1,
+      "addon_version": "0.2.0"
+    },
+    "calls": [
+      {
+        "tool": "get_document_info",
+        "arguments": {
+          "document": "PhoenixParametricDemo"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "Name": "PhoenixParametricDemo",
+          "Label": "PhoenixParametricDemo",
+          "object_count": 20,
+          "modified": null,
+          "touched": null,
+          "has_saved_file": false,
+          "instance_token": null,
+          "revision": null,
+          "active_body": null,
+          "core_units": {
+            "length": "mm",
+            "angle": "rad"
+          },
+          "display_unit_schema": null,
+          "state": null,
+          "recomputed": false,
+          "warnings": [
+            "当前接口未提供可确认的 Modified 标记；修改状态为 unknown。",
+            "未提供文档实例或修订令牌；这些读结果不能作为写入并发校验。",
+            "部分原生状态不可读取；null 不表示没有错误。"
+          ]
+        }
+      },
+      {
+        "tool": "list_objects",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "offset": 0,
+          "limit": 100
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "objects": [
+            {
+              "Name": "PlateBody",
+              "Label": "PlateBody",
+              "TypeId": "PartDesign::Body",
+              "parents": [],
+              "children": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "OutlineSketch",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pad",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "HoleSketch",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "OutlineSketch",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pad",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "HoleSketch",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "dependents": [],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": {
+                "document": "PhoenixParametricDemo",
+                "object": "Pocket",
+                "external": false
+              }
+            },
+            {
+              "Name": "Origin",
+              "Label": "原点001",
+              "TypeId": "App::Origin",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "X_Axis",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Y_Axis",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Z_Axis",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "XY_Plane",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "XZ_Plane",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "YZ_Plane",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin001",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": false,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "X_Axis",
+              "Label": "X轴",
+              "TypeId": "App::Line",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "Y_Axis",
+              "Label": "Y轴",
+              "TypeId": "App::Line",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "Z_Axis",
+              "Label": "Z轴",
+              "TypeId": "App::Line",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "XY_Plane",
+              "Label": "XY平面",
+              "TypeId": "App::Plane",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "XZ_Plane",
+              "Label": "XZ平面",
+              "TypeId": "App::Plane",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "YZ_Plane",
+              "Label": "YZ平面",
+              "TypeId": "App::Plane",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "Origin001",
+              "Label": "原点",
+              "TypeId": "App::Point",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Origin",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "OutlineSketch",
+              "Label": "OutlineSketch",
+              "TypeId": "Sketcher::SketchObject",
+              "parents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                }
+              ],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pad",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": false,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "Pad",
+              "Label": "Pad",
+              "TypeId": "PartDesign::Pad",
+              "parents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                }
+              ],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "OutlineSketch",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "HoleSketch",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": false,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "HoleSketch",
+              "Label": "HoleSketch",
+              "TypeId": "Sketcher::SketchObject",
+              "parents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                }
+              ],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pad",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pad",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": false,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "Pocket",
+              "Label": "Pocket",
+              "TypeId": "PartDesign::Pocket",
+              "parents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                }
+              ],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "HoleSketch",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pad",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PlateBody",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoFront",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoTop",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoRight",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoIso",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoPage",
+              "Label": "Phoenix public demo - A4",
+              "TypeId": "TechDraw::DrawPage",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoTemplate",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoFront",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoTop",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoRight",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoIso",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoDimension",
+                  "external": false
+                }
+              ],
+              "dependents": [],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoTemplate",
+              "Label": "PhoenixDemoTemplate",
+              "TypeId": "TechDraw::DrawSVGTemplate",
+              "parents": [],
+              "children": [],
+              "dependencies": [],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoPage",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Touched"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoFront",
+              "Label": "Front",
+              "TypeId": "TechDraw::DrawViewPart",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoPage",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoTop",
+              "Label": "Top",
+              "TypeId": "TechDraw::DrawViewPart",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoDimension",
+                  "external": false
+                },
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoPage",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoRight",
+              "Label": "Right",
+              "TypeId": "TechDraw::DrawViewPart",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoPage",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoIso",
+              "Label": "Iso",
+              "TypeId": "TechDraw::DrawViewPart",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoPage",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            },
+            {
+              "Name": "PhoenixDemoDimension",
+              "Label": "PhoenixDemoDimension",
+              "TypeId": "TechDraw::DrawViewDimension",
+              "parents": [],
+              "children": [],
+              "dependencies": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoTop",
+                  "external": false
+                }
+              ],
+              "dependents": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoPage",
+                  "external": false
+                }
+              ],
+              "relationships_truncated": false,
+              "visibility": true,
+              "state": [
+                "Up-to-date"
+              ],
+              "tip": null
+            }
+          ],
+          "offset": 0,
+          "limit": 100,
+          "total": 20,
+          "has_more": false,
+          "warnings": []
+        }
+      },
+      {
+        "tool": "get_object_info",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "object": "Pad",
+          "properties": [
+            "Length",
+            "Profile"
+          ]
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "object": {
+            "Name": "Pad",
+            "Label": "Pad",
+            "TypeId": "PartDesign::Pad",
+            "parents": [
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "PlateBody",
+                "external": false
+              }
+            ],
+            "children": [],
+            "dependencies": [
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "OutlineSketch",
+                "external": false
+              }
+            ],
+            "dependents": [
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "HoleSketch",
+                "external": false
+              },
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "PlateBody",
+                "external": false
+              },
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "Pocket",
+                "external": false
+              }
+            ],
+            "relationships_truncated": false,
+            "visibility": false,
+            "state": [
+              "Up-to-date"
+            ],
+            "tip": null
+          },
+          "properties": {
+            "Length": {
+              "kind": "quantity",
+              "value": 8,
+              "unit": "mm",
+              "unit_signature": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "unit_type": "Length",
+              "unit_system": "freecad_internal"
+            },
+            "Profile": [
+              {
+                "kind": "object_reference",
+                "document": "PhoenixParametricDemo",
+                "object": "OutlineSketch"
+              },
+              []
+            ]
+          },
+          "property_names": [
+            "AddSubShape",
+            "AllowMultiFace",
+            "AlongSketchNormal",
+            "BaseFeature",
+            "Direction",
+            "ExpressionEngine",
+            "Label",
+            "Label2",
+            "Length",
+            "Length2",
+            "Midplane",
+            "Offset",
+            "Offset2",
+            "Placement",
+            "PreviewShape",
+            "Profile",
+            "ReferenceAxis",
+            "Refine",
+            "Reversed",
+            "Shape",
+            "ShapeMaterial",
+            "SideType",
+            "Suppressed",
+            "SuppressedShape",
+            "TaperAngle",
+            "TaperAngle2",
+            "Type",
+            "Type2",
+            "UpToFace",
+            "UpToFace2",
+            "UpToShape",
+            "UpToShape2",
+            "UseCustomVector",
+            "Visibility"
+          ],
+          "property_count": 34,
+          "placement": {
+            "kind": "placement",
+            "base": {
+              "kind": "vector",
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "translation_unit": "mm",
+            "rotation": {
+              "kind": "rotation",
+              "axis": {
+                "x": 0,
+                "y": 0,
+                "z": 1
+              },
+              "angle": 0,
+              "angle_unit": "rad"
+            }
+          },
+          "geometry": {
+            "shape_type": "Solid",
+            "bounding_box": {
+              "XMin": -30,
+              "YMin": -20,
+              "ZMin": 0,
+              "XMax": 30,
+              "YMax": 20,
+              "ZMax": 8,
+              "XLength": 60,
+              "YLength": 40,
+              "ZLength": 8
+            },
+            "length": 864,
+            "area": 6400,
+            "volume": 19200,
+            "volume_applicable": true,
+            "bounding_box_source": "native_shape_bound_box",
+            "bounding_box_precision": "kernel_enclosure_not_exact_clearance",
+            "bounding_box_error_bound_mm": null,
+            "geometric_centroid": {
+              "x": 8.152668729694472e-17,
+              "y": -4.33389500334003e-17,
+              "z": 4
+            },
+            "radius": null,
+            "radius_source": null,
+            "geometry_type": null,
+            "counts": {
+              "vertices": 8,
+              "edges": 12,
+              "faces": 6,
+              "solids": 1
+            },
+            "units": {
+              "length": "mm",
+              "area": "mm^2",
+              "volume": "mm^3",
+              "centroid": "mm",
+              "radius": "mm"
+            },
+            "coordinate_scope": "reported_shape_coordinates",
+            "world_transform_applied": false,
+            "recomputed": false,
+            "validity_checked": false
+          },
+          "warnings": [
+            "BoundBox 是原生几何内核返回的包络，曲面可能存在近似误差；不可据此作精确间隙校核。"
+          ]
+        }
+      },
+      {
+        "tool": "get_object_info",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "object": "HoleSketch"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "object": {
+            "Name": "HoleSketch",
+            "Label": "HoleSketch",
+            "TypeId": "Sketcher::SketchObject",
+            "parents": [
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "PlateBody",
+                "external": false
+              }
+            ],
+            "children": [],
+            "dependencies": [
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "Pad",
+                "external": false
+              },
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "Pad",
+                "external": false
+              }
+            ],
+            "dependents": [
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "PlateBody",
+                "external": false
+              },
+              {
+                "document": "PhoenixParametricDemo",
+                "object": "Pocket",
+                "external": false
+              }
+            ],
+            "relationships_truncated": false,
+            "visibility": false,
+            "state": [
+              "Up-to-date"
+            ],
+            "tip": null
+          },
+          "properties": {
+            "Placement": {
+              "kind": "placement",
+              "base": {
+                "kind": "vector",
+                "x": 0,
+                "y": 0,
+                "z": 8
+              },
+              "translation_unit": "mm",
+              "rotation": {
+                "kind": "rotation",
+                "axis": {
+                  "x": 0,
+                  "y": 0,
+                  "z": 1
+                },
+                "angle": 0,
+                "angle_unit": "rad"
+              }
+            },
+            "ExpressionEngine": [
+              [
+                ".Placement.Base.z",
+                "Pad.Length"
+              ]
+            ]
+          },
+          "property_names": [
+            "ArcFitTolerance",
+            "AttacherEngine",
+            "AttacherType",
+            "AttachmentOffset",
+            "AttachmentSupport",
+            "Constraints",
+            "Exports",
+            "ExpressionEngine",
+            "ExternalGeo",
+            "ExternalGeometry",
+            "ExternalTypes",
+            "FullyConstrained",
+            "Geometry",
+            "InternalShape",
+            "Label",
+            "Label2",
+            "MakeInternals",
+            "MapMode",
+            "MapPathParameter",
+            "MapReversed",
+            "Placement",
+            "Shape",
+            "ShapeMaterial",
+            "Visibility"
+          ],
+          "property_count": 24,
+          "placement": {
+            "kind": "placement",
+            "base": {
+              "kind": "vector",
+              "x": 0,
+              "y": 0,
+              "z": 8
+            },
+            "translation_unit": "mm",
+            "rotation": {
+              "kind": "rotation",
+              "axis": {
+                "x": 0,
+                "y": 0,
+                "z": 1
+              },
+              "angle": 0,
+              "angle_unit": "rad"
+            }
+          },
+          "geometry": {
+            "shape_type": "Compound",
+            "bounding_box": {
+              "XMin": -23,
+              "YMin": -13,
+              "ZMin": 8,
+              "XMax": 23,
+              "YMax": 13,
+              "ZMax": 8,
+              "XLength": 46,
+              "YLength": 26,
+              "ZLength": 0
+            },
+            "length": 75.39822368615505,
+            "area": 0,
+            "volume": null,
+            "volume_applicable": false,
+            "bounding_box_source": "native_shape_bound_box",
+            "bounding_box_precision": "kernel_enclosure_not_exact_clearance",
+            "bounding_box_error_bound_mm": null,
+            "geometric_centroid": null,
+            "radius": null,
+            "radius_source": null,
+            "geometry_type": null,
+            "counts": {
+              "vertices": 4,
+              "edges": 4,
+              "faces": 0,
+              "solids": 0
+            },
+            "units": {
+              "length": "mm",
+              "area": "mm^2",
+              "volume": "mm^3",
+              "centroid": "mm",
+              "radius": "mm"
+            },
+            "coordinate_scope": "reported_shape_coordinates",
+            "world_transform_applied": false,
+            "recomputed": false,
+            "validity_checked": false
+          },
+          "sketch": {
+            "geometry_count": 4,
+            "constraint_count": 12,
+            "degrees_of_freedom": null,
+            "fully_constrained": true,
+            "geometry": [
+              {
+                "kind": "Circle",
+                "Center": {
+                  "kind": "vector",
+                  "x": -20,
+                  "y": -10,
+                  "z": 0
+                },
+                "Radius": 3
+              },
+              {
+                "kind": "Circle",
+                "Center": {
+                  "kind": "vector",
+                  "x": 20,
+                  "y": -10,
+                  "z": 0
+                },
+                "Radius": 3
+              },
+              {
+                "kind": "Circle",
+                "Center": {
+                  "kind": "vector",
+                  "x": 20,
+                  "y": 10,
+                  "z": 0
+                },
+                "Radius": 3
+              },
+              {
+                "kind": "Circle",
+                "Center": {
+                  "kind": "vector",
+                  "x": -20,
+                  "y": 10,
+                  "z": 0
+                },
+                "Radius": 3
+              }
+            ],
+            "constraints": [
+              {
+                "Type": "Radius",
+                "Name": "",
+                "First": 0,
+                "FirstPos": 0,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 3,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceX",
+                "Name": "",
+                "First": 0,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": -20,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceY",
+                "Name": "",
+                "First": 0,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": -10,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "Radius",
+                "Name": "",
+                "First": 1,
+                "FirstPos": 0,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 3,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceX",
+                "Name": "",
+                "First": 1,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 20,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceY",
+                "Name": "",
+                "First": 1,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": -10,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "Radius",
+                "Name": "",
+                "First": 2,
+                "FirstPos": 0,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 3,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceX",
+                "Name": "",
+                "First": 2,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 20,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceY",
+                "Name": "",
+                "First": 2,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 10,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "Radius",
+                "Name": "",
+                "First": 3,
+                "FirstPos": 0,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 3,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceX",
+                "Name": "",
+                "First": 3,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": -20,
+                "value_unit": "mm"
+              },
+              {
+                "Type": "DistanceY",
+                "Name": "",
+                "First": 3,
+                "FirstPos": 3,
+                "Second": -2000,
+                "SecondPos": 0,
+                "Third": -2000,
+                "ThirdPos": 0,
+                "Value": 10,
+                "value_unit": "mm"
+              }
+            ],
+            "geometry_length_unit": "mm",
+            "truncated": false,
+            "solver_invoked": false
+          },
+          "warnings": [
+            "BoundBox 是原生几何内核返回的包络，曲面可能存在近似误差；不可据此作精确间隙校核。",
+            "当前形状不含实体，体积不适用。",
+            "未取得缓存的草图自由度；没有调用求解或重算。"
+          ]
+        }
+      },
+      {
+        "tool": "get_selection",
+        "arguments": {
+          "document": "PhoenixParametricDemo"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "selection": [],
+          "total": 0,
+          "truncated": false,
+          "warnings": []
+        }
+      },
+      {
+        "tool": "measure_geometry",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "object": "Pocket"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "object": {
+            "document": "PhoenixParametricDemo",
+            "object": "Pocket",
+            "external": false
+          },
+          "subelement": null,
+          "geometry": {
+            "shape_type": "Compound",
+            "bounding_box": {
+              "XMin": -30,
+              "YMin": -20,
+              "ZMin": 0,
+              "XMax": 30,
+              "YMax": 20,
+              "ZMax": 8,
+              "XLength": 60,
+              "YLength": 40,
+              "ZLength": 8
+            },
+            "length": 1229.59289474462,
+            "area": 6776.9911184307775,
+            "volume": 18295.221315766135,
+            "volume_applicable": true,
+            "bounding_box_source": "native_shape_bound_box",
+            "bounding_box_precision": "kernel_enclosure_not_exact_clearance",
+            "bounding_box_error_bound_mm": null,
+            "geometric_centroid": null,
+            "radius": null,
+            "radius_source": null,
+            "geometry_type": null,
+            "counts": {
+              "vertices": 16,
+              "edges": 24,
+              "faces": 10,
+              "solids": 1
+            },
+            "units": {
+              "length": "mm",
+              "area": "mm^2",
+              "volume": "mm^3",
+              "centroid": "mm",
+              "radius": "mm"
+            },
+            "coordinate_scope": "reported_shape_coordinates",
+            "world_transform_applied": false,
+            "recomputed": false,
+            "validity_checked": false
+          },
+          "placement": {
+            "kind": "placement",
+            "base": {
+              "kind": "vector",
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "translation_unit": "mm",
+            "rotation": {
+              "kind": "rotation",
+              "axis": {
+                "x": 0,
+                "y": 0,
+                "z": 1
+              },
+              "angle": 0,
+              "angle_unit": "rad"
+            }
+          },
+          "warnings": [
+            "BoundBox 是原生几何内核返回的包络，曲面可能存在近似误差；不可据此作精确间隙校核。",
+            "坐标来自对象返回的 Shape；未展开完整装配变换链，也未重算或验证形状新鲜度。"
+          ]
+        }
+      },
+      {
+        "tool": "measure_geometry",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "object": "Pocket",
+          "subelement": "Face1"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "object": {
+            "document": "PhoenixParametricDemo",
+            "object": "Pocket",
+            "external": false
+          },
+          "subelement": "Face1",
+          "geometry": {
+            "shape_type": "Face",
+            "bounding_box": {
+              "XMin": -30,
+              "YMin": -20,
+              "ZMin": 0,
+              "XMax": 30,
+              "YMax": -20,
+              "ZMax": 8,
+              "XLength": 60,
+              "YLength": 0,
+              "ZLength": 8
+            },
+            "length": 136,
+            "area": 480,
+            "volume": null,
+            "volume_applicable": false,
+            "bounding_box_source": "native_shape_bound_box",
+            "bounding_box_precision": "kernel_enclosure_not_exact_clearance",
+            "bounding_box_error_bound_mm": null,
+            "geometric_centroid": {
+              "x": -6.522560269672795e-16,
+              "y": -20,
+              "z": 4
+            },
+            "radius": null,
+            "radius_source": null,
+            "geometry_type": null,
+            "counts": {
+              "vertices": 4,
+              "edges": 4,
+              "faces": 1,
+              "solids": 0
+            },
+            "units": {
+              "length": "mm",
+              "area": "mm^2",
+              "volume": "mm^3",
+              "centroid": "mm",
+              "radius": "mm"
+            },
+            "coordinate_scope": "reported_shape_coordinates",
+            "world_transform_applied": false,
+            "recomputed": false,
+            "validity_checked": false
+          },
+          "placement": {
+            "kind": "placement",
+            "base": {
+              "kind": "vector",
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "translation_unit": "mm",
+            "rotation": {
+              "kind": "rotation",
+              "axis": {
+                "x": 0,
+                "y": 0,
+                "z": 1
+              },
+              "angle": 0,
+              "angle_unit": "rad"
+            }
+          },
+          "warnings": [
+            "子元素仅核对当前 Shape 的编号存在；不保证跨编辑的拓扑身份稳定。",
+            "BoundBox 是原生几何内核返回的包络，曲面可能存在近似误差；不可据此作精确间隙校核。",
+            "当前形状不含实体，体积不适用。",
+            "坐标来自对象返回的 Shape；未展开完整装配变换链，也未重算或验证形状新鲜度。"
+          ]
+        }
+      },
+      {
+        "tool": "list_drawing_pages",
+        "arguments": {
+          "document": "PhoenixParametricDemo"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "pages": [
+            {
+              "Name": "PhoenixDemoPage",
+              "Label": "Phoenix public demo - A4",
+              "TypeId": "TechDraw::DrawPage",
+              "scale": 1,
+              "template": {
+                "document": "PhoenixParametricDemo",
+                "object": "PhoenixDemoTemplate",
+                "external": false
+              },
+              "object_count": 5,
+              "state": [
+                "Up-to-date"
+              ]
+            }
+          ],
+          "total": 1,
+          "truncated": false,
+          "warnings": []
+        }
+      },
+      {
+        "tool": "inspect_drawing_page",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "page": "PhoenixDemoPage"
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "page": {
+            "Name": "PhoenixDemoPage",
+            "Label": "Phoenix public demo - A4",
+            "TypeId": "TechDraw::DrawPage",
+            "scale": 1,
+            "template": {
+              "document": "PhoenixParametricDemo",
+              "object": "PhoenixDemoTemplate",
+              "external": false
+            },
+            "object_count": 5,
+            "state": [
+              "Up-to-date"
+            ]
+          },
+          "template": {
+            "reference": {
+              "document": "PhoenixParametricDemo",
+              "object": "PhoenixDemoTemplate",
+              "external": false
+            },
+            "editable_fields": {
+              "approval_person": "",
+              "creator": "",
+              "date_of_issue": "",
+              "document_status": "DEMO - NOT FOR PRODUCTION",
+              "document_type": "Parametric demonstration",
+              "drawing_number": "PhoenixParametricDemo",
+              "general_tolerances": "",
+              "language_code": "EN",
+              "legal_owner_1": "",
+              "legal_owner_2": "",
+              "legal_owner_3": "",
+              "legal_owner_4": "",
+              "part_material": "",
+              "responsible_department": "",
+              "revision_index": "",
+              "scale": "1 : 1",
+              "sheet_number": {
+                "redacted": true,
+                "reason": "private_path_or_source"
+              },
+              "supplementary_title_1": "",
+              "supplementary_title_2": "",
+              "title": "Phoenix parametric plate demo"
+            },
+            "width": {
+              "kind": "quantity",
+              "value": 297,
+              "unit": "mm",
+              "unit_signature": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "unit_type": "Length",
+              "unit_system": "freecad_internal"
+            },
+            "height": {
+              "kind": "quantity",
+              "value": 210,
+              "unit": "mm",
+              "unit_signature": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "unit_type": "Length",
+              "unit_system": "freecad_internal"
+            },
+            "has_file_reference": true
+          },
+          "objects": [
+            {
+              "Name": "PhoenixDemoFront",
+              "Label": "Front",
+              "TypeId": "TechDraw::DrawViewPart",
+              "state": [
+                "Up-to-date"
+              ],
+              "sources": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "subelements": [],
+                  "external": false,
+                  "field": "Source"
+                }
+              ],
+              "sources_truncated": false,
+              "properties": {
+                "X": {
+                  "kind": "quantity",
+                  "value": 85,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Y": {
+                  "kind": "quantity",
+                  "value": 95,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Scale": 1,
+                "Direction": {
+                  "kind": "vector",
+                  "x": 0,
+                  "y": -1,
+                  "z": 0
+                },
+                "Rotation": {
+                  "kind": "quantity",
+                  "value": 0,
+                  "unit": "deg",
+                  "unit_signature": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1
+                  ],
+                  "unit_type": "Angle",
+                  "unit_system": "freecad_internal"
+                }
+              }
+            },
+            {
+              "Name": "PhoenixDemoTop",
+              "Label": "Top",
+              "TypeId": "TechDraw::DrawViewPart",
+              "state": [
+                "Up-to-date"
+              ],
+              "sources": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "subelements": [],
+                  "external": false,
+                  "field": "Source"
+                }
+              ],
+              "sources_truncated": false,
+              "properties": {
+                "X": {
+                  "kind": "quantity",
+                  "value": 85,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Y": {
+                  "kind": "quantity",
+                  "value": 165,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Scale": 1,
+                "Direction": {
+                  "kind": "vector",
+                  "x": 0,
+                  "y": 0,
+                  "z": 1
+                },
+                "Rotation": {
+                  "kind": "quantity",
+                  "value": 0,
+                  "unit": "deg",
+                  "unit_signature": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1
+                  ],
+                  "unit_type": "Angle",
+                  "unit_system": "freecad_internal"
+                }
+              }
+            },
+            {
+              "Name": "PhoenixDemoRight",
+              "Label": "Right",
+              "TypeId": "TechDraw::DrawViewPart",
+              "state": [
+                "Up-to-date"
+              ],
+              "sources": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "subelements": [],
+                  "external": false,
+                  "field": "Source"
+                }
+              ],
+              "sources_truncated": false,
+              "properties": {
+                "X": {
+                  "kind": "quantity",
+                  "value": 220,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Y": {
+                  "kind": "quantity",
+                  "value": 95,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Scale": 1,
+                "Direction": {
+                  "kind": "vector",
+                  "x": 1,
+                  "y": 0,
+                  "z": 0
+                },
+                "Rotation": {
+                  "kind": "quantity",
+                  "value": 0,
+                  "unit": "deg",
+                  "unit_signature": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1
+                  ],
+                  "unit_type": "Angle",
+                  "unit_system": "freecad_internal"
+                }
+              }
+            },
+            {
+              "Name": "PhoenixDemoIso",
+              "Label": "Iso",
+              "TypeId": "TechDraw::DrawViewPart",
+              "state": [
+                "Up-to-date"
+              ],
+              "sources": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "Pocket",
+                  "subelements": [],
+                  "external": false,
+                  "field": "Source"
+                }
+              ],
+              "sources_truncated": false,
+              "properties": {
+                "X": {
+                  "kind": "quantity",
+                  "value": 220,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Y": {
+                  "kind": "quantity",
+                  "value": 165,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Scale": 1,
+                "Direction": {
+                  "kind": "vector",
+                  "x": 1,
+                  "y": -1,
+                  "z": 1
+                },
+                "Rotation": {
+                  "kind": "quantity",
+                  "value": 0,
+                  "unit": "deg",
+                  "unit_signature": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1
+                  ],
+                  "unit_type": "Angle",
+                  "unit_system": "freecad_internal"
+                }
+              }
+            },
+            {
+              "Name": "PhoenixDemoDimension",
+              "Label": "PhoenixDemoDimension",
+              "TypeId": "TechDraw::DrawViewDimension",
+              "state": [
+                "Up-to-date"
+              ],
+              "sources": [
+                {
+                  "document": "PhoenixParametricDemo",
+                  "object": "PhoenixDemoTop",
+                  "subelements": [
+                    "Edge4"
+                  ],
+                  "external": false,
+                  "field": "References2D"
+                }
+              ],
+              "sources_truncated": false,
+              "properties": {
+                "X": {
+                  "kind": "quantity",
+                  "value": -42,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Y": {
+                  "kind": "quantity",
+                  "value": -25,
+                  "unit": "mm",
+                  "unit_signature": [
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "unit_type": "Length",
+                  "unit_system": "freecad_internal"
+                },
+                "Scale": 1,
+                "Rotation": {
+                  "kind": "quantity",
+                  "value": 0,
+                  "unit": "deg",
+                  "unit_signature": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1
+                  ],
+                  "unit_type": "Angle",
+                  "unit_system": "freecad_internal"
+                },
+                "Type": "Diameter",
+                "FormatSpec": "⌀%.2w",
+                "MeasureType": "Projected"
+              }
+            }
+          ],
+          "total": 5,
+          "truncated": false,
+          "recomputed": false,
+          "references_validated": false,
+          "warnings": [
+            "路径或模板源码已隐藏。",
+            "仅返回原生来源和现有状态；没有修复、重算或证明所有尺寸引用有效。"
+          ]
+        }
+      },
+      {
+        "tool": "set_view",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "view": "axonometric",
+          "fit": true
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "source_kind": "live_freecad_gui",
+          "view": "axonometric",
+          "fit": true,
+          "warnings": []
+        }
+      },
+      {
+        "tool": "capture_view",
+        "arguments": {
+          "document": "PhoenixParametricDemo",
+          "width": 800,
+          "height": 600
+        },
+        "result": {
+          "document": "PhoenixParametricDemo",
+          "mime_type": "image/png",
+          "width": 800,
+          "height": 600,
+          "capture_scope": "freecad_3d_view",
+          "image_in_content": true
+        }
+      }
+    ]
+  },
+  "script_deduplication": {
+    "same_id_and_code_executed_once": true,
+    "status_query_matches_result": true,
+    "same_id_different_code_rejected": true,
+    "scope": "current_bridge_module_session"
+  },
+  "step": {
+    "demo": "STEP_BRep_and_known_parameter_rebuild",
+    "document": "PhoenixStepDemo",
+    "source_document": "PhoenixParametricDemo",
+    "source_body": "PlateBody",
+    "imported": {
+      "object": "ImportedSTEP",
+      "typeId": "Part::Feature",
+      "original_feature_history_recovered": false,
+      "bbox": [
+        -30,
+        -20,
+        0,
+        30,
+        20,
+        8
+      ],
+      "volume": 18295.221315766135,
+      "valid": true,
+      "solids": 1,
+      "units": {
+        "bbox": "mm",
+        "volume": "mm^3"
+      }
+    },
+    "rebuilt": {
+      "object": "RebuiltBody",
+      "mode": "explicit_known_demo_parameters",
+      "parameters": {
+        "width_mm": 60,
+        "height_mm": 40,
+        "thickness_mm": 8,
+        "hole_diameter_mm": 6,
+        "hole_centres_mm": [
+          [
+            -20,
+            -10
+          ],
+          [
+            20,
+            -10
+          ],
+          [
+            20,
+            10
+          ],
+          [
+            -20,
+            10
+          ]
+        ]
+      },
+      "sketchDOF": {
+        "OutlineSketch": 0,
+        "HoleSketch": 0
+      },
+      "sketchDOF_evidence": "Native FullyConstrained=true after solve and recompute",
+      "bbox": [
+        -30,
+        -20,
+        0,
+        30,
+        20,
+        8
+      ],
+      "volume": 18295.221315766135,
+      "valid": true,
+      "solids": 1,
+      "units": {
+        "bbox": "mm",
+        "volume": "mm^3"
+      }
+    },
+    "comparison": {
+      "original_to_imported": {
+        "maxdiff_bbox_mm": 0,
+        "volume_difference_mm3": 0,
+        "symmetric_difference_volume_mm3": 0,
+        "volume_tolerance_mm3": 0.0018295221315766134
+      },
+      "imported_to_rebuilt": {
+        "maxdiff_bbox_mm": 0,
+        "volume_difference_mm3": 0,
+        "symmetric_difference_volume_mm3": 0,
+        "volume_tolerance_mm3": 0.0018295221315766134
+      },
+      "original_to_rebuilt": {
+        "maxdiff_bbox_mm": 0,
+        "volume_difference_mm3": 0,
+        "symmetric_difference_volume_mm3": 0,
+        "volume_tolerance_mm3": 0.0018295221315766134
+      }
+    },
+    "source_unchanged": true,
+    "temporary_step_removed": true,
+    "saved": false,
+    "automatic_step_history_recovery": false,
+    "modified_documents": [
+      "PhoenixStepDemo"
+    ]
+  },
+  "techdraw": {
+    "document": "PhoenixParametricDemo",
+    "page": "PhoenixDemoPage",
+    "views": [
+      "PhoenixDemoFront",
+      "PhoenixDemoTop",
+      "PhoenixDemoRight",
+      "PhoenixDemoIso"
+    ],
+    "layout": [
+      {
+        "view": "PhoenixDemoFront",
+        "x_mm": 85,
+        "y_mm": 95
+      },
+      {
+        "view": "PhoenixDemoTop",
+        "x_mm": 85,
+        "y_mm": 165
+      },
+      {
+        "view": "PhoenixDemoRight",
+        "x_mm": 220,
+        "y_mm": 95
+      },
+      {
+        "view": "PhoenixDemoIso",
+        "x_mm": 220,
+        "y_mm": 165
+      }
+    ],
+    "scale": 1,
+    "template": "A4_Landscape_ISO5457_advanced.svg",
+    "dimension": {
+      "name": "PhoenixDemoDimension",
+      "type": "Diameter",
+      "reference": "Edge4",
+      "classification": {
+        "classification": "closed projected circle matching source circle radius",
+        "radius_mm": 3
+      },
+      "actual_mm": 6,
+      "reopened_mm": 6
+    },
+    "exports": {
+      "pdf": {
+        "bytes": 331056,
+        "sha256": "d02742fe9410421105605d52d9bb7e9aa6d4488ac577fdee99ee0273671e8e23"
+      },
+      "svg": {
+        "bytes": 32957,
+        "sha256": "9db4a2bffd704be24ca85417f5b15cf7e558ca1dd74840537d098e8052356721"
+      },
+      "preview": {
+        "bytes": 80618,
+        "sha256": "3f328beb74276f9d6110001d37e46daea0ace0721817fc2b130531aa7908cad7"
+      },
+      "fcstd": {
+        "bytes": 29455,
+        "sha256": "0fe9eda761c04730ebefae9cd593d49e0dd26c2f1937ba4f0d1d67738b4c8d49"
+      }
+    },
+    "checks": {
+      "pdf_pages": 1,
+      "svg_demo_text_found": true,
+      "pdf_text": {
+        "checked": false,
+        "reason": "No optional PDF text reader installed in FreeCAD Python"
+      },
+      "reopened_document": "PhoenixDemo",
+      "reopened_document_closed": true,
+      "native_thumbnail_bytes": 4825,
+      "native_thumbnail_non_monochrome": true,
+      "source_geometry_preserved": true
+    },
+    "manual_review_required": false,
+    "scope": "Public demonstration only; geometry-linked example, not a production drawing approval",
+    "visual_review": {
+      "pdf_rendered_with": "Poppler",
+      "four_views_separated": true,
+      "dimension_clear": true,
+      "no_view_overlap_or_page_overflow": true,
+      "production_approval": false
+    }
+  },
+  "workbench": {
+    "document": "PhoenixToolsUIDemo2",
+    "initialized_fields": 5,
+    "updated_fields": 3,
+    "renamed_objects": 1,
+    "synced_links": 2,
+    "native_undo_redo_passed": true,
+    "duplicate_label_preference_preserved": true,
+    "native_dialogs_built_and_cancelled": [
+      "Phoenix：填写零件属性",
+      "Phoenix：命名修正预览",
+      "Phoenix：同步链接名称预览"
+    ],
+    "cancel_preserved_data": true,
+    "saved": false,
+    "only_artificial_document_modified": true
+  },
+  "protection": {
+    "original_document_count": 1,
+    "all_original_object_names_labels_states_preserved": true,
+    "saved_by_verification": false
+  },
+  "capture": {
+    "foreground_model_reviewed": true,
+    "inactive_document_rejected": true,
+    "width": 800,
+    "height": 600,
+    "png_sha256": "0185de3725e57ff8e7dac4c2e55436fcc574ebb81bf1e0e943538b609e0f74d5",
+    "desktop_captured": false
+  },
+  "other_chat_readonly_joint_test": "passed",
+  "previous_bridge_retired_with_local_backup": true,
+  "remote_published": false
+}

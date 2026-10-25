@@ -17,3 +17,11 @@ FreeCAD is an external application and is not distributed with this package.
 Phoenix organization mark:
 Copyright 2024-2026 PhoenixWing contributors. Apache-2.0.
 Source: phoenix-wing/assets/phoenix-wing-mark.svg (unchanged).
+
+BOM label rule port:
+Phoenix Wing CAD Core
+Copyright 2025-2026 上海锟钛
+Licensed under the Apache License, Version 2.0.
+Source: phoenix-wing/packages/cad-core/src/index.ts, pnwComposeBomLabel.
+The small rule is ported to the standalone Python workbench helper; this is not
+a runtime dependency on the TypeScript package or the full Tool application.

@@ -2,88 +2,65 @@
 
 ![Phoenix](addon/PhoenixFreeCADMCP/Resources/icons/phoenix-wing-mark.svg)
 
-一个以 **Node.js / TypeScript** 为主的 FreeCAD 工具项目，当前实现独立 MCP 最小原型。通过轻量 Python 工作台连接 FreeCAD，支持连接检测、文档列表、适合窗口（fit）和轴测图。项目应用代码采用 **Apache-2.0**。
+让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中文工作台工具。当前版本 **0.2.1**，采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
 
-```text
-MCP 聊天客户端 ──stdio──> Node.js / TypeScript 服务
-                              │ JSON HTTP（仅本机 9876）
-                              ▼
-                     FreeCAD PhoenixFreeCADMCP 工作台
-                              │ Qt GUI 主线程
-                              ▼
-                       文档列表 / fit / 轴测图
-```
+聊天继续由客户端管理。FreeCAD 中的 **Phoenix Tools** 提供普通工具和桥接启停；Node 服务负责 16 个 MCP 工具，不要求在插件内填写聊天 API Key。
 
-Node MCP 是聊天客户端启动的进程；FreeCAD 工作台启动的是应用内桥接服务。两者启动后才能控制视图。
+[接入说明](docs/CODEX.md) · [接口协议](docs/PROTOCOL.md) · [架构](docs/ARCHITECTURE.md) · [能力计划](docs/CAPABILITY-PLAN.md) · [验证记录](docs/VERIFICATION.md)
 
-## 当前原型
+## 当前结果与边界
 
-本地原型已验证：独立插件安装、真实 MCP 工具发现、连接板样例轴测图与 fit；Node 16项、Python 19项测试通过。详细证据和已知边界见 [验证记录](docs/VERIFICATION.md)。
+| 项目 | 当前状态 |
+| --- | --- |
+| MCP 连接 | 已真实发现 16 个工具，在 FreeCAD 1.1.0 完成连接和只读脚本调用；另一聊天的只读联测已通过 |
+| 参数化零件 | 已实测新建 60 × 40 mm 板、4 × Ø6 mm 通孔，保留 Body、全约束草图和 Pad/Pocket；厚度从 6 改为 8 mm 后校核几何 |
+| STEP | 已实测已知参数样例的导出、导入、参数化重建及几何对比；不代表任意 STEP 能自动恢复原始特征历史 |
+| TechDraw | 四视图和关联实际几何的 6 mm 孔径尺寸已验收；PDF/SVG/PNG/FCStd 导出、独立重开、模板/坐标/尺寸保留及缩略图检查通过，PDF 渲染目视确认无视图遮挡和越界 |
+| 工作台 | MVC 分层、命名修正、正式属性填写、Link 名称同步和单按钮 MCP 启停已实现；具体 GUI 验收见验证记录 |
+| 本机接入清理 | 原桥接已停用并备份移出 FreeCAD 加载目录，对应 Codex 旧服务条目已移除 |
 
-![公开样例验证](docs/images/study-axonometric.png)
+接口实现、自动化测试和真实场景验收分别记录。测试数量、详细结果和归档状态以 [验证记录](docs/VERIFICATION.md) 为准；以上公开人工样例不代表任意工程均已验证，也不代替生产图纸审签。中英文界面切换、内嵌聊天和大型 Tool 服务集成仍是后续任务。
 
-## 安装
+## 安装与启动
 
-需要 Node.js 22+、npm，以及带 GUI 的 FreeCAD。本机验证目标为 FreeCAD 1.1；其他平台可指定 Mod 目录，尚需真实环境验证。
+需要 Node.js 22+、npm 和带 GUI 的 FreeCAD。当前真实联调使用 FreeCAD 1.1.0；其他版本及 Windows/Linux 仍需实际安装验收。
 
 ```bash
+cd /absolute/path/to/phoenix-freecad-tools
 npm ci
 npm run build
-npm run addon:install
+npm run addon:install -- --mod-dir "/absolute/path/to/FreeCAD/Mod" --dry-run
+npm run addon:install -- --mod-dir "/absolute/path/to/FreeCAD/Mod"
 ```
 
-macOS 会优先使用已存在的 `~/Library/Application Support/FreeCAD/v1-1/Mod`。其他位置请明确指定：
+先在 FreeCAD 中核实 Mod 目录。省略 `--mod-dir` 时，安装器只自动选取已存在的受支持 macOS 目录，其他情况提示候选位置。插件目录为 `PhoenixFreeCADMCP`；安装器校验本项目标记和文件内容，保护已有修改，并保留 Mod 目录外的恢复副本。
 
-```bash
-npm run addon:install -- --mod-dir "/your/FreeCAD/Mod" --dry-run
-npm run addon:install -- --mod-dir "/your/FreeCAD/Mod"
-```
+插件加载后，在工作台下拉框选择 **Phoenix Tools**，使用同一个 MCP 按钮：
 
-安装后重新打开 FreeCAD，在工作台下拉框选择 **Phoenix FreeCAD**，点击 **启动 MCP 服务**。工作台界面只提供服务启动/停止，插件不会自动启动。fit 和轴测通过 MCP 工具调用 FreeCAD 原生 API，作为聊天可用能力，不另设工具栏按钮。
+- 绿色三角形：**启动 MCP · 已停止**。
+- 红色方块：**停止 MCP · 运行中**。
+- 停止期间：**MCP 正在停止**，等待完成后再启动。
 
-如当前 FreeCAD 有未保存修改，可安装后在其 Python 控制台执行下列代码，先启动桥接服务，无需重启：
+命令 ID 为 `PhoenixTools_ToggleMCP`，按钮同时显示图标和状态文字。选择工作台不会自动启动服务，重启 FreeCAD 后需再次启动桥接。Node MCP 由聊天客户端启动，工作台按钮启动的是 FreeCAD 内的本机 HTTP 桥接，两者职责不同。
+
+当前 FreeCAD 有未保存修改时，可以在核实安装位置后，通过 Python 控制台启动桥接，无需为连接检查重启：
 
 ```python
 import os, sys, FreeCAD as App
-p = os.path.join(App.getUserAppDataDir(), "Mod", "PhoenixFreeCADMCP")
-sys.path.insert(0, p) if p not in sys.path else None
+addon_dir = os.path.join(App.getUserAppDataDir(), "Mod", "PhoenixFreeCADMCP")
+if addon_dir not in sys.path:
+    sys.path.insert(0, addon_dir)
 import phoenix_freecad_bridge
 phoenix_freecad_bridge.start_server()
 ```
 
-工作台菜单将在正常重新启动后由 FreeCAD 加载。已加载模块升级需要停止服务并重新加载模块或正常重启；覆盖磁盘文件不等于运行代码已更新。
+如果安装到自定义 Mod 目录，应使用已核实的插件目录。该方式只启动桥接，不补注册尚未加载的工作台菜单。升级后，磁盘文件不会自动替换已加载模块；应先停止本服务并确认请求结束，再按当前会话情况重新加载，或在保存工作后正常重启。
 
-## 最小验证
+## 聊天客户端接入
 
-启动 FreeCAD 插件后：
+启动 FreeCAD 桥接后运行 `npm run check`，检查 `protocol_version:1`、`running:true`、插件版本和 `supported_methods`。离线工具清单不证明当前内存中的插件支持所有新增能力。
 
-```bash
-npm run check
-```
-
-预期为 `ok: true`，`protocol_version: 1`，`running: true`。本机服务默认地址为 `http://127.0.0.1:9876/`。可用环境变量 `PHOENIX_FREECAD_URL` 指定另一本机地址，`PHOENIX_TIMEOUT_MS` 指定等待时间。程序不会自动读取 `.env`。
-
-验证采用公开的 [phoenix-freecad-study](https://gitee.com/PhoenixWing321/phoenix-freecad-study) 仓库：
-
-1. 在 FreeCAD 中打开 `04-自动出图/样本/8101.001-H-PX-连接板.FCStd`。
-2. 在 Python 控制台读取 `App.ActiveDocument.Name`，取得内部文档名。
-3. 执行真正的 MCP 工具调用验证：
-
-```bash
-npm run verify:mcp -- --document "这里填内部文档名"
-```
-
-这会通过官方 MCP 客户端启动本项目，发现工具、检查连接、验证目标文档存在，然后对指定文档调用轴测图与 fit。脚本只在内存中确认其他文档列表，输出不记录其他工程名称。无需复制公开模型到本项目。该样例源仓库采用 MIT，重新分发模型时保留其许可。
-
-也可用 `npm run demo` 对**当前活动文档**直接演示轴测图并适合窗口；它是桥接诊断，不替代上述 MCP 协议验证。
-
-## Codex 优先接入
-
-具体注册命令、示例问法和验证边界见 [Codex 接入](docs/CODEX.md)。其他兼容客户端可使用相同 stdio 入口。
-
-## 连接聊天客户端
-
-使用支持 stdio MCP 的客户端，配置示例（替换为本机绝对路径）：
+支持 stdio MCP 的客户端使用以下配置，并替换为本机绝对路径：
 
 ```json
 {
@@ -96,25 +73,66 @@ npm run verify:mcp -- --document "这里填内部文档名"
 }
 ```
 
-在客户端重新连接或加载该 MCP 后，可说：“检查 Phoenix FreeCAD 连接”“列出打开的文档”“把指定文档切换为轴测图并适合窗口”。普通聊天文字不会自动安装或启用本机 MCP。
-
-| 工具 | 作用 |
-| --- | --- |
-| `get_capabilities` | 查看本版支持的能力，无需连接 FreeCAD |
-| `get_connection_status` | 检查插件版本、协议与调度状态 |
-| `list_documents` | 读取当前打开的文档内部 Name |
-| `fit_view` | 调整目标文档相机，使模型适合窗口 |
-| `set_axonometric_view` | 切换轴测图，可设置 `fit: true` |
-
-视图工具改变相机；不会创建、修改、保存或关闭模型。文档参数使用内部 `Name`，不是显示 `Label`。省略时使用当前活动文档。超时不会自动重试，已经开始的远端操作可能仍在执行。
-
-## 卸载与开发
+具体 Codex 命令见 [接入说明](docs/CODEX.md)。客户端需重新连接或重新加载 MCP；既有聊天工具清单尚未刷新时，可用真正走 MCP stdio 的 helper：
 
 ```bash
-npm run addon:uninstall -- --mod-dir "/your/FreeCAD/Mod"
+node scripts/call-tool.mjs get_connection_status /absolute/path/to/connection.args.json
 ```
 
-先停止 FreeCAD 中的服务。卸载只处理本项目带标记且内容未被用户修改的 `PhoenixFreeCADMCP`，并移到 Mod 父目录下的 `.phoenix-freecad-mcp/` 保留恢复副本；原 MCP 不受影响。用户修改或额外文件会阻止覆盖/卸载。
+示例参数文件内容为 `{}`。helper 不直接绕过 MCP 调内部 HTTP，也不会替当前聊天刷新原生工具清单。
+
+默认桥接地址为 `http://127.0.0.1:9876/`；`PHOENIX_FREECAD_URL` 可指定允许的本机 HTTP 根地址，`PHOENIX_TIMEOUT_MS` 可调整 Node 等待时间。程序不自动读取 `.env`。
+
+## 16 个 MCP 工具
+
+| 分组 | 工具 |
+| --- | --- |
+| 连接 | `get_capabilities`、`get_connection_status`、`list_documents` |
+| 设计上下文 | `get_document_info`、`list_objects`、`get_object_info`、`get_selection` |
+| 几何 | `measure_geometry` |
+| 图纸检查 | `list_drawing_pages`、`inspect_drawing_page` |
+| 相机 | `fit_view`、`set_axonometric_view`、`set_view` |
+| 图像 | `capture_view` |
+| 高级脚本 | `execute_script`、`get_script_status` |
+
+文档、对象和页面参数使用内部 `Name`，不是显示 `Label`。常用读取不重算、不保存、不修改模型；测量只报告当前 Shape，不证明缓存最新、完整装配变换已展开或工程图检查通过。单面体积返回 `null` 且 `volume_applicable:false`；包围盒仅为内核包络，不能用来证明精确间隙。相机工具改变视角；`capture_view` 要求目标文档的三维视图处于前台，只在明确要求图像时导出，不截图桌面、不改变相机，其临时文件读取后清理。
+
+`execute_script` 在 GUI 主线程执行，与 FreeCAD Python 控制台同权限，**不是沙箱**。脚本可修改模型、访问文件、自行保存或关闭文档，调用必须符合具体任务授权。框架不额外保存，也不承诺异常自动回滚。
+
+脚本使用 `requestId` 去重和查询；超时不代表取消。先查询原 ID，重放使用相同 ID 和相同代码。记录仅限当前桥接服务会话，以 `script_session_id` 识别；重载桥接模块或重启 FreeCAD 会重置。完整终态结果保留最近 20 份，最多记住 4096 个历史 ID；结果过期的 ID 在同一会话中仍拒绝重新执行。状态和容量边界见 [协议](docs/PROTOCOL.md)。
+
+## 独立工作台工具
+
+| 按钮 | 作用 |
+| --- | --- |
+| 命名修正 | 根据正式属性预览所选对象的 Label，检查冲突后确认修改；不改内部 Name 或文件名 |
+| 填写零件属性 | 编辑正式 BOM 字符串字段，初始化缺失字段或从明确 Label 保守推荐；先列差异，再确认写入 |
+| 同步链接名称 | 将所选 App::Link 实例 Label 同步到直接来源；不修改来源，不自动修复断链或猜测歧义 |
+
+正式字段为 `PartNumber`、`PartVersion`、`TypeCode`、`ModelSeries`、`PartName`，属性组为 `CustomDefine`。推荐不覆盖已有非空值；属性填写不向 Link 来源转发写入。普通按钮经事务修改，默认不保存，不依赖 Node、MCP 或大型 Tool 服务。
+
+实现按 Model、Controller、View、Facade 分工，详见 [架构](docs/ARCHITECTURE.md)。这些按钮当前不是额外注册的 MCP 工具。
+
+## 公开演示与验证
+
+所有演示使用新建的公开人工几何，不包含用户工程、真实零件或机器路径。
+
+| 文件 | 范围 |
+| --- | --- |
+| [parametric_plate.py](examples/parametric_plate.py) | 已实测参数板、完全约束草图、厚度修改和几何校核 |
+| [step_parametric.py](examples/step_parametric.py) | 已实测 STEP 往返与已知参数重建，不恢复任意历史 |
+| [workbench_tools_demo.py](examples/workbench_tools_demo.py) | 已实测属性初始化与推荐、命名、两个 Link 同名、原生撤销重做及对话框取消 |
+| [techdraw_plate.py](examples/techdraw_plate.py) | 已实测四视图、6 mm 关联尺寸、导出、独立重开及最终布局目视检查；不是生产图纸审签 |
+
+演示应按文件中的前置条件和任务授权执行，不能对其他工程盲目重放。已经建立演示文档与图纸后，可逐项核验结构化接口：
+
+```bash
+node scripts/verify-capabilities.mjs --image /absolute/path/to/new-view.png --report /absolute/path/to/new-report.json
+```
+
+该脚本只针对固定公开演示文档读取、测量和检查，再改变其相机并获取图像；不重算或保存模型。输出文件必须尚不存在，默认不向项目写入文件，报告移除机器路径、会话 ID、外部文档信息和 Base64。
+
+## 开发、卸载与后续
 
 ```bash
 npm run build
@@ -123,19 +141,18 @@ npm run test:python
 npm pack --dry-run
 ```
 
-测试包含模拟 HTTP 与真实 stdio MCP 握手、错误返回、安装保护及 Python 协议/线程调度 stub；真实 FreeCAD 联调记录见 [验证记录](docs/VERIFICATION.md)，实施阶段见 [计划](docs/PLAN.md)，命名、技术选择与 Tool 复用讨论见 [架构决定](docs/DECISIONS.md)，内部通信见 [桥接协议](docs/PROTOCOL.md)。
+自动化覆盖协议、schema、安装保护、GUI 调度、MVC 和脚本记录等；真实模型、界面、图纸排版、重开及跨平台安装另行验收。最新测试数量、本地归档与包清单以 [验证记录](docs/VERIFICATION.md) 和 [隐私审查](docs/PRIVACY-REVIEW.md) 为准。
 
-## 依赖与资源来源
+卸载本插件前先停止其服务，再执行：
 
-- [官方 TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)：MCP 协议与 stdio。
-- Phoenix Tool/Wing：后续 TS 能力复用，首版没有相关业务依赖。
+```bash
+npm run addon:uninstall -- --mod-dir "/absolute/path/to/FreeCAD/Mod"
+```
 
-应用源码为独立实现。依赖和参考来源见 [NOTICE](NOTICE)。本机桥接只开放固定方法、拒绝浏览器 Origin 请求，仅用于可信本机环境；首版不提供远程监听和任意代码执行。
+安装器只管理带本项目标记且内容校验通过的安装，不覆盖未知文件或用户修改。当前未发布远端；发布和收录另行安排。
 
-接下来优先扩展 [零件与图纸设计能力](docs/CAPABILITY-PLAN.md)：设计上下文与测量 → 参数化零件 → TechDraw 出图与导出 → 高级设计 → 现有 Tool/Wing 集成。后续工具尚未实现，当前能力以工具表为准。
+后续优先完善真实设计和图纸闭环，再封装高频写入、扩展工作台和业务适配。中英文切换尚未实现，列在 [TODO](docs/TODO.md)；内嵌聊天见 [路线图](docs/ROADMAP.md)，长期方向见 [愿景](docs/VISION.md)。大型 Tool 的下载、编译和启动后置，不是当前轻量插件的运行依赖。
 
-[FreeCAD 内嵌聊天面板](docs/ROADMAP.md) 保留为独立调查目标，研究复用本机 ChatGPT/Codex 客户端；当前原型尚未实现。项目目录为 `phoenix-freecad-tools`，MCP 包仍为 `phoenix-freecad-mcp`，详见 [命名](docs/NAMING.md)。
+源码许可见 [LICENSE](LICENSE)，依赖、移植规则和组织 Logo 来源见 [NOTICE](NOTICE) 与 [品牌资源](docs/BRANDING.md)。桥接仅绑定本机，拒绝浏览器 Origin/Sec-Fetch 请求，但没有本机进程身份认证或多用户隔离，仅用于可信本机环境。
 
-本地最新归档标签：`v0.1.0-naming.1`，初始 `v0.1.0` 保留原样。源代码ZIP和npm安装包保存在已忽略的 `archives/`，没有推送远端。归档隐私范围见 [隐私审查](docs/PRIVACY-REVIEW.md)，命名及迁移规则见 [命名](docs/NAMING.md)。
-
-组织 logo 复用 Phoenix Wing 权威品牌资源，来源见 [品牌资源](docs/BRANDING.md)。下一步聊天界面调查见 [TODO](docs/TODO.md)。
+目录、工作台、npm 包与 CLI 的对应关系见 [命名约定](docs/NAMING.md)。

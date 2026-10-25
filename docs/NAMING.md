@@ -1,24 +1,41 @@
-# 内部命名统一
+# 命名约定
 
-项目根目录已改为 `phoenix-freecad-tools`，作为整体工具集合；npm 包和 CLI 仍是 `phoenix-freecad-mcp`，作为 MCP 接入模块。工作台显示名采用 `Phoenix FreeCAD`，供后续承载聊天及其他 FreeCAD 工具；MCP 服务保留独立技术身份。
+整体项目是 FreeCAD 工具集合，界面名称与 MCP 技术身份分别保留：
 
-| 范围 | 旧值 | 当前值 |
-| --- | --- | --- |
-| 工作台显示名 | `Phoenix FreeCAD MCP` | `Phoenix FreeCAD` |
-| 插件目录 | `addon/PhoenixMCP` | `addon/PhoenixFreeCADMCP` |
-| 工作台类 | `PhoenixMCPWorkbench` | `PhoenixFreeCADMCPWorkbench` |
-| 服务命令 | `PhoenixMCP_Start/Stop` | `PhoenixTools_StartMCP` / `PhoenixTools_StopMCP` |
-| Python 模块 | `phoenix_bridge.py` | `phoenix_freecad_bridge.py` |
-| 安装标记 addon 字段 | `PhoenixMCP` | `PhoenixFreeCADMCP` |
+| 范围 | 当前值 |
+| --- | --- |
+| 项目目录 | `phoenix-freecad-tools` |
+| 项目标题 | Phoenix FreeCAD Tools |
+| FreeCAD 工作台显示 | **Phoenix Tools** |
+| npm 包 / CLI / MCP 服务名 | `phoenix-freecad-mcp` |
+| 示例客户端服务条目 | `phoenix-freecad` |
+| 插件源码 / 安装目录 | `addon/PhoenixFreeCADMCP` / `PhoenixFreeCADMCP` |
+| 工作台类 | `PhoenixFreeCADMCPWorkbench` |
+| Python 桥接模块 | `phoenix_freecad_bridge.py` |
+| 安装标记 | `.phoenix-freecad-mcp-install.json` |
+| 本机桥接 | 默认端口 `9876`，协议版本 `1` |
 
-工作台业务工具与 MCP 接入可分别扩展；`phoenix-freecad-workbench` 更强调界面插件，本项目采用 `tools` 表达更宽泛的工具集合。
+实现版本为 `0.2.1`，不与桥接协议版本混用。环境变量使用 `PHOENIX_FREECAD_URL` 和 `PHOENIX_TIMEOUT_MS`。项目目录改名不要求同步修改稳定的 npm、CLI、安装标记 owner 或 HTTP 合同。
 
-保持不变：npm 包和 CLI `phoenix-freecad-mcp`、Codex 服务条目、环境变量、安装标记文件名及 owner、HTTP 方法、协议版本和本机端口 9876。
+## GUI 命令
 
-安装器只为识别已有安装而保留旧目录常量。它会核对安装标记与完整文件指纹，把旧目录移到 Mod 以外备份后安装新目录；新旧目录同时存在、文件被修改或出现未知文件时拒绝迁移。不提供旧运行命令或模块的兼容别名。
+| 命令 ID | 显示与作用 |
+| --- | --- |
+| `PhoenixTools_ToggleMCP` | 唯一 MCP 启停命令；绿色三角“启动 MCP · 已停止”、红色方块“停止 MCP · 运行中”，停止中显示“MCP 正在停止” |
+| `PhoenixTools_NormalizeNames` | 命名修正 |
+| `PhoenixTools_EditPartProperties` | 填写零件属性 |
+| `PhoenixTools_SyncLinkLabels` | 同步链接名称 |
 
-历史 Git 标签和归档保持原样，不作为新安装的执行来源。当前 FreeCAD 内存中的旧工作台需要注销并加载新工作台；既有控制台历史不会被修改。无法卸载的旧命令会在当前会话禁用，正常重启后只加载新命令。
+普通工作台命令统一使用 `PhoenixTools_` 前缀。fit、轴测和标准视图保留为 MCP 能力，不重复添加演示按钮。内部类与目录沿用插件技术身份，不要求与用户显示名称相同。
 
-工作台仍只显示服务启动/停止。fit 和轴测作为 MCP 能力保留，通过 FreeCAD 原生 API 执行。
+MCP 方法与参数是稳定机器标识；文档、对象和图纸参数使用 FreeCAD 内部 `Name`，显示 `Label` 是另一字段。现有普通命名工具只修改选中对象 Label，不重命名内部 Name、文件或目录。
 
-通用工作命令统一使用 `PhoenixTools_` 前缀，例如将来的 `PhoenixTools_CheckPartNames`。`PhoenixTools_Axonometric` 是可采用的命名示例，本版未注册该 GUI 命令；轴测仍通过 MCP 的 `set_axonometric_view` 调用。目录与工作台类属于插件技术身份，不要求和业务命令前缀相同。
+正式 BOM 字段为 `PartNumber`、`PartVersion`、`TypeCode`、`ModelSeries`、`PartName`，属性组为 `CustomDefine`。业务示例使用虚构值；公开文档不记录实际零件、生产型号、个人路径或聊天 ID。
+
+## 安装与升级
+
+安装器保留一次旧目录迁移识别，校验标记和完整文件指纹后备份到 Mod 目录外，再安装当前目录。冲突目录、未知文件、修改或符号链接触发保护，不提供旧运行命令或模块别名。历史标签和归档不改写为新版本。
+
+当前本机原桥接已停用、备份并移出加载目录，对应旧客户端条目已移除；这不意味着新安装器会自动卸载任意其他插件。已加载模块也不会因磁盘改名自动更新，升级须明确停止并重新加载或正常重启。
+
+中英文切换尚未实现。未来只翻译面向用户的文本，保持本页机器标识不变，见 [TODO](TODO.md)。
