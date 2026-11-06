@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Synthetic RPC lifecycle tests; never launches Codex or reads authentication."""
 import importlib.util
+from copy import deepcopy
 import json
 import os
+import sys
 from pathlib import Path
 import types
 import unittest
@@ -51,10 +53,34 @@ class PftTransport:
     def methods(self): return [message.get('method') for message in self.messages]
 
 
+class PftSessionStore:
+    """Private-store contract fake; no directories, credentials or files."""
+    def __init__(self, home, cwd, records=()):
+        self.home, self.cwd = home, cwd
+        self.records = {row['thread_id']: dict(row) for row in records}
+        self.gets, self.registrations = [], []
+        self.register_error = None
+
+    def get_session(self, thread_id):
+        self.gets.append(thread_id)
+        return dict(self.records[thread_id])
+
+    def register_thread(self, thread_id, created_at, model, scope_fingerprint, history_mode='paginated'):
+        self.registrations.append((thread_id, created_at, model, scope_fingerprint, history_mode))
+        if self.register_error is not None:
+            raise self.register_error
+        row = {'thread_id': thread_id, 'created_at': created_at, 'model': model,
+               'scope_fingerprint': scope_fingerprint, 'history_mode': history_mode,
+               'cli_version': '0.160.0', 'provider': 'openai'}
+        self.records[thread_id] = row
+        return dict(row)
+
+
 class PftChatControllerTests(unittest.TestCase):
     def setUp(self):
         self.transport, self.events, self.urls = PftTransport(), [], []
-        self.controller = chat.PftChatController(self.transport, self.events.append, lambda url: self.urls.append(url) or True)
+        self.controller = chat.PftChatController(self.transport, self.events.append, lambda url: self.urls.append(url) or True,
+                                                 network_environment=lambda: {})
         self.cwd = '/var/example/freecad-chat/clean'
         self.configured_mcp = None
     def mcp_config(self):
@@ -130,6 +156,30 @@ class PftChatControllerTests(unittest.TestCase):
     def complete(self, status='completed', items=None):
         self.transport.notify('turn/completed', {'threadId': 'private-thread-fixture',
             'turn': {'id': 'private-turn-fixture', 'items': items or [], 'status': status}})
+
+    def test_public_connection_generation_changes_on_connect_and_disconnect(self):
+        before = self.controller.snapshot['connection_generation']
+        self.assertIs(type(before), int)
+        self.ready()
+        connected = self.controller.snapshot['connection_generation']
+        self.assertGreater(connected, before)
+        self.controller.disconnect()
+        self.assertGreater(self.controller.snapshot['connection_generation'], connected)
+
+    def test_lease_acquisition_errors_preserve_safe_codes_without_initializing_or_retrying(self):
+        for suffix in ('BUSY', 'INVALID', 'UNSAFE', 'CHANGED', 'PROFILE_INVALID', 'UNSUPPORTED',
+                       'IO_FAILED', 'UPDATE_UNVERIFIED', 'RELEASE_UNVERIFIED', 'STATE_INVALID'):
+            with self.subTest(suffix=suffix):
+                self.setUp()
+                code = 'CHAT_PROCESS_LEASE_' + suffix
+                error = type('LeaseFailure', (RuntimeError,), {'code': code})('synthetic-private-process-path')
+                with patch.object(self.transport, 'start', side_effect=error):
+                    self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['error']['code'], code)
+                self.assertNotIn('synthetic-private-process-path', json.dumps(snapshot))
+                self.assertNotIn('initialize', self.transport.methods())
+                self.assertFalse(snapshot['can_send'])
 
     def test_model_catalog_uses_official_fields_and_publishes_only_complete_visible_text_choices(self):
         self.ready(load_models=False)
@@ -422,9 +472,69 @@ class PftChatControllerTests(unittest.TestCase):
                 self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_MODEL_INVALID')
         self.assertEqual(self.transport.starts, [])
 
+    def test_network_selection_runs_only_for_explicit_valid_connect_and_stays_out_of_public_state(self):
+        calls = []
+        proxy = "http://neutral-user:neutral-secret@proxy.example.invalid:8080"
+        def resolve():
+            calls.append("resolved")
+            return {"HTTPS_PROXY": proxy, "https_proxy": proxy,
+                    "NO_PROXY": "localhost,127.0.0.1,::1", "no_proxy": "localhost,127.0.0.1,::1"}
+        self.controller = chat.PftChatController(self.transport, self.events.append, lambda _url: True,
+                                                 network_environment=resolve)
+        self.assertEqual(calls, [])
+        self.controller.connect("relative", "/var/example/home", self.cwd)
+        self.assertEqual(calls, [])
+        self.controller.connect("/opt/example/codex", "/var/example/home", self.cwd)
+        self.assertEqual(calls, ["resolved"])
+        _, arguments, environment, *_ = self.transport.starts[-1]
+        self.assertEqual(environment["HTTPS_PROXY"], proxy)
+        self.assertEqual(environment["https_proxy"], proxy)
+        self.assertNotIn(proxy, repr(arguments))
+        self.assertNotIn(proxy, json.dumps(self.events))
+        self.assertEqual(self.transport.methods(), ["initialize"])
+        self.controller.connect("/opt/example/codex", "/var/example/home", self.cwd)
+        self.assertEqual(calls, ["resolved"])
+
+    def test_default_network_resolver_is_lazy_and_uses_the_current_environment(self):
+        seen = []
+        def build(environment):
+            seen.append({key: environment[key] for key in ("HTTPS_PROXY", "NO_PROXY")})
+            return {"HTTPS_PROXY": environment["HTTPS_PROXY"], "NO_PROXY": "localhost,127.0.0.1,::1"}
+        self.controller = chat.PftChatController(self.transport, self.events.append, lambda _url: True)
+        module = types.SimpleNamespace(build_chat_proxy_environment=build)
+        import sys
+        with patch.dict(sys.modules, {"pft_chat_network": module}), patch.dict(os.environ,
+                {"HTTPS_PROXY": "http://proxy.example.invalid:8080", "NO_PROXY": "example.invalid"}, clear=True):
+            self.assertEqual(seen, [])
+            self.controller.connect("/opt/example/codex", "/var/example/home", self.cwd)
+        self.assertEqual(seen, [{"HTTPS_PROXY": "http://proxy.example.invalid:8080", "NO_PROXY": "example.invalid"}])
+        self.assertEqual(self.transport.starts[-1][2]["HTTPS_PROXY"], "http://proxy.example.invalid:8080")
+
+    def test_network_configuration_error_is_sanitized_and_does_not_start_or_retry(self):
+        for code in ("CHAT_PROXY_READ_FAILED", "CHAT_PROXY_INVALID", "CHAT_PROXY_UNSUPPORTED", "untrusted"):
+            with self.subTest(code=code):
+                def fail():
+                    error = RuntimeError("neutral-secret@proxy.example.invalid")
+                    error.code = code
+                    raise error
+                self.controller._network_environment = fail
+                self.controller.connect("/opt/example/codex", "/var/example/home", self.cwd)
+                expected = code if code.startswith("CHAT_PROXY_") else "CHAT_PROXY_READ_FAILED"
+                self.assertEqual(self.controller.snapshot["error"]["code"], expected)
+                self.assertEqual(self.controller.snapshot["phase"], "disconnected")
+                self.assertNotIn("neutral-secret", json.dumps(self.events))
+                self.assertNotIn("example.invalid", json.dumps(self.events))
+                self.assertEqual(self.transport.starts, [])
+                self.assertEqual(self.transport.messages, [])
+                self.assertEqual(self.transport.stops, 0)
+        self.controller._network_environment = lambda: {"OPENAI_API_KEY": "neutral-secret"}
+        self.controller.connect("/opt/example/codex", "/var/example/home", self.cwd)
+        self.assertEqual(self.controller.snapshot["error"]["code"], "CHAT_PROXY_READ_FAILED")
+        self.assertEqual(self.transport.starts, [])
+
     def test_connect_only_initializes_and_reads_dedicated_account_without_refresh(self):
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'must-not-inherit', 'NODE_OPTIONS': '--injected',
-                                    'CODEX_AUTH_TOKEN': 'must-not-inherit', 'HTTP_PROXY': 'private-proxy'}):
+                                    'CODEX_AUTH_TOKEN': 'must-not-inherit'}):
             self.connect()
         self.assertEqual(self.transport.methods(), ['initialize', 'initialized', 'account/read'])
         self.assertEqual(self.transport.messages[-1]['params'], {'refreshToken': False})
@@ -434,7 +544,7 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertEqual(program, '/opt/example/codex')
         self.assertEqual(cwd, self.cwd)
         self.assertEqual(env['CODEX_HOME'], '/var/example/freecad-chat/config')
-        for key in ('OPENAI_API_KEY', 'NODE_OPTIONS', 'CODEX_AUTH_TOKEN', 'HTTP_PROXY'):
+        for key in ('OPENAI_API_KEY', 'NODE_OPTIONS', 'CODEX_AUTH_TOKEN'):
             self.assertNotIn(key, env)
         self.assertIn('apply_patch_freeform', args)
         self.assertNotIn('apply_patch', args)
@@ -520,7 +630,9 @@ class PftChatControllerTests(unittest.TestCase):
         self.transport.result('account/login/start', {'type': 'chatgpt', 'loginId': 'private-login',
             'authUrl': 'https://auth.openai.com/authorize'})
         self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_BROWSER_OPEN_FAILED')
-        self.assertEqual(self.transport.stops, 1)
+        self.assertEqual(self.transport.stops, 0)
+        self.assertEqual(self.controller.snapshot['phase'], 'logging_in')
+        self.controller.disconnect()
         self.connect()
         self.controller.open_url = lambda _url: True
         self.controller.login()
@@ -530,6 +642,88 @@ class PftChatControllerTests(unittest.TestCase):
         self.transport.error(types.SimpleNamespace(code='CHAT_TIMEOUT'))
         self.assertFalse(self.controller.snapshot['can_send'])
         self.assertNotIn('thread/start', self.transport.methods())
+
+    def test_login_link_stages_and_recovery_reuse_one_request_without_exposing_url(self):
+        self.connect()
+        self.controller.login()
+        self.assertEqual(self.controller.snapshot['login_stage'], 'requesting_link')
+        self.assertFalse(self.controller.snapshot['can_use_login_link'])
+        self.assertEqual(self.urls, [])
+        copied = []
+        self.assertFalse(self.controller.reopen_login())
+        self.assertFalse(self.controller.copy_login_link(copied.append))
+        url = 'https://auth.openai.com/authorize?fixture=neutral-login'
+        self.transport.result('account/login/start', {'type': 'chatgpt', 'loginId': 'neutral-login', 'authUrl': url})
+        self.assertEqual(self.controller.snapshot['login_stage'], 'browser_opened')
+        self.assertTrue(self.controller.snapshot['can_use_login_link'])
+        before_timeout = list(self.transport.timeouts)
+        self.assertTrue(self.controller.reopen_login())
+        self.assertTrue(self.controller.copy_login_link(copied.append))
+        self.assertEqual(copied, [url])
+        self.assertEqual(self.urls, [url, url])
+        self.assertEqual(self.transport.methods().count('account/login/start'), 1)
+        self.assertEqual(self.transport.timeouts, before_timeout)
+        self.assertNotIn(url, json.dumps(self.controller.snapshot))
+        self.transport.notify('account/login/completed', {'loginId': 'neutral-login', 'success': True})
+        self.assertEqual(self.controller.snapshot['phase'], 'connecting')
+        self.assertIsNone(self.controller.snapshot['login_stage'])
+        self.assertFalse(self.controller.snapshot['can_use_login_link'])
+        self.assertFalse(self.controller.reopen_login())
+        self.assertFalse(self.controller.copy_login_link(copied.append))
+        self.assertEqual(copied, [url])
+
+    def test_browser_rejection_or_exception_keeps_pending_link_and_fixed_recoverable_error(self):
+        for outcome in ('false', 'exception'):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                self.connect()
+                calls = []
+                def open_browser(url):
+                    calls.append(url)
+                    if outcome == 'exception': raise RuntimeError('Neutral browser diagnostic')
+                    return False
+                self.controller.open_url = open_browser
+                self.controller.login()
+                url = 'https://chatgpt.com/authorize?fixture=neutral-browser'
+                self.transport.result('account/login/start', {'type': 'chatgpt', 'loginId': 'neutral-login', 'authUrl': url})
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['phase'], 'logging_in')
+                self.assertEqual(snapshot['login_stage'], 'browser_open_failed')
+                self.assertEqual(snapshot['error']['code'], 'CHAT_BROWSER_OPEN_FAILED')
+                self.assertTrue(snapshot['can_use_login_link'])
+                self.assertNotIn(url, json.dumps(snapshot))
+                self.assertNotIn('Neutral browser diagnostic', json.dumps(snapshot))
+                self.assertEqual(self.transport.stops, 0)
+                self.controller.open_url = lambda value: calls.append(value) or True
+                self.assertTrue(self.controller.reopen_login())
+                self.assertEqual(calls, [url, url])
+                self.assertEqual(self.controller.snapshot['login_stage'], 'browser_opened')
+                self.assertIsNone(self.controller.snapshot['error'])
+                self.assertEqual(self.transport.methods().count('account/login/start'), 1)
+
+    def test_login_link_clears_on_cancel_disconnect_and_timeout_and_copy_failure_is_sanitized(self):
+        for ending in ('cancel', 'disconnect', 'timeout'):
+            with self.subTest(ending=ending):
+                self.setUp()
+                self.connect()
+                self.controller.login()
+                url = 'https://auth.openai.com/authorize?fixture=neutral-expiry'
+                self.transport.result('account/login/start', {'type': 'chatgpt', 'loginId': 'neutral-login', 'authUrl': url})
+                def copy_failure(_url): raise RuntimeError('Neutral clipboard diagnostic')
+                self.assertFalse(self.controller.copy_login_link(copy_failure))
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_LOGIN_LINK_COPY_FAILED')
+                self.assertTrue(self.controller.snapshot['can_use_login_link'])
+                if ending == 'cancel':
+                    self.transport.notify('account/login/completed', {'loginId': 'neutral-login', 'success': False})
+                elif ending == 'disconnect': self.controller.disconnect()
+                else: self.transport.error(types.SimpleNamespace(code='CHAT_TIMEOUT'))
+                self.assertIsNone(self.controller.snapshot['login_stage'])
+                self.assertFalse(self.controller.snapshot['can_use_login_link'])
+                self.assertFalse(self.controller.reopen_login())
+                copied = []
+                self.assertFalse(self.controller.copy_login_link(copied.append))
+                self.assertEqual(copied, [])
+                self.assertNotIn(url, json.dumps(self.controller.snapshot))
 
     def test_unknown_and_duplicate_response_ids_never_advance_the_handshake(self):
         self.controller.connect('/opt/example/codex', '/var/example/home', self.cwd)
@@ -641,6 +835,82 @@ class PftChatControllerTests(unittest.TestCase):
         old_data({'method': 'account/updated', 'params': {'authMode': 'chatgpt'}})
         old_error(types.SimpleNamespace(code='CHAT_TIMEOUT'))
         self.assertEqual(self.controller.snapshot, before)
+
+    @patch.object(chat.time, 'monotonic', return_value=100.0)
+    def test_terminal_turn_retires_unanswered_requests_and_ignores_late_errors(self, _clock):
+        for method in ('turn/start', 'turn/interrupt'):
+            with self.subTest(method=method):
+                self.setUp()
+                self.ready()
+                self.controller.send('Neutral completion example')
+                self.pass_config()
+                self.transport.result('mcpServerStatus/list', self.inventory())
+                self.transport.result('thread/start', self.thread_result())
+                self.transport.result('mcpServerStatus/list', self.inventory(True))
+                if method == 'turn/interrupt':
+                    self.transport.result('turn/start', {'turn': {
+                        'id': self.event()['turnId'], 'items': [], 'status': 'inProgress'}})
+                    self.controller.interrupt()
+                request = self.transport.messages[-1]
+                self.assertEqual(request['method'], method)
+                self.complete('interrupted' if method == 'turn/interrupt' else 'completed')
+                before = self.controller.snapshot
+                self.assertTrue(before['can_send'])
+                self.assertIsNone(self.transport.timeouts[-1])
+                self.assertEqual(self.controller._pending, {})
+                late_responses = (
+                    {'id': request['id'], 'error': {
+                        'code': -32000, 'message': 'Neutral stale response'}},
+                    {'id': request['id'], 'result': {}})
+                for response in late_responses:
+                    self.transport.data(response)
+                    self.assertEqual(self.controller.snapshot, before)
+                self.controller.send('Neutral follow-up')
+                self.assertEqual(self.transport.messages[-1]['method'], 'config/read')
+                next_turn = self.controller.snapshot
+                for response in late_responses:
+                    self.transport.data(response)
+                    self.assertEqual(self.controller.snapshot, next_turn)
+                self.assertEqual(self.transport.stops, 0)
+
+    @patch.object(chat.time, 'monotonic', return_value=100.0)
+    def test_old_turn_notifications_cannot_claim_a_new_pending_turn(self, _clock):
+        for method in ('turn/started', 'turn/completed'):
+            with self.subTest(method=method):
+                self.setUp()
+                self.ready()
+                self.start_turn('Neutral first question')
+                self.complete()
+                self.controller.send('Neutral second question')
+                self.pass_config()
+                self.transport.result('mcpServerStatus/list', self.inventory())
+                self.transport.result('mcpServerStatus/list', self.inventory(True))
+                before = self.controller.snapshot
+                pending, timeouts = dict(self.controller._pending), list(self.transport.timeouts)
+                self.assertIsNone(self.controller._turn_id)
+                self.transport.notify(method, {'threadId': self.event()['threadId'], 'turn': {
+                    'id': self.event()['turnId'], 'items': [],
+                    'status': 'inProgress' if method == 'turn/started' else 'completed'}})
+                self.assertEqual(self.controller.snapshot, before)
+                self.assertIsNone(self.controller._turn_id)
+                self.assertEqual(self.controller._pending, pending)
+                self.assertEqual(self.transport.timeouts, timeouts)
+                self.transport.result('turn/start', {'turn': {
+                    'id': 'neutral-next-turn', 'items': [], 'status': 'inProgress'}})
+                self.transport.notify('item/agentMessage/delta', self.event(
+                    turnId='neutral-next-turn', itemId='neutral-next-reply', delta='Neutral answer'))
+                self.transport.notify('turn/completed', {'threadId': self.event()['threadId'],
+                    'turn': {'id': 'neutral-next-turn', 'items': [], 'status': 'completed'}})
+                self.assertTrue(self.controller.snapshot['can_send'])
+                self.assertEqual(self.controller.snapshot['transcript'][-1]['text'], 'Neutral answer')
+                self.assertEqual(self.transport.stops, 0)
+                self.controller.disconnect()
+                self.assertEqual(self.controller._completed_turns, set())
+                self.ready()
+                self.start_turn('Neutral question after reconnect')
+                self.complete()
+                self.assertTrue(self.controller.snapshot['can_send'])
+                self.assertIsNone(self.controller.snapshot['error'])
 
     def test_unknown_approval_is_explicitly_rejected_and_no_tool_is_executed(self):
         self.ready()
@@ -852,7 +1122,8 @@ class PftChatControllerTests(unittest.TestCase):
                 self.assertNotIn('/private', json.dumps(self.controller.snapshot))
                 self.assertFalse(self.controller.snapshot['can_send'])
 
-    def test_invalid_retry_flags_fail_closed_and_old_turn_errors_are_ignored(self):
+    @patch.object(chat.time, 'monotonic', return_value=100.0)
+    def test_invalid_retry_flags_fail_closed_and_old_turn_errors_are_ignored(self, _clock):
         for retry in (None, 0, 1, 'true', []):
             with self.subTest(retry=retry):
                 self.ready()
@@ -1016,6 +1287,10 @@ class PftChatControllerTests(unittest.TestCase):
                         thread_request = self.transport.messages[-1]
                         instructions = thread_request['params']['developerInstructions']
                         self.assertIn('inspect_design', instructions)
+                        self.assertIn('add_drawing_dimensions', instructions)
+                        self.assertIn('Edge0-based', instructions)
+                        self.assertIn('native_reference_and_value_checked', instructions)
+                        self.assertIn('never supply measurement overrides', instructions)
                         self.assertIn('cached constraints', instructions)
                         self.assertIn('never solve sketches or recompute automatically', instructions)
                         self.transport.result('thread/start', self.thread_result())
@@ -1219,6 +1494,969 @@ class PftChatControllerTests(unittest.TestCase):
         self.complete()
         self.assertTrue(self.controller.snapshot['can_send'])
         self.assertNotIn(image, json.dumps(self.controller.snapshot))
+
+
+    def test_turn_timing_starts_at_accepted_send_and_includes_preflight_from_zero(self):
+        with patch.object(chat.time, 'monotonic', return_value=0.0) as clock:
+            self.ready()
+            self.assertIsNone(self.controller.snapshot['turn_timing'])
+            self.assertEqual(self.controller.snapshot['message_times'], [])
+            self.controller.send('Synthetic timing question')
+            self.assertEqual(self.controller.snapshot['turn_timing'], {
+                'elapsed_seconds': 0.0, 'first_response_seconds': None,
+                'running': True, 'finished': False})
+            clock.return_value = 2.25
+            self.assertEqual(self.controller.snapshot['transcript'], [])
+            self.assertEqual(self.controller.snapshot['turn_timing']['elapsed_seconds'], 2.25)
+            self.pass_config()
+            self.transport.result('mcpServerStatus/list', self.inventory())
+            self.transport.result('thread/start', self.thread_result())
+            clock.return_value = 6.5
+            self.transport.result('mcpServerStatus/list', self.inventory(True))
+            self.transport.result('turn/start', {'turn': {
+                'id': self.event()['turnId'], 'items': [], 'status': 'inProgress'}})
+            self.assertEqual(self.controller.snapshot['turn_timing']['elapsed_seconds'], 6.5)
+            clock.return_value = 8.125
+            self.transport.notify('item/agentMessage/delta', self.event(itemId='clock-reply', delta='Answer'))
+            self.assertEqual(self.controller.snapshot['turn_timing']['first_response_seconds'], 8.125)
+            clock.return_value = 11.0
+            self.complete()
+            frozen = self.controller.snapshot['turn_timing']
+            clock.return_value = 80.0
+            self.assertEqual(self.controller.snapshot['turn_timing'], frozen)
+            self.assertEqual(frozen, {'elapsed_seconds': 11.0, 'first_response_seconds': 8.125,
+                                      'running': False, 'finished': True})
+
+    def test_message_times_track_row_creation_and_survive_stream_updates_until_connect(self):
+        with patch.object(chat.time, 'monotonic', return_value=10.0), \
+                patch.object(chat.time, 'strftime', side_effect=['08:20', '08:21', '08:22']) as wall_clock:
+            self.ready()
+            self.start_turn('Neutral timestamp question')
+            self.transport.notify('item/agentMessage/delta', self.event(itemId='timestamp-reply', delta=''))
+            self.transport.notify('item/agentMessage/delta', self.event(itemId='timestamp-reply', delta='Draft'))
+            final = {'id': 'timestamp-reply', 'type': 'agentMessage', 'text': 'Completed answer'}
+            self.transport.notify('item/completed', self.event(item=final))
+            self.transport.notify('item/agentMessage/delta', self.event(itemId='timestamp-reply', delta='Ignored'))
+            second = {'id': 'timestamp-next', 'type': 'agentMessage', 'text': 'Another answer item'}
+            self.complete(items=[final, second])
+            snapshot = self.controller.snapshot
+            self.assertEqual(snapshot['message_times'], ['08:20', '08:21', '08:22'])
+            self.assertEqual(len(snapshot['message_times']), len(snapshot['transcript']))
+            self.assertTrue(all(set(row) == {'role', 'text', 'status'} for row in snapshot['transcript']))
+            self.assertEqual(wall_clock.call_count, 3)
+            self.assertTrue(all(call.args == ('%H:%M',) for call in wall_clock.call_args_list))
+            snapshot['message_times'].clear()
+            snapshot['turn_timing']['elapsed_seconds'] = 900.0
+            self.assertEqual(len(self.controller.snapshot['message_times']), 3)
+            self.assertEqual(self.controller.snapshot['turn_timing']['elapsed_seconds'], 0.0)
+            self.controller.disconnect()
+            self.assertEqual(self.controller.snapshot['message_times'], ['08:20', '08:21', '08:22'])
+            self.ready()
+            self.assertEqual(self.controller.snapshot['message_times'], [])
+            self.assertEqual(self.controller.snapshot['transcript'], [])
+            self.assertIsNone(self.controller.snapshot['turn_timing'])
+
+    def test_first_response_excludes_tools_recovery_reasoning_and_blank_text(self):
+        with patch.object(chat.time, 'monotonic', return_value=100.0) as clock:
+            self.ready(mcp=self.mcp_config())
+            self.start_turn()
+            count = len(self.transport.messages)
+            clock.return_value = 105.0
+            tool = {'id': 'timing-tool', 'type': 'mcpToolCall', 'server': 'phoenix_freecad',
+                    'tool': 'get_capabilities', 'status': 'inProgress'}
+            self.transport.notify('item/started', self.event(item=tool))
+            self.transport.notify('error', self.event(willRetry=True, error={'codexErrorInfo': 'serverOverloaded'}))
+            self.transport.notify('item/started', self.event(item={'id': 'timing-reasoning', 'type': 'reasoning'}))
+            self.transport.notify('item/agentMessage/delta', self.event(itemId='timing-blank', delta=''))
+            self.transport.notify('item/agentMessage/delta', self.event(itemId='timing-blank', delta=' \n\t'))
+            self.assertIsNone(self.controller.snapshot['turn_timing']['first_response_seconds'])
+            self.assertEqual(len(self.transport.messages), count)
+            clock.return_value = 108.25
+            answer = {'id': 'timing-blank', 'type': 'agentMessage', 'text': 'Visible answer'}
+            self.transport.notify('item/completed', self.event(item=answer))
+            clock.return_value = 110.0
+            self.complete(items=[answer])
+            self.assertEqual(self.controller.snapshot['turn_timing'], {
+                'elapsed_seconds': 10.0, 'first_response_seconds': 8.25,
+                'running': False, 'finished': True})
+            self.assertEqual(self.transport.methods().count('turn/start'), 1)
+
+    def test_all_terminal_turn_statuses_freeze_timing_without_late_changes(self):
+        for status in ('completed', 'interrupted', 'failed'):
+            with self.subTest(status=status), patch.object(chat.time, 'monotonic', return_value=100.0) as clock:
+                self.setUp()
+                self.ready()
+                self.start_turn()
+                clock.return_value = 105.0
+                self.transport.notify('item/agentMessage/delta', self.event(itemId='terminal-clock', delta='Answer'))
+                if status == 'interrupted':
+                    self.controller.interrupt()
+                    self.assertTrue(self.controller.snapshot['turn_timing']['running'])
+                clock.return_value = 108.0
+                self.complete(status)
+                frozen = self.controller.snapshot['turn_timing']
+                self.assertEqual(frozen, {'elapsed_seconds': 8.0, 'first_response_seconds': 5.0,
+                                          'running': False, 'finished': True})
+                clock.return_value = 140.0
+                self.transport.notify('item/agentMessage/delta', self.event(itemId='terminal-late', delta='Ignored'))
+                self.assertEqual(self.controller.snapshot['turn_timing'], frozen)
+                self.assertEqual(len(self.controller.snapshot['message_times']), 2)
+
+    def test_stop_and_preflight_failures_freeze_elapsed_without_a_transcript_row(self):
+        for ending in ('disconnect', 'timeout', 'process_exit', 'preparation_cancel', 'config_failure'):
+            with self.subTest(ending=ending), patch.object(chat.time, 'monotonic', return_value=0.0) as clock:
+                self.setUp()
+                self.ready()
+                self.controller.send('Neutral preflight timing')
+                clock.return_value = 2.5
+                if ending == 'disconnect':
+                    self.controller.disconnect()
+                elif ending == 'timeout':
+                    self.transport.error(types.SimpleNamespace(code='CHAT_TIMEOUT'))
+                elif ending == 'process_exit':
+                    self.transport.exit(1)
+                elif ending == 'preparation_cancel':
+                    self.controller.interrupt()
+                else:
+                    self.transport.result('config/read', {'config': {}})
+                self.assertEqual(self.controller.snapshot['transcript'], [])
+                self.assertEqual(self.controller.snapshot['message_times'], [])
+                frozen = self.controller.snapshot['turn_timing']
+                self.assertEqual(frozen, {'elapsed_seconds': 2.5, 'first_response_seconds': None,
+                                          'running': False, 'finished': True})
+                clock.return_value = 1000.0
+                self.assertEqual(self.controller.snapshot['turn_timing'], frozen)
+
+    def test_rejected_sends_preserve_timing_and_next_accepted_send_starts_a_new_clock(self):
+        with patch.object(chat.time, 'monotonic', return_value=10.0) as clock:
+            self.ready()
+            self.controller.send(' ')
+            self.assertIsNone(self.controller.snapshot['turn_timing'])
+            self.start_turn()
+            clock.return_value = 12.0
+            self.controller.send('Overlapping neutral question')
+            self.assertEqual(self.controller.snapshot['turn_timing']['elapsed_seconds'], 2.0)
+            clock.return_value = 14.0
+            self.complete()
+            first = self.controller.snapshot['turn_timing']
+            clock.return_value = 20.0
+            self.controller.send('')
+            self.assertEqual(self.controller.snapshot['turn_timing'], first)
+            self.controller.send('Next neutral question')
+            self.assertEqual(self.controller.snapshot['turn_timing'], {
+                'elapsed_seconds': 0.0, 'first_response_seconds': None,
+                'running': True, 'finished': False})
+            self.assertEqual(len(self.controller.snapshot['message_times']), 1)
+            self.assertEqual(len(self.controller.snapshot['transcript']), 1)
+            clock.return_value = 23.0
+            self.transport.result('config/read', {'config': {}})
+            self.assertEqual(self.controller.snapshot['turn_timing']['elapsed_seconds'], 3.0)
+
+    def test_budget_rejection_never_appends_timestamp_or_counts_a_failed_first_response(self):
+        for failing_row in ('user', 'assistant'):
+            with self.subTest(failing_row=failing_row), patch.object(chat.time, 'monotonic', return_value=10.0) as clock:
+                self.setUp()
+                self.ready()
+                if failing_row == 'assistant':
+                    self.start_turn('Q')
+                    clock.return_value = 15.0
+                    with patch.object(chat, '_PFT_OUTPUT_LIMIT', 4):
+                        self.transport.notify('item/agentMessage/delta', self.event(itemId='too-large', delta='Large'))
+                    expected = 1
+                else:
+                    self.controller.send('Large')
+                    self.pass_config()
+                    self.transport.result('mcpServerStatus/list', self.inventory())
+                    self.transport.result('thread/start', self.thread_result())
+                    clock.return_value = 15.0
+                    with patch.object(chat, '_PFT_OUTPUT_LIMIT', 4):
+                        self.transport.result('mcpServerStatus/list', self.inventory(True))
+                    expected = 0
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['error']['code'], 'CHAT_OUTPUT_TOO_LARGE')
+                self.assertEqual(len(snapshot['transcript']), expected)
+                self.assertEqual(len(snapshot['message_times']), expected)
+                self.assertEqual(snapshot['turn_timing'], {'elapsed_seconds': 5.0,
+                    'first_response_seconds': None, 'running': False, 'finished': True})
+
+    def test_final_only_zero_second_response_and_early_terminal_rpc_keep_frozen_timing(self):
+        with patch.object(chat.time, 'monotonic', return_value=0.0) as clock:
+            self.ready()
+            self.controller.send('Neutral final-only question')
+            self.pass_config()
+            self.transport.result('mcpServerStatus/list', self.inventory())
+            self.transport.result('thread/start', self.thread_result())
+            self.transport.result('mcpServerStatus/list', self.inventory(True))
+            answer = {'id': 'final-clock-answer', 'type': 'agentMessage', 'text': 'Final-only answer'}
+            self.complete(items=[answer])
+            expected = {'elapsed_seconds': 0.0, 'first_response_seconds': 0.0,
+                        'running': False, 'finished': True}
+            self.assertEqual(self.controller.snapshot['turn_timing'], expected)
+            clock.return_value = 20.0
+            self.transport.result('turn/start', {'turn': {
+                'id': self.event()['turnId'], 'items': [], 'status': 'inProgress'}})
+            self.assertEqual(self.controller.snapshot['turn_timing'], expected)
+            self.assertEqual(len(self.controller.snapshot['message_times']), 2)
+
+
+    def test_failed_terminal_payload_alone_classifies_typed_errors_and_stops_without_resend(self):
+        cases = [
+            ('unauthorized', 'CHAT_AUTH_FAILED'),
+            ({'responseStreamConnectionFailed': {'httpStatusCode': 403}}, 'CHAT_AUTH_FAILED'),
+            ('usageLimitExceeded', 'CHAT_LIMIT_REACHED'),
+            ({'httpConnectionFailed': {'httpStatusCode': 429}}, 'CHAT_LIMIT_REACHED'),
+            ('badRequest', 'CHAT_MODEL_REQUEST_FAILED'),
+            ({'httpConnectionFailed': {'httpStatusCode': 422}}, 'CHAT_MODEL_REQUEST_FAILED'),
+            ({'responseStreamDisconnected': {'httpStatusCode': None}}, 'CHAT_NETWORK_FAILED'),
+            ({'httpConnectionFailed': {'httpStatusCode': 503}}, 'CHAT_NETWORK_FAILED'),
+            ('other', 'CHAT_TURN_FAILED'),
+            (None, 'CHAT_TURN_FAILED'),
+        ]
+        for info, expected in cases:
+            with self.subTest(info=info):
+                self.setUp()
+                self.ready()
+                self.start_turn('Neutral terminal failure')
+                self.transport.notify('item/agentMessage/delta', self.event(itemId='partial', delta='Draft answer'))
+                before_count = len(self.transport.messages)
+                self.transport.notify('turn/completed', {'threadId': self.event()['threadId'], 'turn': {
+                    'id': self.event()['turnId'], 'status': 'failed', 'items': [],
+                    'error': {'codexErrorInfo': info, 'message': 'synthetic-private-provider-text',
+                              'additionalDetails': 'https://example.invalid/synthetic-private-details'}}})
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['error']['code'], expected)
+                self.assertEqual(snapshot['phase'], 'error')
+                self.assertFalse(snapshot['can_send'])
+                self.assertEqual(snapshot['transcript'][-1]['status'], 'error')
+                self.assertEqual(self.transport.stops, 1)
+                self.assertEqual(len(self.transport.messages), before_count)
+                self.assertEqual(self.transport.methods().count('turn/start'), 1)
+                self.assertEqual(self.controller._pending, {})
+                self.assertIsNone(self.transport.timeouts[-1])
+                for event in self.events + [snapshot]:
+                    self.assertNotIn('synthetic-private-provider', json.dumps(event))
+                    self.assertNotIn('synthetic-private-details', json.dumps(event))
+
+    def test_terminal_failure_missing_empty_or_unknown_error_remains_generic_and_stopped(self):
+        for error in (None, {}, 'synthetic-private-error', [],
+                      {'message': 'synthetic-private-error'},
+                      {'codexErrorInfo': {'unknown': {}}, 'message': 'synthetic-private-error'}):
+            with self.subTest(error=error):
+                self.setUp()
+                self.ready()
+                self.start_turn('Neutral fallback failure')
+                self.transport.notify('turn/completed', {'threadId': self.event()['threadId'], 'turn': {
+                    'id': self.event()['turnId'], 'status': 'failed', 'items': [], 'error': error}})
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['error']['code'], 'CHAT_TURN_FAILED')
+                self.assertEqual(snapshot['phase'], 'error')
+                self.assertFalse(snapshot['can_send'])
+                self.assertEqual(self.transport.stops, 1)
+                self.assertNotIn('synthetic-private-error', json.dumps(snapshot))
+
+    def test_failed_turn_start_response_uses_same_terminal_classification(self):
+        self.ready()
+        self.controller.send('Neutral immediate failure')
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        self.transport.result('thread/start', self.thread_result())
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.transport.result('turn/start', {'turn': {
+            'id': self.event()['turnId'], 'status': 'failed', 'items': [],
+            'error': {'codexErrorInfo': 'unauthorized', 'message': 'synthetic-private-auth'}}})
+        self.assertEqual(self.controller.snapshot['phase'], 'error')
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_AUTH_FAILED')
+        self.assertEqual(self.transport.stops, 1)
+        self.assertEqual(self.transport.methods().count('turn/start'), 1)
+        self.assertNotIn('synthetic-private-auth', json.dumps(self.controller.snapshot))
+
+    def test_interrupt_ack_keeps_streaming_until_terminal_then_marks_completed_item_incomplete(self):
+        self.ready()
+        self.start_turn('Neutral interrupted answer')
+        self.transport.notify('item/agentMessage/delta', self.event(itemId='reply', delta='Partial answer'))
+        self.controller.interrupt()
+        self.transport.result('turn/interrupt', {})
+        self.assertEqual(self.controller.snapshot['phase'], 'interrupting')
+        self.assertEqual(self.controller.snapshot['transcript'][-1]['status'], 'streaming')
+        final_item = {'id': 'reply', 'type': 'agentMessage', 'text': 'Partial answer'}
+        self.complete('interrupted', items=[final_item])
+        ended = self.controller.snapshot
+        self.assertEqual(ended['phase'], 'ready')
+        self.assertEqual(ended['transcript'][-1]['status'], 'interrupted')
+        self.assertTrue(ended['can_send'])
+        self.assertEqual(self.transport.stops, 0)
+        self.transport.notify('item/completed', self.event(item=final_item))
+        self.complete()
+        self.assertEqual(self.controller.snapshot, ended)
+
+    def test_failed_terminal_marks_last_completed_agent_item_without_rewriting_earlier_items(self):
+        self.ready()
+        self.start_turn('Neutral failed answer')
+        commentary = {'id': 'commentary', 'type': 'agentMessage', 'phase': 'commentary', 'text': 'Checking.'}
+        answer = {'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': 'Partial final answer'}
+        self.transport.notify('item/completed', self.event(item=commentary))
+        self.transport.notify('item/completed', self.event(item=answer))
+        self.complete('failed', items=[commentary, answer])
+        rows = self.controller.snapshot['transcript']
+        self.assertEqual([row['status'] for row in rows], ['complete', 'complete', 'error'])
+        self.assertEqual(rows[-1]['text'], 'Partial final answer')
+        self.assertEqual(self.controller.snapshot['phase'], 'error')
+
+    def test_interrupted_message_marker_survives_next_turn_and_old_terminal_is_ignored(self):
+        self.ready()
+        self.start_turn('Neutral first turn')
+        self.transport.notify('item/agentMessage/delta', self.event(itemId='old-answer', delta='Old partial answer'))
+        self.complete('interrupted')
+        first = self.controller.snapshot['transcript'][-1]
+        self.controller.send('Neutral follow-up turn')
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.transport.result('turn/start', {'turn': {'id': 'neutral-next-turn', 'items': [], 'status': 'inProgress'}})
+        self.transport.notify('item/agentMessage/delta', self.event(
+            turnId='neutral-next-turn', itemId='new-answer', delta='New complete answer'))
+        before = self.controller.snapshot
+        self.transport.notify('turn/completed', {'threadId': self.event()['threadId'], 'turn': {
+            'id': self.event()['turnId'], 'status': 'failed', 'items': [],
+            'error': {'codexErrorInfo': 'unauthorized', 'message': 'synthetic-private-old-error'}}})
+        self.assertEqual(self.controller.snapshot, before)
+        self.transport.notify('turn/completed', {'threadId': self.event()['threadId'], 'turn': {
+            'id': 'neutral-next-turn', 'status': 'completed', 'items': []}})
+        rows = self.controller.snapshot['transcript']
+        self.assertEqual(rows[1], first)
+        self.assertEqual(rows[1]['status'], 'interrupted')
+        self.assertEqual(rows[-1]['status'], 'complete')
+        self.assertTrue(self.controller.snapshot['can_send'])
+        self.assertEqual(self.transport.stops, 0)
+
+    def test_disconnect_after_success_or_next_preflight_failure_never_marks_previous_success_incomplete(self):
+        for ending in ('disconnect', 'preflight_failure'):
+            with self.subTest(ending=ending):
+                self.setUp()
+                self.ready()
+                self.start_turn('Neutral successful turn')
+                self.transport.notify('item/agentMessage/delta', self.event(itemId='finished', delta='Completed answer'))
+                self.complete()
+                before = self.controller.snapshot['transcript']
+                if ending == 'disconnect':
+                    self.controller.disconnect()
+                else:
+                    self.controller.send('Neutral next preflight')
+                    self.transport.result('config/read', {'config': {}})
+                self.assertEqual(self.controller.snapshot['transcript'], before)
+                self.assertEqual(before[-1]['status'], 'complete')
+
+    def test_disconnect_during_completed_item_before_turn_terminal_marks_only_current_output(self):
+        self.ready()
+        self.start_turn('Neutral disconnect')
+        self.transport.notify('item/completed', self.event(item={
+            'id': 'not-terminal', 'type': 'agentMessage', 'text': 'Text before terminal'}))
+        self.controller.disconnect()
+        self.assertEqual(self.controller.snapshot['transcript'][-1]['status'], 'interrupted')
+        self.assertEqual(self.controller.snapshot['phase'], 'disconnected')
+
+
+    def persistent_record(self, mcp=None, **changes):
+        row = {'thread_id': 'neutral-persistent-thread', 'created_at': 1740000000,
+               'model': 'fixture-model', 'scope_fingerprint': chat.chat_scope_fingerprint(mcp),
+               'history_mode': 'paginated', 'cli_version': '0.160.0', 'provider': 'openai'}
+        row.update(changes)
+        return row
+
+    def persistent_store(self, records=()):
+        return PftSessionStore('/var/example/freecad-chat/config', self.cwd, records)
+
+    def persistent_metadata(self, runtime='idle', **changes):
+        row = {'id': 'neutral-persistent-thread', 'createdAt': 1740000000,
+               'cliVersion': '0.160.0', 'model': 'fixture-model', 'modelProvider': 'openai',
+               'ephemeral': False, 'historyMode': 'paginated', 'cwd': self.cwd,
+               'status': {'type': runtime}, 'turns': []}
+        row.update(changes)
+        return row
+
+    def persistent_result(self, runtime='idle', **changes):
+        value = self.thread_result()
+        value['thread'] = self.persistent_metadata(runtime)
+        value['instructionSources'] = []
+        value.update(changes)
+        return value
+
+    def connect_persistent(self, record=None, mcp=None, retain=True, model_id=None, through_models=True):
+        if record is None:
+            record = self.persistent_record(mcp)
+        self.store = self.persistent_store([record])
+        self.configured_mcp = mcp
+        self.controller.connect('/opt/example/codex', self.store.home, self.cwd, mcp=mcp,
+                                model_id=model_id, retain_history=retain,
+                                resume_session=record, session_store=self.store)
+        if not self.transport.starts:
+            return
+        self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.160.0 (fixture)'})
+        self.transport.result('account/read', {'account': {'type': 'chatgpt'}})
+        if through_models:
+            self.transport.result('model/list', {'data': [self.model_row()]})
+
+    def install_history_projection(self):
+        module_spec = importlib.util.spec_from_file_location('pft_chat_history', ADDON / 'pft_chat_history.py')
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        handle = patch.dict(sys.modules, {'pft_chat_history': module})
+        handle.start()
+        self.addCleanup(handle.stop)
+
+    def resume_until_history(self, mcp=None, runtime='idle'):
+        self.install_history_projection()
+        self.connect_persistent(mcp=mcp)
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        self.transport.result('thread/read', {'thread': self.persistent_metadata('notLoaded')})
+        self._resume_result_runtime = runtime
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/turns/list')
+        self.assertNotIn('thread/resume', self.transport.methods())
+
+    def history_turn(self, identifier='old-turn', status='completed'):
+        return {'id': identifier, 'status': status, 'items': [], 'itemsView': 'notLoaded'}
+
+    def history_entry(self, identifier='old-answer', text='Neutral stored answer', turn_id='old-turn', role='assistant', **changes):
+        item = {'id': identifier, 'type': 'agentMessage', 'text': text}
+        if role == 'user':
+            item = {'id': identifier, 'type': 'userMessage', 'content': [{'type': 'text', 'text': text}]}
+        result = {'turnId': turn_id, 'item': item}
+        result.update(changes)
+        return result
+
+    def finish_one_history_turn(self, status='completed', runtime='idle', entries=None):
+        self.transport.result('thread/turns/list', {'data': [self.history_turn(status=status)]})
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/items/list')
+        self.transport.result('thread/items/list', {'data': entries if entries is not None else [self.history_entry()]})
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/read')
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.transport.result('thread/read', {'thread': self.persistent_metadata()})
+        self.finish_history_resume(runtime)
+
+    def finish_history_resume(self, runtime='idle'):
+        if self.transport.messages[-1]['method'] != 'thread/resume':
+            return
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.transport.result('thread/resume', self.persistent_result(getattr(self, '_resume_result_runtime', 'idle')))
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/read')
+        self.transport.result('thread/read', {'thread': self.persistent_metadata(runtime)})
+
+    def test_scope_fingerprint_is_deterministic_and_binds_exact_tool_configuration_without_plaintext(self):
+        plain = chat.chat_scope_fingerprint()
+        mcp = self.mcp_config()
+        scoped = chat.chat_scope_fingerprint(mcp)
+        self.assertRegex(plain, r'^[0-9a-f]{64}$')
+        self.assertNotEqual(plain, scoped)
+        self.assertEqual(scoped, chat.chat_scope_fingerprint(dict(reversed(list(mcp.items())))))
+        self.assertNotIn(mcp['cli_entry'], scoped)
+        changed = dict(mcp, bridge_url='http://127.0.0.1:9877')
+        self.assertNotEqual(scoped, chat.chat_scope_fingerprint(changed))
+        with patch.object(chat, '_PFT_CHAT_TOOLS', chat._PFT_CHAT_TOOLS + ('synthetic-extra-tool',)):
+            self.assertNotEqual(scoped, chat.chat_scope_fingerprint(mcp))
+
+    def test_default_temporary_connection_never_touches_an_injected_store(self):
+        class UnreadableStore:
+            def __getattribute__(self, _name): raise AssertionError('must not access store')
+        self.controller = chat.PftChatController(self.transport, self.events.append, lambda _url: True,
+            network_environment=lambda: {}, session_store=UnreadableStore())
+        self.ready()
+        self.start_turn('Neutral temporary request')
+        request = next(row for row in self.transport.messages if row.get('method') == 'thread/start')
+        self.assertIs(request['params']['ephemeral'], True)
+        self.assertEqual(self.controller.snapshot['history_status'], 'inactive')
+        self.assertIsNone(self.controller.snapshot['registered_session'])
+        self.assertNotIn('thread/read', self.transport.methods())
+        self.assertNotIn('thread/resume', self.transport.methods())
+
+    def test_new_persistent_thread_registers_only_after_thread_inventory_and_before_first_turn(self):
+        self.store = self.persistent_store()
+        self.controller.connect('/opt/example/codex', self.store.home, self.cwd, retain_history=True, session_store=self.store)
+        self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.160.0 (fixture)'})
+        self.transport.result('account/read', {'account': {'type': 'chatgpt'}})
+        self.transport.result('model/list', {'data': [self.model_row()]})
+        self.controller.send('Neutral retained request')
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        params = self.transport.messages[-1]['params']
+        self.assertIs(params['ephemeral'], False)
+        self.assertNotIn('historyMode', params)
+        self.assertNotIn('persistExtendedHistory', params)
+        self.transport.result('thread/start', self.persistent_result())
+        self.assertEqual(self.store.registrations, [])
+        self.assertNotIn('turn/start', self.transport.methods())
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.assertEqual(len(self.store.registrations), 1)
+        self.assertEqual(self.transport.messages[-1]['method'], 'turn/start')
+        self.assertEqual(self.controller.snapshot['registered_session'], self.persistent_record())
+        self.assertEqual(self.transport.messages[-1]['params']['input'], [{'type': 'text', 'text': 'Neutral retained request'}])
+
+    def test_persistent_registration_failure_or_bad_metadata_never_sends_first_user_text(self):
+        for failure in ('store', 'legacy', 'timestamp', 'provider', 'reviewer'):
+            with self.subTest(failure=failure):
+                self.setUp()
+                store = self.persistent_store()
+                if failure == 'store': store.register_error = RuntimeError('synthetic-private-register-error')
+                self.controller.connect('/opt/example/codex', store.home, self.cwd, retain_history=True, session_store=store)
+                self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.160.0 (fixture)'})
+                self.transport.result('account/read', {'account': {'type': 'chatgpt'}})
+                self.transport.result('model/list', {'data': [self.model_row()]})
+                self.controller.send('Neutral not-sent retained request')
+                self.pass_config()
+                self.transport.result('mcpServerStatus/list', self.inventory())
+                result = self.persistent_result()
+                if failure == 'legacy': result['thread']['historyMode'] = 'legacy'
+                elif failure == 'timestamp': result['thread']['createdAt'] = True
+                elif failure == 'provider': result['thread']['modelProvider'] = 'unknown-provider'
+                elif failure == 'reviewer': result['approvalsReviewer'] = 'unknown-reviewer'
+                self.transport.result('thread/start', result)
+                if failure == 'store': self.transport.result('mcpServerStatus/list', self.inventory(True))
+                self.assertEqual(self.controller.snapshot['phase'], 'error')
+                self.assertNotIn('turn/start', self.transport.methods())
+                self.assertEqual(self.controller.snapshot['transcript'], [])
+                self.assertIsNone(self.controller.snapshot['registered_session'])
+                self.assertNotIn('synthetic-private', json.dumps(self.controller.snapshot))
+                self.assertEqual(len(store.registrations), 1 if failure == 'store' else 0)
+
+    def test_resume_rejects_unregistered_forged_scope_model_or_cross_profile_before_starting(self):
+        for failure in ('missing', 'forged', 'scope', 'model', 'profile', 'retain_off'):
+            with self.subTest(failure=failure):
+                self.setUp()
+                record = self.persistent_record()
+                store = self.persistent_store([record])
+                candidate, model_id, retain = dict(record), None, True
+                if failure == 'missing': store.records.clear()
+                elif failure == 'forged': candidate['created_at'] += 1
+                elif failure == 'scope': store.records[record['thread_id']]['scope_fingerprint'] = 'a' * 64; candidate['scope_fingerprint'] = 'a' * 64
+                elif failure == 'model': model_id = 'other-model'
+                elif failure == 'profile': store.cwd = '/var/example/other-work'
+                elif failure == 'retain_off': retain = False
+                self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd,
+                    model_id=model_id, retain_history=retain, resume_session=candidate, session_store=store)
+                self.assertEqual(self.transport.starts, [])
+                self.assertEqual(self.transport.messages, [])
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_CONFIGURATION_INVALID')
+
+    def test_resume_waits_for_authentication_and_verified_original_model_then_starts_without_send(self):
+        self.connect_persistent(through_models=False)
+        self.assertEqual(self.controller.snapshot['phase'], 'restoring')
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.assertNotIn('config/read', self.transport.methods())
+        self.transport.result('model/list', {'data': [self.model_row()]})
+        self.assertEqual(self.transport.messages[-1]['method'], 'config/read')
+        self.assertEqual(self.controller.snapshot['selected_model'], 'fixture-model')
+        self.assertNotIn('turn/start', self.transport.methods())
+        self.assertNotIn('thread/start', self.transport.methods())
+        self.assertEqual(self.controller.snapshot['transcript'], [])
+
+    def test_resume_catalog_failure_missing_model_or_changed_registry_stops_before_history(self):
+        for failure in ('rpc', 'missing', 'changed', 'timeout'):
+            with self.subTest(failure=failure):
+                self.setUp()
+                self.connect_persistent(through_models=False)
+                if failure == 'changed': self.store.records['neutral-persistent-thread']['created_at'] += 1
+                if failure == 'rpc':
+                    request = self.transport.messages[-1]
+                    self.transport.data({'id': request['id'], 'error': {'message': 'synthetic-private-catalog'}})
+                elif failure == 'timeout': self.transport.expire_timeout()
+                else:
+                    self.transport.result('model/list', {'data': [] if failure == 'missing' else [self.model_row()]})
+                self.assertEqual(self.controller.snapshot['phase'], 'error')
+                self.assertFalse(self.controller.snapshot['can_send'])
+                self.assertNotIn('thread/read', self.transport.methods())
+                self.assertNotIn('turn/start', self.transport.methods())
+                self.assertNotIn('synthetic-private', json.dumps(self.controller.snapshot))
+
+    def test_resume_uses_shared_explicit_policy_params_then_requires_final_idle_read_before_send(self):
+        self.resume_until_history()
+        self.finish_one_history_turn(entries=[self.history_entry('old-user', 'Neutral stored request', role='user', startedAtMs=1740000000000),
+                                             self.history_entry(startedAtMs=1740000001000)])
+        request = next(row for row in self.transport.messages if row.get('method') == 'thread/resume')
+        params = request['params']
+        self.assertEqual(params['threadId'], 'neutral-persistent-thread')
+        self.assertIs(params['excludeTurns'], True)
+        self.assertEqual(params['model'], 'fixture-model')
+        self.assertEqual(params['modelProvider'], 'openai')
+        self.assertEqual(params['cwd'], self.cwd)
+        self.assertEqual(params['sandbox'], 'read-only')
+        self.assertEqual(params['approvalPolicy'], 'never')
+        self.assertEqual(params['approvalsReviewer'], 'user')
+        self.assertEqual(params['config']['mcp_servers'], {})
+        self.assertTrue(all(value is False for value in params['config']['features'].values()))
+        self.assertNotIn('ephemeral', params)
+        self.assertNotIn('persistExtendedHistory', params)
+        self.assertNotIn('turn/start', self.transport.methods())
+        snapshot = self.controller.snapshot
+        self.assertEqual(snapshot['phase'], 'ready')
+        self.assertTrue(snapshot['can_send'])
+        self.assertEqual(snapshot['history_status'], 'ready')
+        self.assertEqual([row['text'] for row in snapshot['transcript']], ['Neutral stored request', 'Neutral stored answer'])
+        self.assertTrue(all(row['history'] for row in snapshot['transcript']))
+        self.assertTrue(all(value.endswith(' UTC') for value in snapshot['message_times']))
+        self.assertIsNone(snapshot['turn_timing'])
+        self.assertNotIn('turn/start', self.transport.methods())
+        self.assertEqual(self.transport.methods().count('thread/read'), 3)
+        self.assertEqual(self.store.registrations, [])
+
+    def test_old_failed_turn_is_history_only_and_user_followup_sends_exactly_once_to_same_thread(self):
+        self.resume_until_history()
+        self.finish_one_history_turn('failed')
+        snapshot = self.controller.snapshot
+        self.assertEqual(snapshot['transcript'][-1]['status'], 'error')
+        self.assertIsNone(snapshot['error'])
+        self.assertEqual(snapshot['phase'], 'ready')
+        self.assertEqual(self.transport.stops, 0)
+        self.controller.send('Neutral explicit follow-up')
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.assertEqual(self.transport.messages[-1]['method'], 'turn/start')
+        self.assertEqual(self.transport.messages[-1]['params']['threadId'], 'neutral-persistent-thread')
+        self.assertEqual(self.transport.messages[-1]['params']['input'], [{'type': 'text', 'text': 'Neutral explicit follow-up'}])
+        self.assertEqual(self.transport.methods().count('turn/start'), 1)
+        self.assertNotIn('thread/start', self.transport.methods())
+        self.assertEqual(self.controller.snapshot['transcript'][0]['status'], 'error')
+
+    def test_metadata_mismatch_rejects_resume_before_any_history_request(self):
+        changes = ({'id': 'unregistered-thread'}, {'createdAt': 1}, {'createdAt': True},
+                   {'historyMode': 'legacy'}, {'modelProvider': 'other-provider'}, {'ephemeral': True},
+                   {'cwd': '/var/example/other-work'}, {'model': 'other-model'}, {'status': None})
+        for change in changes:
+            with self.subTest(change=change):
+                self.setUp()
+                self.connect_persistent()
+                self.pass_config()
+                self.transport.result('mcpServerStatus/list', self.inventory())
+                self.transport.result('thread/read', {'thread': self.persistent_metadata(**change)})
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_METADATA_INVALID')
+                self.assertNotIn('thread/resume', self.transport.methods())
+                self.assertNotIn('thread/turns/list', self.transport.methods())
+                self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_resume_response_model_policy_or_metadata_mismatch_never_loads_history(self):
+        changes = ({'model': 'other-model'}, {'modelProvider': 'other-provider'},
+                   {'approvalPolicy': 'on-request'}, {'approvalsReviewer': 'other-reviewer'},
+                   {'cwd': '/var/example/other-work'}, {'sandbox': {'type': 'workspaceWrite', 'networkAccess': False}},
+                   {'sandbox': {'type': 'readOnly', 'networkAccess': True}}, {'instructionSources': ['/fixture/unapproved-instructions']})
+        for change in changes:
+            with self.subTest(change=change):
+                self.setUp()
+                self.resume_until_history()
+                self.transport.result('thread/turns/list', {'data': []})
+                self.transport.result('thread/read', {'thread': self.persistent_metadata('notLoaded')})
+                self.transport.result('thread/resume', self.persistent_result(**change))
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_POLICY_REJECTED')
+                self.assertEqual(self.transport.methods().count('thread/turns/list'), 1)
+                self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_resume_thread_mcp_inventory_is_checked_after_read_only_hydration_before_send(self):
+        self.resume_until_history(mcp=self.mcp_config())
+        self.transport.result('thread/turns/list', {'data': []})
+        self.transport.result('thread/read', {'thread': self.persistent_metadata('notLoaded')})
+        self.transport.result('thread/resume', self.persistent_result())
+        inventory = self.inventory(True)
+        del inventory['data'][0]['tools']['set_appearance']
+        self.transport.result('mcpServerStatus/list', inventory)
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_MCP_INVENTORY_REJECTED')
+        self.assertEqual(self.transport.methods().count('thread/turns/list'), 1)
+        self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_active_unknown_or_unfinished_recovered_turn_never_enables_send(self):
+        for source in ('resume_active', 'final_active', 'final_unknown', 'in_progress', 'unknown_turn'):
+            with self.subTest(source=source):
+                self.setUp()
+                self.resume_until_history(runtime='active' if source == 'resume_active' else 'idle')
+                self.finish_one_history_turn('inProgress' if source == 'in_progress' else
+                    'future-status' if source == 'unknown_turn' else 'completed',
+                    'active' if source == 'final_active' else 'notLoaded' if source == 'final_unknown' else 'idle')
+                self.assertEqual(self.controller.snapshot['history_status'], 'read_only')
+                self.assertFalse(self.controller.snapshot['can_send'])
+                self.assertEqual(self.controller.snapshot['phase'], 'history_read_only')
+                count = len(self.transport.messages)
+                self.controller.send('Must not send while read-only')
+                self.assertEqual(len(self.transport.messages), count)
+                self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_snapshot_overlap_and_duplicate_old_notifications_do_not_replay_or_duplicate_text(self):
+        self.resume_until_history()
+        event = {'threadId': 'neutral-persistent-thread', 'turnId': 'old-turn', 'itemId': 'old-answer', 'delta': 'duplicate'}
+        self.transport.notify('item/agentMessage/delta', event)
+        self.transport.notify('turn/completed', {'threadId': 'neutral-persistent-thread', 'turn': self.history_turn()})
+        self.transport.result('thread/turns/list', {'data': [self.history_turn()], 'nextCursor': 'older-page'})
+        self.transport.result('thread/turns/list', {'data': [self.history_turn()], 'nextCursor': None})
+        self.transport.result('thread/items/list', {'data': [self.history_entry(text='Repeat repeat')], 'nextCursor': 'item-page'})
+        self.transport.result('thread/items/list', {'data': [self.history_entry(text='Repeat repeat')], 'nextCursor': None})
+        self.transport.result('thread/read', {'thread': self.persistent_metadata()})
+        self.finish_history_resume()
+        snapshot = self.controller.snapshot
+        self.assertEqual(snapshot['transcript'][0]['text'], 'Repeat repeat')
+        self.assertEqual(len(snapshot['transcript']), 1)
+        self.assertTrue(snapshot['can_send'])
+        before = deepcopy(snapshot)
+        self.transport.notify('item/agentMessage/delta', event)
+        self.transport.notify('turn/completed', {'threadId': 'neutral-persistent-thread', 'turn': self.history_turn(status='failed')})
+        self.assertEqual(self.controller.snapshot, before)
+        self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_new_activity_observed_while_hydrating_is_not_replayed_and_stays_read_only(self):
+        self.resume_until_history()
+        self.transport.notify('item/agentMessage/delta', {'threadId': 'neutral-persistent-thread',
+            'turnId': 'new-unloaded-turn', 'itemId': 'unloaded-item', 'delta': 'synthetic-unapplied-delta'})
+        self.finish_one_history_turn()
+        self.assertEqual(self.controller.snapshot['history_status'], 'read_only')
+        self.assertNotIn('synthetic-unapplied', json.dumps(self.controller.snapshot))
+        self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_cursor_cycle_and_history_rpc_errors_stop_without_retry_or_raw_provider_text(self):
+        self.resume_until_history()
+        self.transport.result('thread/turns/list', {'data': [self.history_turn()], 'nextCursor': 'repeated-cursor'})
+        self.transport.result('thread/turns/list', {'data': [self.history_turn()], 'nextCursor': 'repeated-cursor'})
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_INVALID')
+        self.assertEqual(self.transport.methods().count('thread/turns/list'), 2)
+        self.assertNotIn('thread/items/list', self.transport.methods())
+        self.setUp()
+        self.resume_until_history()
+        request = self.transport.messages[-1]
+        count = len(self.transport.messages)
+        self.transport.data({'id': request['id'], 'error': {'code': -32601, 'message': 'synthetic-private-history-error'}})
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_REQUEST_FAILED')
+        self.assertEqual(len(self.transport.messages), count)
+        self.assertNotIn('synthetic-private', json.dumps(self.controller.snapshot))
+
+    def test_shared_twenty_page_budget_leaves_partial_history_read_only_without_extra_item_requests(self):
+        self.resume_until_history()
+        turns = [self.history_turn('turn-' + str(index)) for index in range(20)]
+        self.transport.result('thread/turns/list', {'data': turns})
+        for _index in range(19):
+            self.assertEqual(self.transport.messages[-1]['method'], 'thread/items/list')
+            turn_id = self.transport.messages[-1]['params']['turnId']
+            self.transport.result('thread/items/list', {'data': [self.history_entry(turn_id=turn_id)]})
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/read')
+        self.assertEqual(self.transport.methods().count('thread/items/list'), 19)
+        self.transport.result('thread/read', {'thread': self.persistent_metadata()})
+        self.assertEqual(self.controller.snapshot['history_status'], 'read_only')
+        self.assertIn('部分载入', self.controller.snapshot['history_notice'])
+        self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_disconnect_and_old_generation_responses_cannot_continue_hydration(self):
+        self.resume_until_history()
+        request, old_data = self.transport.messages[-1], self.transport.data
+        self.controller.disconnect()
+        before, count = deepcopy(self.controller.snapshot), len(self.transport.messages)
+        old_data({'id': request['id'], 'result': {'data': [self.history_turn()]}})
+        self.assertEqual(self.controller.snapshot, before)
+        self.assertEqual(len(self.transport.messages), count)
+        self.assertEqual(before['phase'], 'disconnected')
+        self.assertEqual(before['history_status'], 'error')
+        self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_history_has_one_total_deadline_and_late_page_does_not_extend_or_start_work(self):
+        with patch.object(chat.time, 'monotonic', return_value=100.0) as clock:
+            self.resume_until_history()
+            self.assertLessEqual(self.transport.timeouts[-1], 30000)
+            clock.return_value = 159.0
+            self.transport.result('thread/turns/list', {'data': [self.history_turn()]})
+            self.assertEqual(self.transport.timeouts[-1], 1000)
+            clock.return_value = 161.0
+            self.transport.result('thread/items/list', {'data': [self.history_entry()]})
+            self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_TIMEOUT')
+            self.assertEqual(self.transport.methods().count('thread/read'), 1)
+            self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_runtime_activity_after_successful_restore_blocks_an_unsolicited_new_turn(self):
+        self.resume_until_history()
+        self.finish_one_history_turn()
+        self.transport.notify('thread/status/changed', {'threadId': 'neutral-persistent-thread',
+                                                     'status': {'type': 'active', 'activeFlags': []}})
+        self.assertEqual(self.controller.snapshot['phase'], 'history_read_only')
+        count = len(self.transport.messages)
+        self.controller.send('Must remain explicit and idle')
+        self.assertEqual(len(self.transport.messages), count)
+        self.assertNotIn('turn/start', self.transport.methods())
+
+
+    def test_resume_occurs_only_after_all_history_pages_and_second_metadata_then_final_idle(self):
+        self.resume_until_history()
+        self.transport.result('thread/turns/list', {'data': [self.history_turn()], 'nextCursor': 'older-turns'})
+        self.assertNotIn('thread/resume', self.transport.methods())
+        self.transport.result('thread/turns/list', {'data': [], 'nextCursor': None})
+        self.transport.result('thread/items/list', {'data': [self.history_entry()], 'nextCursor': 'older-items'})
+        self.assertNotIn('thread/resume', self.transport.methods())
+        self.transport.result('thread/items/list', {'data': [], 'nextCursor': None})
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/read')
+        self.assertNotIn('thread/resume', self.transport.methods())
+        self.transport.result('thread/read', {'thread': self.persistent_metadata('notLoaded')})
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/resume')
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.transport.result('thread/resume', self.persistent_result())
+        self.assertEqual(self.transport.messages[-1]['method'], 'mcpServerStatus/list')
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/read')
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.transport.result('thread/read', {'thread': self.persistent_metadata()})
+        self.assertTrue(self.controller.snapshot['can_send'])
+        self.assertNotIn('turn/start', self.transport.methods())
+        self.assertEqual(self.transport.methods().count('thread/resume'), 1)
+
+    def test_nonterminal_or_partial_history_is_displayed_without_ever_resuming_thread(self):
+        for source in ('initial_active', 'changed_active', 'in_progress', 'unknown', 'truncated'):
+            with self.subTest(source=source):
+                self.setUp()
+                self.install_history_projection()
+                self.connect_persistent()
+                self.pass_config()
+                self.transport.result('mcpServerStatus/list', self.inventory())
+                self.transport.result('thread/read', {'thread': self.persistent_metadata(
+                    'active' if source == 'initial_active' else 'notLoaded')})
+                if source == 'truncated':
+                    for page in range(20):
+                        self.transport.result('thread/turns/list', {'data': [self.history_turn()],
+                            'nextCursor': 'history-cursor-' + str(page)})
+                else:
+                    self.transport.result('thread/turns/list', {'data': [self.history_turn(status=
+                        'inProgress' if source == 'in_progress' else 'future-status' if source == 'unknown' else 'completed')]})
+                    self.transport.result('thread/items/list', {'data': [self.history_entry()]})
+                self.transport.result('thread/read', {'thread': self.persistent_metadata(
+                    'active' if source == 'changed_active' else 'notLoaded')})
+                self.assertEqual(self.controller.snapshot['history_status'], 'read_only')
+                self.assertFalse(self.controller.snapshot['can_send'])
+                self.assertNotIn('thread/resume', self.transport.methods())
+                self.assertNotIn('turn/start', self.transport.methods())
+                self.assertEqual(self.transport.methods().count('mcpServerStatus/list'), 1)
+                if source != 'truncated':
+                    self.assertEqual(self.controller.snapshot['transcript'][0]['text'], 'Neutral stored answer')
+
+    def test_history_item_fetch_prioritizes_newest_turn_and_still_renders_oldest_first(self):
+        self.resume_until_history()
+        self.transport.result('thread/turns/list', {'data': [self.history_turn('newest'), self.history_turn('oldest')]})
+        self.assertEqual(self.transport.messages[-1]['params']['turnId'], 'newest')
+        self.transport.result('thread/items/list', {'data': [self.history_entry('new-answer', 'Newest answer', 'newest')]})
+        self.assertEqual(self.transport.messages[-1]['params']['turnId'], 'oldest')
+        self.transport.result('thread/items/list', {'data': [self.history_entry('old-answer', 'Oldest answer', 'oldest')]})
+        self.transport.result('thread/read', {'thread': self.persistent_metadata()})
+        self.finish_history_resume()
+        self.assertEqual([row['text'] for row in self.controller.snapshot['transcript']], ['Oldest answer', 'Newest answer'])
+
+    def test_hydration_activity_ids_are_bounded_and_malformed_ids_never_enter_live_reducer(self):
+        self.resume_until_history()
+        for index in range(101):
+            self.transport.notify('item/agentMessage/delta', {'threadId': 'neutral-persistent-thread',
+                'turnId': 'unloaded-' + str(index), 'itemId': 'unloaded-item', 'delta': 'synthetic-private-unapplied'})
+        self.transport.notify('item/agentMessage/delta', {'threadId': 'neutral-persistent-thread',
+            'turnId': {'synthetic': 'malformed'}, 'itemId': 'unloaded-item', 'delta': 'synthetic-private-unapplied'})
+        self.assertEqual(len(self.controller._history_observed_turns), 100)
+        self.finish_one_history_turn()
+        self.assertEqual(self.controller.snapshot['history_status'], 'read_only')
+        self.assertNotIn('thread/resume', self.transport.methods())
+        self.assertNotIn('synthetic-private', json.dumps(self.controller.snapshot))
+
+    def test_persistent_timestamp_outside_supported_calendar_is_rejected_before_registration(self):
+        with self.assertRaises(ValueError):
+            chat._session_record(self.persistent_record(created_at=253402300800))
+
+
+    def test_restore_publish_disconnect_cannot_queue_another_request_or_touch_new_connection(self):
+        for stage in ('discover', 'catalog_complete', 'begin_restore'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.connect_persistent(through_models=False)
+                if stage == 'discover':
+                    self.controller.disconnect()
+                    trigger = lambda: self.controller._discover_models()
+                else:
+                    trigger = lambda: self.transport.result('model/list', {'data': [self.model_row()]})
+                disconnected = []
+                def changed(snapshot):
+                    self.events.append(snapshot)
+                    target = (snapshot['models_status'] == 'loading' if stage == 'discover' else
+                              snapshot['models_status'] == 'ready' and
+                              (self.controller._send_attempt is not None if stage == 'begin_restore' else self.controller._send_attempt is None))
+                    if not disconnected and target:
+                        disconnected.append(True)
+                        self.controller.disconnect()
+                self.controller.changed = changed
+                before = len(self.transport.messages)
+                trigger()
+                self.assertTrue(disconnected)
+                self.assertEqual(len(self.transport.messages), before)
+                self.assertEqual(self.controller.snapshot['phase'], 'disconnected')
+                self.assertNotIn('thread/resume', self.transport.methods())
+
+    def test_restore_activity_before_first_metadata_remains_read_only_after_idle_snapshot(self):
+        self.install_history_projection()
+        self.connect_persistent()
+        self.transport.notify('thread/status/changed', {'threadId': 'neutral-persistent-thread',
+                                                     'status': {'type': 'active', 'activeFlags': []}})
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        self.transport.result('thread/read', {'thread': self.persistent_metadata('idle')})
+        self.finish_one_history_turn()
+        self.assertEqual(self.controller.snapshot['history_status'], 'read_only')
+        self.assertNotIn('thread/resume', self.transport.methods())
+
+
+    def test_missing_required_metadata_turns_is_not_accepted_as_empty_history(self):
+        self.connect_persistent()
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        metadata = self.persistent_metadata('notLoaded')
+        del metadata['turns']
+        self.transport.result('thread/read', {'thread': metadata})
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_METADATA_INVALID')
+        self.assertNotIn('thread/turns/list', self.transport.methods())
+        self.assertNotIn('thread/resume', self.transport.methods())
+
+    def test_unknown_activity_after_restore_is_read_only_without_replaying_or_fatal_old_errors(self):
+        for method, payload in (
+                ('item/agentMessage/delta', {'turnId': 'unknown-turn', 'itemId': 'unknown-item', 'delta': 'synthetic-private-late'}),
+                ('turn/completed', {'turn': self.history_turn('unknown-turn')}),
+                ('error', {'turnId': 'unknown-turn', 'message': 'synthetic-private-late'}),
+                ('item/started', {'turnId': {'synthetic': 'invalid'}, 'item': {}})):
+            with self.subTest(method=method):
+                self.setUp()
+                self.resume_until_history()
+                self.finish_one_history_turn()
+                self.transport.notify(method, dict(payload, threadId='neutral-persistent-thread'))
+                self.assertEqual(self.controller.snapshot['phase'], 'history_read_only')
+                self.assertFalse(self.controller.snapshot['can_send'])
+                self.assertEqual(self.controller.snapshot['transcript'][0]['text'], 'Neutral stored answer')
+                self.assertIsNone(self.controller.snapshot['error'])
+                self.assertNotIn('synthetic-private', json.dumps(self.controller.snapshot))
+                self.assertNotIn('turn/start', self.transport.methods())
+
+
+    def test_final_history_read_after_total_deadline_cannot_enable_send_before_timer_event(self):
+        with patch.object(chat.time, 'monotonic', return_value=100.0) as clock:
+            self.resume_until_history()
+            self.transport.result('thread/turns/list', {'data': []})
+            self.transport.result('thread/read', {'thread': self.persistent_metadata('notLoaded')})
+            self.transport.result('thread/resume', self.persistent_result())
+            self.transport.result('mcpServerStatus/list', self.inventory(True))
+            before = len(self.transport.messages)
+            clock.return_value = 161.0
+            self.transport.result('thread/read', {'thread': self.persistent_metadata()})
+            snapshot = self.controller.snapshot
+            self.assertEqual(snapshot['error']['code'], 'CHAT_HISTORY_TIMEOUT')
+            self.assertEqual(snapshot['phase'], 'error')
+            self.assertEqual(snapshot['history_status'], 'error')
+            self.assertFalse(snapshot['can_send'])
+            self.assertEqual(len(self.transport.messages), before)
+            self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_late_resume_response_cannot_queue_thread_inventory_or_recover_after_timer_race(self):
+        with patch.object(chat.time, 'monotonic', return_value=100.0) as clock:
+            self.resume_until_history()
+            self.transport.result('thread/turns/list', {'data': []})
+            self.transport.result('thread/read', {'thread': self.persistent_metadata('notLoaded')})
+            before = len(self.transport.messages)
+            clock.return_value = 161.0
+            self.transport.result('thread/resume', self.persistent_result())
+            self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_TIMEOUT')
+            self.assertFalse(self.controller.snapshot['can_send'])
+            self.assertEqual(len(self.transport.messages), before)
+            self.assertEqual(self.transport.methods().count('mcpServerStatus/list'), 1)
 
 
 if __name__ == '__main__': unittest.main()

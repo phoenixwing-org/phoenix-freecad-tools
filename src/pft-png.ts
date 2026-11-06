@@ -56,17 +56,17 @@ function crc32(bytes: Buffer, start: number, end: number): number {
   for (let index = start; index < end; index++) value = crcTable[(value ^ bytes[index]!) & 255]! ^ value >>> 8;
   return (value ^ 0xffffffff) >>> 0;
 }
-function options(value: PftPngOptions): { limits: PftPngLimits; expectedWidth?: number; expectedHeight?: number } {
+function options(value: PftPngOptions, ceiling: Readonly<PftPngLimits> = PFT_PNG_LIMITS): { limits: PftPngLimits; expectedWidth?: number; expectedHeight?: number } {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !['limits', 'expectedWidth', 'expectedHeight'].includes(key))) fail('PNG_INVALID_OPTIONS');
-  const limits = { ...PFT_PNG_LIMITS };
+  const limits = { ...ceiling };
   if (Object.hasOwn(value, 'limits')) {
     const supplied = value.limits;
     if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) fail('PNG_INVALID_OPTIONS');
     for (const key of Object.keys(supplied)) {
       if (!Object.hasOwn(limits, key)) fail('PNG_INVALID_OPTIONS');
       const name = key as keyof PftPngLimits, bound = supplied[name];
-      if (!Number.isSafeInteger(bound) || typeof bound !== 'number' || bound < 1 || bound > PFT_PNG_LIMITS[name]) fail('PNG_INVALID_OPTIONS');
+      if (!Number.isSafeInteger(bound) || typeof bound !== 'number' || bound < 1 || bound > ceiling[name]) fail('PNG_INVALID_OPTIONS');
       limits[name] = bound;
     }
   }
@@ -129,8 +129,8 @@ function inflateFrame(compressed: Buffer, expected: number, rowBytes: number): v
  * because dropping them could change the interpretation of the same pixels.
  * No files, CAD, image decoder process or business cache are accessed.
  */
-function sanitize(input: Uint8Array, settings: PftPngOptions): PftSanitizedPng {
-  const configured = options(settings), limits = configured.limits;
+function sanitize(input: Uint8Array, settings: PftPngOptions, ceiling: Readonly<PftPngLimits> = PFT_PNG_LIMITS): PftSanitizedPng {
+  const configured = options(settings, ceiling), limits = configured.limits;
   if (!(input instanceof Uint8Array)) fail('PNG_INVALID');
   if (input.byteLength > limits.maxInputBytes) fail('PNG_TOO_LARGE');
   // Own the input and all returned bytes; neither aliases the caller's buffer.
@@ -202,6 +202,18 @@ function sanitize(input: Uint8Array, settings: PftPngOptions): PftSanitizedPng {
  * arbitrary diagnostic text. See the format/content distinction above. */
 export function sanitizePftPng(input: Uint8Array, settings: PftPngOptions = {}): PftSanitizedPng {
   try { return sanitize(input, settings); }
+  catch (error) {
+    if (error instanceof PftPngError && Object.hasOwn(messages, error.code)) throw new PftPngError(error.code);
+    throw new PftPngError('PNG_INVALID');
+  }
+}
+
+
+/** Fixed worker profile. This never raises the existing cache/capture limits. */
+export function sanitizePftThumbnailWorkerPng(input: Uint8Array, width: number, height: number): PftSanitizedPng {
+  const limits: PftPngLimits = { maxInputBytes: 4 * 1024 * 1024, maxOutputBytes: 4 * 1024 * 1024,
+    maxWidth: 1024, maxHeight: 1024, maxInflatedBytes: (1024 * 4 + 1) * 1024, maxChunks: 4096 };
+  try { return sanitize(input, { expectedWidth: width, expectedHeight: height }, limits); }
   catch (error) {
     if (error instanceof PftPngError && Object.hasOwn(messages, error.code)) throw new PftPngError(error.code);
     throw new PftPngError('PNG_INVALID');

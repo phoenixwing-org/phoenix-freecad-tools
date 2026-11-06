@@ -88,7 +88,7 @@ def dispatch_error(request_id, error):
     with _lock:
         record = _scripts.get(request_id)
         if record and record["state"] == "queued":
-            if error.code in {"GUI_QUEUE_TIMEOUT", "SERVER_STOPPING", "SERVER_NOT_RUNNING"}:
+            if error.code in {"GUI_QUEUE_TIMEOUT", "SERVER_STOPPING", "SERVER_NOT_RUNNING", "INSTANCE_TARGET_MISMATCH"}:
                 record.update(state="cancelled", finished_at=time.time(), error={"code": error.code, "message": error.message})
                 completed = sorted((key for key, value in _scripts.items() if value["state"] in {"done", "failed", "cancelled"}), key=lambda key: _scripts[key]["finished_at"] or 0)
                 while len(completed) > 20:
@@ -116,8 +116,17 @@ def _json_value(value, depth=0, budget=None):
     budget[0] -= 1
     if budget[0] < 0 or depth > 5:
         return {"truncated": True}
-    if value is None or type(value) in (bool, int):
-        return value if type(value) is not int or abs(value) < 10 ** 100 else {"type": "large_integer"}
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        magnitude = abs(value)
+        if magnitude >= 10 ** 100:
+            return {"type": "large_integer"}
+        if magnitude > 9007199254740991:
+            # Match native read results before a JavaScript JSON parser can
+            # round the value. Keep the native Python/local GUI value intact.
+            return {"kind": "integer", "decimal": str(value), "truncated": False}
+        return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, str):

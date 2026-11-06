@@ -16,6 +16,7 @@ _saved_path = list(sys.path)
 try:
     sys.path.insert(0, str(ADDON))
     import pft_appearance_controls as controls
+    import pft_workbench_tools  # Actual camera facade used by the panel callback.
 finally:
     sys.path[:] = _saved_path
 
@@ -55,6 +56,17 @@ class AppearanceSessionTests(unittest.TestCase):
         self.document.app = self.app
         self.app.getDocument = lambda name: self.document if name == self.document.Name else None
         self.app.getActiveTransaction = lambda: self.app.active_transaction
+        def set_active_transaction(title):
+            allocated_id = self.app.next_id + 1
+            self.document.openTransaction(title)
+            return allocated_id
+        self.app.setActiveTransaction = set_active_transaction
+        self.closure_calls = []
+        def close_active_transaction(abort=False, transaction_id=0):
+            self.closure_calls.append((abort, transaction_id))
+            if self.app.active_transaction is not None and self.app.active_transaction[1] == transaction_id:
+                return self.document.abortTransaction() if abort else self.document.commitTransaction()
+        self.app.closeActiveTransaction = close_active_transaction
         self.gui_document = types.SimpleNamespace(getInEdit=lambda: None)
         self.gui = types.SimpleNamespace(getDocument=lambda name: self.gui_document)
         self.app_observers, self.gui_observers = [], []
@@ -145,6 +157,300 @@ class AppearanceSessionTests(unittest.TestCase):
         self.app.active_transaction = ("Existing edit", 999)
         self.assert_error("DOCUMENT_BUSY", self.session)
         self.assertEqual((self.document.opened, self.document.commits, self.document.aborts), (0, 0, 0))
+
+    def test_missing_application_transaction_api_fails_without_legacy_fallback(self):
+        for name in ("setActiveTransaction", "closeActiveTransaction"):
+            with self.subTest(name=name):
+                self.setUp()
+                session = self.session()
+                setattr(self.app, name, None)
+                self.assert_error("DOCUMENT_STATE_UNKNOWN", lambda: session.preview_transparency(50))
+                self.assertEqual((self.document.opened, self.object.ViewObject.assignments), (0, 0))
+                self.assertEqual(self.closure_calls, [])
+    def test_open_callback_foreign_id_is_never_claimed_written_or_closed(self):
+        for same_title in (False, True):
+            with self.subTest(same_title=same_title):
+                self.setUp()
+                session = self.session()
+                original_open = self.app.setActiveTransaction
+                def open_then_foreign(title):
+                    allocated = original_open(title)
+                    self.app.active_transaction = (title if same_title else "Foreign operation", 999)
+                    return allocated
+                self.app.setActiveTransaction = open_then_foreign
+                self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: session.preview_transparency(50))
+                self.assertEqual((session.transaction_id, session.owned_transaction_id), (11, 11))
+                self.assertEqual(self.app.active_transaction[1], 999)
+                self.assertEqual((session.state, self.object.ViewObject.assignments), ("invalid", 0))
+                self.assertEqual((self.document.commits, self.document.aborts), (0, 0))
+                self.assertEqual(self.closure_calls, [])
+                self.assertEqual((self.app_observers, self.gui_observers), ([], []))
+                self.assert_error("VISUAL_SESSION_ENDED", session.accept)
+                self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+                self.assertEqual(self.app.active_transaction[1], 999)
+    def test_invalid_native_allocated_id_never_adopts_current_id(self):
+        for returned in (None, True, 0, -1, "11", 11.0):
+            with self.subTest(returned=returned):
+                self.setUp()
+                session = self.session()
+                original_open = self.app.setActiveTransaction
+                def open_with_invalid_result(title):
+                    original_open(title)
+                    return returned
+                self.app.setActiveTransaction = open_with_invalid_result
+                self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: session.preview_transparency(50))
+                self.assertIsNone(session.transaction_id)
+                self.assertIsNone(session.owned_transaction_id)
+                self.assertEqual((session.state, self.object.ViewObject.assignments), ("invalid", 0))
+                self.assertEqual(self.app.active_transaction[1], 11)
+                self.assertEqual(self.closure_calls, [])
+    def test_open_raises_after_start_does_not_guess_ownership_or_attempt_close(self):
+        session = self.session()
+        original_open = self.app.setActiveTransaction
+        def open_then_raise(title):
+            original_open(title)
+            raise RuntimeError("private native fixture failure")
+        self.app.setActiveTransaction = open_then_raise
+        error = self.assert_error("VISUAL_ROLLBACK_UNVERIFIED", lambda: session.preview_transparency(50))
+        self.assertEqual((session.state, self.object.ViewObject.assignments), ("invalid", 0))
+        self.assertIsNone(session.transaction_id)
+        self.assertEqual(self.app.active_transaction[1], 11)
+        self.assertEqual(self.closure_calls, [])
+        self.assertNotIn("private native", str(error))
+        self.assertNotIn("private native", json.dumps(error.appearance_diagnostics))
+    def test_material_callback_before_open_does_not_close_foreign_operation(self):
+        session = self.session()
+        def material_then_foreign(**values):
+            self.app.active_transaction = ("Foreign operation", 999)
+            return native.Material(**values)
+        self.app.Material = material_then_foreign
+        self.assert_error("DOCUMENT_BUSY", lambda: session.preview_transparency(50))
+        self.assertEqual((self.document.opened, self.object.ViewObject.assignments), (0, 0))
+        self.assertEqual(self.app.active_transaction[1], 999)
+        self.assertEqual(self.closure_calls, [])
+    def test_material_callback_after_open_is_rechecked_before_first_setter(self):
+        session = self.session()
+        calls = []
+        def material_then_foreign(**values):
+            calls.append(True)
+            if len(calls) == 2:
+                self.app.active_transaction = ("Foreign operation", 999)
+            return native.Material(**values)
+        self.app.Material = material_then_foreign
+        self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: session.preview_transparency(50))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.object.ViewObject.assignments, 0)
+        self.assertEqual(self.app.active_transaction[1], 999)
+        self.assertEqual(self.closure_calls, [])
+    def test_same_named_document_replacement_does_not_start_a_preview_transaction(self):
+        session = self.session()
+        replacement = Document()
+        self.app.getDocument = lambda name: replacement
+        self.app.ActiveDocument = replacement
+        self.assert_error("VISUAL_TARGET_CHANGED", lambda: session.preview_transparency(50))
+        self.assertEqual((self.document.opened, self.object.ViewObject.assignments), (0, 0))
+        self.assertEqual(self.closure_calls, [])
+    def test_close_uses_owned_id_and_does_not_close_foreign_replacement_at_native_boundary(self):
+        for abort in (False, True):
+            for same_title in (False, True):
+                with self.subTest(abort=abort, same_title=same_title):
+                    self.setUp()
+                    session = self.session()
+                    session.preview_transparency(50)
+                    owned = self.app.active_transaction
+                    original_close = self.app.closeActiveTransaction
+                    def close_after_replacement(is_abort, transaction_id):
+                        self.assertEqual((is_abort, transaction_id), (abort, owned[1]))
+                        self.app.active_transaction = (owned[0] if same_title else "Foreign operation", 999)
+                        return original_close(is_abort, transaction_id)
+                    self.app.closeActiveTransaction = close_after_replacement
+                    self.assert_error("VISUAL_TRANSACTION_CHANGED", session.cancel if abort else session.accept)
+                    self.assertEqual((self.document.commits, self.document.aborts), (0, 0))
+                    self.assertEqual(self.closure_calls, [(abort, owned[1])])
+                    self.assertEqual((session.state, self.app.active_transaction[1]), ("invalid", 999))
+                    self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+                    self.assertEqual(self.closure_calls, [(abort, owned[1])])
+    def test_native_open_commit_abort_reentry_never_opens_or_closes_twice(self):
+        for phase in ("open", "commit", "abort"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                session = self.session()
+                nested = []
+                def callback():
+                    for operation in (lambda: session.preview_transparency(75), session.accept, session.cancel):
+                        try:
+                            operation()
+                        except controls.visual.PftVisualToolsError as error:
+                            nested.append(error.code)
+                if phase == "open":
+                    original = self.app.setActiveTransaction
+                    def open_with_callback(title):
+                        callback()
+                        return original(title)
+                    self.app.setActiveTransaction = open_with_callback
+                else:
+                    original = self.app.closeActiveTransaction
+                    def close_with_callback(abort, transaction_id):
+                        callback()
+                        return original(abort, transaction_id)
+                    self.app.closeActiveTransaction = close_with_callback
+                session.preview_transparency(50)
+                session.cancel() if phase in ("open", "abort") else session.accept()
+                self.assertEqual(nested, ["VISUAL_OPERATION_IN_PROGRESS"] * 3)
+                self.assertEqual(self.document.opened, 1)
+                self.assertEqual(len(self.closure_calls), 1)
+                self.assertEqual((self.document.commits, self.document.aborts), (1, 0) if phase == "commit" else (0, 1))
+                self.assertIsNone(self.app.active_transaction)
+    def test_close_readback_exception_is_terminal_without_second_close(self):
+        for abort in (False, True):
+            with self.subTest(abort=abort):
+                self.setUp()
+                session = self.session()
+                session.preview_transparency(50)
+                original_close = self.app.closeActiveTransaction
+                def close_then_bad_readback(is_abort, transaction_id):
+                    result = original_close(is_abort, transaction_id)
+                    self.app.getActiveTransaction = lambda: (_ for _ in ()).throw(RuntimeError("private fixture readback"))
+                    return result
+                self.app.closeActiveTransaction = close_then_bad_readback
+                error = self.assert_error("VISUAL_ROLLBACK_UNVERIFIED" if abort else "VISUAL_COMMIT_UNVERIFIED",
+                                          session.cancel if abort else session.accept)
+                self.assertEqual(session.state, "invalid")
+                self.assertEqual(len(self.closure_calls), 1)
+                self.assert_error("VISUAL_SESSION_ENDED", session.accept)
+                self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+                self.assertEqual(len(self.closure_calls), 1)
+                self.assertNotIn("private fixture", str(error))
+    def test_commit_material_readback_failure_does_not_claim_success_or_abort(self):
+        session = self.session()
+        session.preview_transparency(50)
+        original_close = self.app.closeActiveTransaction
+        def close_then_material_change(abort, transaction_id):
+            result = original_close(abort, transaction_id)
+            self.object.ViewObject._appearance[0].Shininess = 8.0
+            return result
+        self.app.closeActiveTransaction = close_then_material_change
+        self.assert_error("VISUAL_COMMIT_UNVERIFIED", session.accept)
+        self.assertEqual((session.state, self.document.commits, self.document.aborts), ("invalid", 1, 0))
+        self.assertEqual(self.closure_calls, [(False, 11)])
+        self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+        self.assertEqual(self.closure_calls, [(False, 11)])
+    def test_native_open_or_material_invalidation_never_revives_preview_or_writes(self):
+        for boundary in ("open", "material"):
+            with self.subTest(boundary=boundary):
+                self.setUp()
+                session = self.session()
+                invalidated = []
+                if boundary == "open":
+                    original = self.app.setActiveTransaction
+                    def invalidate_after_open(title):
+                        allocated = original(title)
+                        session.invalidate()
+                        invalidated.append(True)
+                        return allocated
+                    self.app.setActiveTransaction = invalidate_after_open
+                else:
+                    def invalidate_material(**values):
+                        if self.app.active_transaction is not None and not invalidated:
+                            session.invalidate()
+                            invalidated.append(True)
+                        return native.Material(**values)
+                    self.app.Material = invalidate_material
+                self.assert_error("VISUAL_SESSION_ENDED", lambda: session.preview_transparency(50))
+                self.assertEqual(invalidated, [True])
+                self.assertEqual((session.state, self.object.ViewObject.assignments), ("invalid", 0))
+                self.assertEqual(self.app.active_transaction[1], 11)
+                self.assertEqual(self.closure_calls, [])
+                self.assertEqual((self.app_observers, self.gui_observers), ([], []))
+                self.assert_error("VISUAL_SESSION_ENDED", session.accept)
+                self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+                self.assertEqual(self.closure_calls, [])
+
+    def test_owner_document_getter_transaction_replacement_prevents_the_setter(self):
+        for same_title in (False, True):
+            with self.subTest(same_title=same_title):
+                self.setUp()
+                session = self.session()
+                session.preview_transparency(50)
+                title = self.app.active_transaction[0] if same_title else "Foreign operation"
+                original = self.app.getDocument
+                def changed(name):
+                    result = original(name)
+                    self.app.active_transaction = (title, 999)
+                    return result
+                self.app.getDocument = changed
+                assignments = self.object.ViewObject.assignments
+                self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: session._write_view_property(
+                    self.object.ViewObject, "ShapeAppearance", [native.Material(Transparency=0.75)]))
+                self.assertEqual(self.object.ViewObject.assignments, assignments)
+                self.assertEqual(self.object.ViewObject.Transparency, 50)
+                self.assertEqual(self.app.active_transaction, (title, 999))
+                self.assertEqual(self.closure_calls, [])
+
+    def test_native_close_invalidation_is_terminal_without_another_close(self):
+        for abort in (False, True):
+            with self.subTest(abort=abort):
+                self.setUp()
+                session = self.session()
+                session.preview_transparency(50)
+                original = self.app.closeActiveTransaction
+                def close_then_invalidate(is_abort, transaction_id):
+                    result = original(is_abort, transaction_id)
+                    session.invalidate()
+                    return result
+                self.app.closeActiveTransaction = close_then_invalidate
+                self.assert_error("VISUAL_SESSION_ENDED" if abort else "VISUAL_COMMIT_UNVERIFIED",
+                                  session.cancel if abort else session.accept)
+                self.assertEqual(session.state, "invalid")
+                self.assertEqual(self.closure_calls, [(abort, 11)])
+                self.assertIsNone(self.app.active_transaction)
+                self.assert_error("VISUAL_SESSION_ENDED", session.accept)
+                self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+                self.assertEqual(self.closure_calls, [(abort, 11)])
+
+    def test_abort_snapshot_getter_foreign_edit_is_not_rolled_back(self):
+        helper = self.document.add("Helper")
+        session = self.session()
+        session.preview_transparency(50)
+        original = type(self.object.ViewObject).ShapeAppearance
+        changed = []
+        def read(view):
+            if view is self.object.ViewObject and session._phase == "rollback_validate" and not changed:
+                changed.append(True)
+                helper.ViewObject._appearance[0].Shininess = 7.0
+                for observer in list(self.app_observers):
+                    observer.slotChangedObject(helper, "ShapeAppearance")
+            return original.fget(view)
+        with patch.object(type(self.object.ViewObject), "ShapeAppearance", property(read, original.fset)):
+            self.assert_error("VISUAL_SESSION_CONTAMINATED", session.cancel)
+        self.assertEqual(changed, [True])
+        self.assertEqual(helper.ViewObject._appearance[0].Shininess, 7.0)
+        self.assertEqual(self.object.ViewObject.Transparency, 50)
+        self.assertEqual((session.state, self.document.aborts), ("invalid", 0))
+        self.assertEqual(self.closure_calls, [])
+        self.assertEqual(self.app.active_transaction[1], 11)
+        self.assert_error("VISUAL_SESSION_ENDED", session.cancel)
+        self.assertEqual(self.closure_calls, [])
+
+    def test_failure_rollback_rechecks_owner_after_the_first_owner_getter(self):
+        helper = self.document.add("Helper")
+        session = self.session()
+        session.preview_transparency(50)
+        original = self.app.getDocument
+        calls = []
+        def read(name):
+            calls.append(True)
+            if len(calls) == 2:
+                helper.ViewObject._appearance[0].Shininess = 7.0
+                for observer in list(self.app_observers):
+                    observer.slotChangedObject(helper, "ShapeAppearance")
+            return original(name)
+        self.app.getDocument = read
+        self.assert_error("VISUAL_SESSION_CONTAMINATED", lambda: session._abort(check_current=False))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(helper.ViewObject._appearance[0].Shininess, 7.0)
+        self.assertEqual((session.state, self.document.aborts), ("invalid", 0))
+        self.assertEqual(self.closure_calls, [])
 
     def test_no_target_or_missing_target_never_expands_scope(self):
         self.assert_error("VISUAL_TARGETS_REQUIRED", lambda: self.session(()))
@@ -924,8 +1230,10 @@ class AppearancePanelTests(unittest.TestCase):
             def start(self): self.running = True
             def stop(self): self.running = False
         widgets.QDialog, widgets.QSlider, widgets.QSpinBox = Dialog, Integer, Integer
-        core = types.SimpleNamespace(Qt=types.SimpleNamespace(Horizontal=1), QTimer=Timer)
-        handle = patch.object(controls, "_qt", return_value=(core, widgets))
+        widgets.QToolButton.setAccessibleName = lambda button, value: setattr(button, "accessible_name", value)
+        core = types.SimpleNamespace(Qt=types.SimpleNamespace(Horizontal=1, ToolButtonIconOnly=0), QTimer=Timer)
+        qtgui = types.SimpleNamespace(QIcon=lambda path: path)
+        handle = patch.object(controls, "_qt", return_value=(core, qtgui, widgets))
         handle.start()
         self.addCleanup(handle.stop)
 
@@ -945,6 +1253,61 @@ class AppearancePanelTests(unittest.TestCase):
         self.assertEqual(self.named("TransparencyValue").suffix, "%")
         self.assertFalse(self.named("TransparencyValue").keyboard_tracking)
 
+    def camera(self):
+        view = types.SimpleNamespace(viewAxonometric=Mock(), fitAll=Mock())
+        self.gui_document.activeView = lambda: view
+        self.gui.activeDocument = lambda: self.gui_document
+        return view
+
+    def test_icon_only_view_action_changes_camera_without_material_or_transaction_writes(self):
+        view = self.camera()
+        dialog = self.show()
+        button = self.named("AxonometricFit")
+        self.assertEqual(button.text, "")
+        self.assertEqual(button.style, 0)
+        self.assertEqual(button.tooltip, controls.tr("轴测并适合窗口"))
+        self.assertEqual(button.accessible_name, button.tooltip)
+        self.assertEqual(Path(button.icon), ADDON / "Resources" / "icons" / "axonometric-fit.svg")
+        button.clicked.emit(False)
+        view.viewAxonometric.assert_called_once_with()
+        view.fitAll.assert_called_once_with()
+        self.assertEqual((self.document.opened, self.object.ViewObject.assignments), (0, 0))
+        self.named("TransparencySlider").setValue(36)
+        before_camera = native.plain_snapshot(self.document)
+        owned_id = self.app.active_transaction
+        assignments = self.object.ViewObject.assignments
+        button.clicked.emit(False)
+        self.assertEqual((view.viewAxonometric.call_count, view.fitAll.call_count), (2, 2))
+        self.assertEqual(native.plain_snapshot(self.document), before_camera)
+        self.assertEqual(self.object.ViewObject.assignments, assignments)
+        self.assertEqual(self.app.active_transaction, owned_id)
+        self.assertEqual((self.document.opened, self.document.commits, self.document.aborts), (1, 0, 0))
+        dialog.reject()
+        self.assertEqual(native.plain_snapshot(self.document), self.before)
+        self.assertFalse(button.enabled)
+        button.clicked.emit(False)
+        self.assertEqual((view.viewAxonometric.call_count, view.fitAll.call_count), (2, 2))
+
+    def test_view_action_refuses_switched_document_foreign_transaction_and_edit_mode(self):
+        view = self.camera()
+        dialog = self.show()
+        button = self.named("AxonometricFit")
+        self.app.ActiveDocument = object()
+        button.clicked.emit(False)
+        self.app.ActiveDocument = self.document
+        self.app.active_transaction = ("Synthetic unrelated edit", 987)
+        button.clicked.emit(False)
+        self.assertEqual(self.app.active_transaction, ("Synthetic unrelated edit", 987))
+        self.app.active_transaction = None
+        self.gui_document.getInEdit = lambda: object()
+        button.clicked.emit(False)
+        self.gui_document.getInEdit = lambda: None
+        view.viewAxonometric.assert_not_called()
+        view.fitAll.assert_not_called()
+        self.assertEqual(native.plain_snapshot(self.document), self.before)
+        self.assertEqual((self.document.opened, self.document.commits, self.document.aborts), (0, 0, 0))
+        dialog.reject()
+
     def test_slider_spin_sync_previews_once_per_change_and_ok_commits_once(self):
         applied = Mock()
         dialog = self.show(on_applied=applied)
@@ -960,6 +1323,51 @@ class AppearancePanelTests(unittest.TestCase):
         self.assertEqual(self.document.commits, 1)
         applied.assert_called_once()
         self.assertFalse(dialog._pft_guard_timer.running)
+
+    def test_presets_preview_once_sync_fine_controls_and_keep_one_undo(self):
+        dialog = self.show()
+        values = (0, 25, 50, 75)
+        for value in (25, 50, 75, 0):
+            self.named("TransparencyPreset%d" % value).clicked.emit(False)
+            self.assertEqual(self.object.ViewObject.Transparency, value)
+            self.assertEqual(self.named("TransparencySlider").value(), value)
+            self.assertEqual(self.named("TransparencyValue").value(), value)
+            self.assertEqual([percent for percent in values
+                              if self.named("TransparencyPreset%d" % percent).isChecked()], [value])
+        self.assertEqual(self.object.ViewObject.assignments, 4)
+        self.assertEqual((self.document.opened, self.document.commits), (1, 0))
+        self.named("TransparencyPreset50").clicked.emit(True)
+        self.named("TransparencyPreset50").clicked.emit(False)
+        self.assertTrue(self.named("TransparencyPreset50").isChecked())
+        self.assertEqual(self.object.ViewObject.assignments, 5)
+        self.named("TransparencySlider").setValue(36)
+        self.assertFalse(any(self.named("TransparencyPreset%d" % value).isChecked() for value in values))
+        self.named("TransparencyValue").setValue(100)
+        self.assertFalse(any(self.named("TransparencyPreset%d" % value).isChecked() for value in values))
+        final = native.plain_snapshot(self.document)
+        dialog.accept()
+        self.assertEqual((self.document.commits, len(self.document.undo_stack)), (1, 1))
+        self.document.undo()
+        self.assertEqual(native.plain_snapshot(self.document), self.before)
+        self.document.redo()
+        self.assertEqual(native.plain_snapshot(self.document), final)
+
+    def test_opaque_preset_applies_from_mixed_zero_display_and_cancel_restores(self):
+        self.object.ViewObject._appearance.append(native.Material(Transparency=0.5))
+        before = native.plain_snapshot(self.document)
+        dialog = self.show()
+        self.assertEqual(self.named("TransparencySlider").value(), 0)
+        self.assertFalse(any(self.named("TransparencyPreset%d" % value).isChecked()
+                             for value in (0, 25, 50, 75)))
+        self.assertEqual(self.object.ViewObject.assignments, 0)
+        self.named("TransparencyPreset0").clicked.emit(False)
+        self.assertEqual(dialog._pft_session.transparency(), 0)
+        self.assertTrue(self.named("TransparencyPreset0").isChecked())
+        self.assertEqual(self.named("Status").text, "")
+        self.assertEqual(self.object.ViewObject.assignments, 1)
+        dialog.reject()
+        self.assertEqual(native.plain_snapshot(self.document), before)
+        self.assertEqual((self.document.commits, self.document.aborts), (0, 1))
 
     def test_cancel_escape_and_windowclose_restore_preview(self):
         for close in ("cancel", "escape", "window"):
@@ -977,6 +1385,81 @@ class AppearancePanelTests(unittest.TestCase):
                 self.assertEqual(native.plain_snapshot(self.document), self.before)
                 self.assertEqual(self.document.commits, 0)
                 self.assertFalse(dialog._pft_guard_timer.running)
+
+    def test_busy_ui_accept_reject_escape_and_close_are_ignored_without_replay(self):
+        for boundary in ("open", "material", "commit", "abort"):
+            for action in ("ok", "cancel", "escape", "close"):
+                with self.subTest(boundary=boundary, action=action):
+                    self.setUp()
+                    applied, errors = Mock(), Mock()
+                    dialog = self.show(on_applied=applied, on_error=errors)
+                    session = dialog._pft_session
+                    finished, nested = [], []
+                    dialog.finished.connect(lambda *args: finished.append(args))
+                    def callback():
+                        self.assertTrue(session._mutating)
+                        if action == "ok":
+                            self.named("Buttons").accepted.emit()
+                        elif action == "cancel":
+                            self.named("Buttons").rejected.emit()
+                        elif action == "escape":
+                            dialog.reject()
+                        else:
+                            event = types.SimpleNamespace(accept=Mock(), ignore=Mock())
+                            dialog.closeEvent(event)
+                            event.ignore.assert_called_once_with()
+                            event.accept.assert_not_called()
+                        nested.append(True)
+                        self.assertEqual(finished, [])
+                        self.assertTrue(dialog.isVisible())
+                        self.assertTrue(dialog._pft_guard_timer.running)
+                        self.assertEqual((len(self.app_observers), len(self.gui_observers)), (1, 1))
+                    if boundary == "open":
+                        original = self.app.setActiveTransaction
+                        def opening(title):
+                            allocated = original(title)
+                            callback()
+                            return allocated
+                        self.app.setActiveTransaction = opening
+                    elif boundary == "material":
+                        def material(**values):
+                            if self.app.active_transaction is not None and not nested:
+                                callback()
+                            return native.Material(**values)
+                        self.app.Material = material
+                    self.named("TransparencySlider").setValue(50)
+                    if boundary in ("commit", "abort"):
+                        original = self.app.closeActiveTransaction
+                        def closing(abort, transaction_id):
+                            callback()
+                            return original(abort, transaction_id)
+                        self.app.closeActiveTransaction = closing
+                        if boundary == "commit":
+                            self.named("Buttons").accepted.emit()
+                        else:
+                            self.named("Buttons").rejected.emit()
+                    else:
+                        self.assertEqual(session.state, "previewing")
+                        self.assertEqual(self.object.ViewObject.Transparency, 50)
+                        self.assertEqual(self.app.active_transaction[1], 11)
+                        self.assertEqual(self.closure_calls, [])
+                        self.assertEqual(finished, [])
+                        self.assertTrue(dialog._pft_guard_timer.running)
+                        # A busy Cancel/Esc/close request is never replayed.
+                        dialog.reject()
+                    self.assertEqual(nested, [True])
+                    self.assertEqual(session.state, "accepted" if boundary == "commit" else "cancelled")
+                    self.assertEqual((self.document.opened, self.document.commits, self.document.aborts),
+                                     (1, 1, 0) if boundary == "commit" else (1, 0, 1))
+                    self.assertEqual(self.closure_calls, [(boundary != "commit", 11)])
+                    self.assertIsNone(self.app.active_transaction)
+                    self.assertEqual(finished, [(1,)] if boundary == "commit" else [(0,)])
+                    self.assertFalse(dialog._pft_guard_timer.running)
+                    self.assertEqual((self.app_observers, self.gui_observers), ([], []))
+                    self.assertEqual(applied.call_count, 1 if boundary == "commit" else 0)
+                    errors.assert_not_called()
+                    if boundary != "commit":
+                        self.assertEqual(native.plain_snapshot(self.document), self.before)
 
     def test_initial_mixed_value_and_open_cancel_never_write(self):
         self.object.ViewObject._appearance.append(native.Material(Transparency=0.5))
@@ -1060,6 +1543,118 @@ class AppearancePanelTests(unittest.TestCase):
         self.named("Buttons").rejected.emit()
         self.assertEqual((self.document.commits, self.document.aborts), (1, 0))
         self.assertEqual(len(finished), 1)
+
+    def test_terminal_guard_preserves_first_error_and_ignores_queued_actions(self):
+        errors = Mock()
+        dialog = self.show(on_error=errors)
+        self.named("TransparencySlider").setValue(40)
+        self.app.ActiveDocument = object()
+        dialog._pft_guard_timer.timeout.emit()
+        message = self.named("Status").text
+        self.assertEqual(errors.call_args.args[0].code, "DOCUMENT_NOT_ACTIVE")
+        self.assertEqual(dialog._pft_session.state, "cancelled")
+        counts = (self.object.ViewObject.assignments, self.document.commits, self.document.aborts)
+        self.named("Buttons").accepted.emit()
+        self.named("RandomColor").clicked.emit()
+        self.named("TransparencyPreset75").clicked.emit(False)
+        self.named("TransparencySlider").setValue(61)
+        self.named("TransparencyValue").setValue(72)
+        self.assertEqual(self.named("Status").text, message)
+        self.assertEqual(errors.call_count, 1)
+        self.assertEqual((self.object.ViewObject.assignments, self.document.commits, self.document.aborts), counts)
+        self.assertFalse(dialog._pft_guard_timer.running)
+        for suffix in ("RandomColor", "TransparencySlider", "TransparencyValue",
+                       "TransparencyPreset0", "TransparencyPreset25", "TransparencyPreset50", "TransparencyPreset75"):
+            self.assertFalse(self.named(suffix).enabled)
+        self.assertFalse(self.named("Buttons").button(1).enabled)
+        self.assertTrue(self.named("Buttons").button(2).enabled)
+
+    def test_terminal_slider_callback_never_touches_a_deleted_spin_widget(self):
+        errors = Mock()
+        dialog = self.show(on_error=errors)
+        self.named("TransparencySlider").setValue(6)
+        self.app.ActiveDocument = object()
+        dialog._pft_guard_timer.timeout.emit()
+        message = self.named("Status").text
+        counts = (self.object.ViewObject.assignments, self.document.commits, self.document.aborts)
+        spin = self.named("TransparencyValue")
+        with patch.object(spin, "setValue", side_effect=RuntimeError("synthetic deleted widget")) as setter, \
+                patch.object(dialog._pft_session, "preview_transparency", side_effect=AssertionError("terminal preview forbidden")) as preview:
+            self.named("TransparencySlider").valueChanged.emit(61)
+            spin.valueChanged.emit(72)
+        setter.assert_not_called()
+        preview.assert_not_called()
+        self.assertEqual(self.named("Status").text, message)
+        self.assertEqual(errors.call_count, 1)
+        self.assertEqual((self.object.ViewObject.assignments, self.document.commits, self.document.aborts), counts)
+
+    def test_terminal_accept_failure_disables_inputs_and_preserves_original_error(self):
+        errors = Mock()
+        dialog = self.show(on_error=errors)
+        self.named("TransparencySlider").setValue(6)
+        self.document.commitTransaction = lambda: native.Document.commitTransaction(self.document)
+        self.named("Buttons").accepted.emit()
+        self.assertEqual(dialog._pft_session.state, "invalid")
+        self.assertEqual(errors.call_args.args[0].code, "VISUAL_COMMIT_UNVERIFIED")
+        message = self.named("Status").text
+        counts = (self.object.ViewObject.assignments, self.document.commits, self.document.aborts)
+        self.named("Buttons").accepted.emit()
+        self.named("RandomColor").clicked.emit()
+        self.named("TransparencySlider").setValue(37)
+        self.assertEqual(self.named("Status").text, message)
+        self.assertEqual(errors.call_count, 1)
+        self.assertEqual((self.object.ViewObject.assignments, self.document.commits, self.document.aborts), counts)
+        self.assertFalse(dialog._pft_guard_timer.running)
+        for suffix in ("RandomColor", "TransparencySlider", "TransparencyValue",
+                       "TransparencyPreset0", "TransparencyPreset25", "TransparencyPreset50", "TransparencyPreset75"):
+            self.assertFalse(self.named(suffix).enabled)
+        self.assertFalse(self.named("Buttons").button(1).enabled)
+        self.assertTrue(self.named("Buttons").button(2).enabled)
+
+    def test_reopening_terminal_panel_closes_old_window_and_resolves_new_explicit_scope(self):
+        parent = self.widgets.QWidget()
+        first = self.show(parent=parent)
+        self.named("TransparencySlider").setValue(40)
+        self.app.ActiveDocument = object()
+        first._pft_guard_timer.timeout.emit()
+        self.assertEqual(first._pft_session.state, "cancelled")
+        self.app.ActiveDocument = self.document
+        counts = (self.object.ViewObject.assignments, self.document.opened, self.document.commits, self.document.aborts)
+        resolve = Mock(return_value=(self.document.Name, ["Part"]))
+        with patch.object(controls, "_selected_scope", side_effect=AssertionError("explicit scope required")):
+            second = controls.show_appearance_panel(self.app, self.gui, parent=parent, get_scope=resolve)
+        self.assertIsNot(second, first)
+        self.assertFalse(first.isVisible())
+        self.assertFalse(first._pft_guard_timer.running)
+        resolve.assert_called_once_with()
+        self.assertEqual(second._pft_session.state, "ready")
+        self.assertTrue(self.named("RandomColor").enabled)
+        self.assertTrue(self.named("TransparencySlider").enabled)
+        self.assertTrue(second._pft_guard_timer.running)
+        self.assertEqual((self.object.ViewObject.assignments, self.document.opened, self.document.commits, self.document.aborts), counts)
+
+    def test_reopening_terminal_panel_never_closes_a_foreign_transaction(self):
+        parent = self.widgets.QWidget()
+        first = self.show(parent=parent)
+        self.named("TransparencySlider").setValue(6)
+        foreign = ("Synthetic unrelated edit", 987)
+        self.app.active_transaction = foreign
+        first._pft_guard_timer.timeout.emit()
+        self.assertEqual(first._pft_session.state, "invalid")
+        close = first.close
+        def close_with_native_event():
+            first.closeEvent(types.SimpleNamespace(accept=Mock()))
+            close()
+        first.close = close_with_native_event
+        counts = (self.object.ViewObject.assignments, self.document.opened, self.document.commits, self.document.aborts)
+        resolve = Mock(return_value=(self.document.Name, ["Part"]))
+        self.assert_error("DOCUMENT_BUSY", lambda: controls.show_appearance_panel(
+            self.app, self.gui, parent=parent, get_scope=resolve))
+        resolve.assert_called_once_with()
+        self.assertFalse(first.isVisible())
+        self.assertFalse(first._pft_guard_timer.running)
+        self.assertIs(self.app.active_transaction, foreign)
+        self.assertEqual((self.object.ViewObject.assignments, self.document.opened, self.document.commits, self.document.aborts), counts)
 
     def test_reopening_reuses_visible_panel_before_resolving_scope(self):
         parent = self.widgets.QWidget()

@@ -221,7 +221,7 @@ class _PftToggleMCPCommand(_PftMCPActionCommand):
         "PhoenixTools_MCPStatus", "PhoenixTools_ToggleMCP", "PhoenixTools_Settings",
         "PhoenixTools_NormalizeNames", "PhoenixTools_SyncLinkLabels", "PhoenixTools_EditPartProperties",
     )
-    TOOLBAR_COMMANDS = TOOLBAR_ANCHOR_COMMANDS[:3] + ("PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance") + TOOLBAR_ANCHOR_COMMANDS[3:] + ("PhoenixTools_DeskTools", "PhoenixTools_ChatConnection")
+    TOOLBAR_COMMANDS = TOOLBAR_ANCHOR_COMMANDS[:3] + ("PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance") + TOOLBAR_ANCHOR_COMMANDS[3:] + ("PhoenixTools_DeskTools", "PhoenixTools_ChatConnection", "PhoenixTools_Help")
 
     def __init__(self, status_command=None, settings_command=None, toolbar_commands=()):
         super().__init__()
@@ -233,6 +233,7 @@ class _PftToggleMCPCommand(_PftMCPActionCommand):
     def _presentation(self, status=None):
         status = pft_bridge.get_status() if status is None else status
         stopping, running = bool(status.get("stopping")), bool(status.get("running"))
+        port = status.get("port", getattr(pft_bridge, "DEFAULT_PORT", 9876))
         if stopping:
             title = tr("MCP 正在停止")
             tooltip = tr("当前 MCP 正在后台停止；完成后可再次启动。")
@@ -241,8 +242,8 @@ class _PftToggleMCPCommand(_PftMCPActionCommand):
             tooltip = tr("当前 MCP 运行中；点击停止本机 Phoenix MCP 服务。")
         else:
             title = tr("启动 MCP · 已停止")
-            tooltip = tr("当前 MCP 已停止；点击启动本机服务（127.0.0.1:9876）。")
-        return (running, stopping, get_language()), {"MenuText": title, "ToolTip": tooltip,
+            tooltip = tr("当前 MCP 已停止；点击启动本机桥接，采用连接设置或独立开发端口。")
+        return (running, stopping, get_language(), port), {"MenuText": title, "ToolTip": tooltip,
             "Pixmap": os.path.join(_addon_dir, "Resources", "icons", "mcp-stop.svg" if running or stopping else "mcp-start.svg")}
 
     def IsActive(self):
@@ -427,12 +428,14 @@ class PftWorkbench(_workbench_base):
             ("PhoenixTools_EditPartProperties", "零件属性", "编辑所选对象的五个 BOM 字符串字段，确认后写入。", pft_workbench_tools.show_properties_dialog),
             ("PhoenixTools_DeskTools", "Desk Tools", "配置、检查或启动 Desk 后台，并独立打开已验证的 Web 页面。", pft_workbench_tools.show_desk_dialog),
             ("PhoenixTools_ChatConnection", "AI 聊天", "使用原生面板连接 Codex，登录后发送消息与停止回复。", pft_workbench_tools.show_chat_connection_dialog),
+            ("PhoenixTools_Help", "帮助", "查看 Phoenix Tools 与 MCP 的本地能力和操作说明。", pft_workbench_tools.show_help_dialog),
         ]
         icons = {
             "PhoenixTools_DocumentTools": "document-tools.svg", "PhoenixTools_AxonometricFit": "axonometric-fit.svg",
             "PhoenixTools_Appearance": "appearance.svg", "PhoenixTools_NormalizeNames": "normalize-names.svg",
             "PhoenixTools_SyncLinkLabels": "link-labels.svg", "PhoenixTools_EditPartProperties": "part-properties.svg",
             "PhoenixTools_DeskTools": "desk-tools.svg", "PhoenixTools_ChatConnection": "chat-connection.svg",
+            "PhoenixTools_Help": "help.svg",
         }
         self._commands = {}
         for identifier, title, tooltip, callback in definitions:

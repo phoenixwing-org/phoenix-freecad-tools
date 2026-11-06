@@ -6,7 +6,7 @@
 
 ## HTTP 与结果封装
 
-默认地址为 `http://127.0.0.1:9876/rpc`，仅接受 `POST` 和 `Content-Type: application/json`。插件仅绑定 IPv4 loopback，检查 Host，拒绝带 Origin 或 Sec-Fetch 请求头的浏览器请求。Node 使用 `node:http`，不附加 Sec-Fetch 头。请求 JSON 不接受重复键、非有限数值、未知方法或额外参数。
+默认直连地址为 `http://127.0.0.1:9876/rpc`；明确启用发现时使用登记中的动态端口。仅接受 `POST` 和 `Content-Type: application/json`。插件仅绑定 IPv4 loopback，检查 Host，拒绝带 Origin 或 Sec-Fetch 请求头的浏览器请求。Node 使用 `node:http`，不附加 Sec-Fetch 头。请求 JSON 不接受重复键、非有限数值、未知方法或额外参数。
 
 ```json
 {"method":"view_axonometric","params":{"docName":"ExampleDocument","fit":true}}
@@ -19,6 +19,20 @@
 ```json
 {"ok":false,"error":{"code":"DOCUMENT_NOT_FOUND","message":"指定文档未打开。"}}
 ```
+
+### 可选实例目标与监听身份
+
+请求封装只接受顶层 `method`、`params` 和可选 `target`；`target` 严格只有 `instance_id`、`service_id`，均为32字符小写十六进制标识。它不在每个MCP工具的业务参数中，由Node绑定客户端填写：
+
+```json
+{"method":"view_axonometric","params":{"docName":"ExampleDocument","fit":true},"target":{"instance_id":"11111111111111111111111111111111","service_id":"22222222222222222222222222222222"}}
+```
+
+`get_status.instance_routing` 为 `{version:1,instance_id,service_id,pid,guard_required}`，停止后为`null`。`service_id` 每次监听启动改变；PID只作诊断，不作为所有权证明。该状态查询不读取CAD、共享配置或实例登记。发现模式的`guard_required:true`拒绝没有target的非`ping/get_status`请求；发现握手本身也携带登记中的target并核对返回身份。身份不符或旧listener/dispatcher已失效返回`INSTANCE_TARGET_MISMATCH`，不派发到新的监听器；GUI执行前再次验证原接收身份。
+
+普通直连仍接受原有无target封装。新Node客户端首次状态读取固定返回的监听身份，后续调用携带target；端口复用或服务重启不会静默改绑。没有路由能力字段的旧v1插件继续原直连兼容路径。身份保护是防误路由合同，不是进程认证或跨用户隔离，协议版本不因此增加。
+
+多实例发现仅显式v2配置启用：`{"schema_version":2,"bridge":{"preferred_port":9876},"discovery":{"enabled":true}}`；缺失/v1默认关闭，不迁移或写配置。Node显式`PHOENIX_FREECAD_URL`优先且对共享配置与登记零读取。发现配置元数据为`mcp_connection_configuration={version:2,scope:instance_discovery,...,target_url:null,discovery_supported:true,runtime_directory:...}`；原直连v1输出保持不变。目录、权限和平台拒绝边界见[多实例合同](INSTANCE-ROUTING.md)。本轮macOS独立双实例已通过正式SDK与原生控件自动化，用户手工、其他平台和安装仍待验收。
 
 | 边界 | 当前限制 |
 | --- | --- |
@@ -35,7 +49,7 @@
 
 普通 MCP 成功结果同时提供 JSON 文本和 `structuredContent`，格式为 `{ok:true,source_kind:"live_freecad_gui",observed_at:...,data:...}`。`observed_at` 是 Node 的观测时间，不是模型修订令牌。工具失败使用 `isError:true`，内容为 `{ok:false,error:{code,message}}`；输入 schema 错误可在 SDK 校验阶段直接拒绝，不派发到插件。离线能力清单的 `source_kind` 为 `server_manifest`。
 
-## 完整模式 25 个 MCP 工具
+## 基础完整模式 25 个 MCP 工具
 
 下表参数为 MCP 层参数，`?` 表示可省略。Node 将 `document` 映射为 `docName`、`object` 映射为 `objectName`、`objects` 映射为 `objectNames`、`page` 映射为 `pageName`；其余参数名保持原样。文档、对象和图纸均使用内部 **Name**，不是显示 Label。只有标注可省略的文档参数才默认使用活动文档；新通用操作和业务预览要求显式文档，不从磁盘打开工程。
 
@@ -53,21 +67,25 @@
 | `measure_geometry` | `measure_geometry` | `{document?,object,subelement?}`；现有对象或子元素的几何测量 |
 | `inspect_design` | `inspect_design` | `{document?,object,constraintOffset?:0,constraintLimit?:50,expectedDocumentInstanceToken?,expectedRevision?}`；Body、草图及特征的缓存设计诊断 |
 | `list_drawing_pages` | `list_drawing_pages` | `{document?}`；TechDraw 页摘要 |
-| `inspect_drawing_page` | `inspect_drawing_page` | `{document?,page}`；模板、视图、标注及来源引用摘要 |
+| `inspect_drawing_page` | `inspect_drawing_page` | `{document?,page,view?,offset?,limit?}`；无view保持模板、视图、标注及来源引用摘要；显式view可分页读取缓存投影引用及已有尺寸的native_measurement，分页仅有view时允许，不承诺投影ready或最新 |
 | `set_view` | `view_standard` | `{document?,view,fit?:false}`；标准三维视图 |
 | `set_appearance` | `execute_script`，固定有类型脚本 | `{document,objects,operation,transparency?,requestId}`；明确对象的颜色或透明度，事务可撤销，不开放任意代码参数 |
 | `capture_view` | `capture_view` | `{document?,width?:800,height?:600}`；当前三维视图 PNG 与元数据 |
 | `set_selection` | `set_selection` | `{document,objects}`；替换目标活动文档的完整对象选择，允许空数组 |
 | `set_visibility` | `set_visibility` | `{document,objects,visible}`；明确对象的统一显隐，事务可撤销 |
 | `recompute_document` | `recompute_document` | `{document}`；显式重算空闲活动文档并检查原生结果和对象错误 |
-| `prepare_part_changes` | `prepare_part_changes` | `{document,objects,operation,values?,body?,lengthMm?}`；按操作严格校验，完整差异预览和短期 token，不修改模型 |
+| `prepare_part_changes` | `prepare_part_changes` | `{document,operation,objects?,values?,body?,lengthMm?,page?,view?,dimensions?}`；各操作字段严格互斥，尺寸操作不接受objects，返回完整预览和短期token，不修改模型 |
 | `request_part_change_approval` | `request_part_change_approval` | `{token}`；打开或复用非模态完整预览确认窗口，返回内存状态，不等于执行 |
 | `get_part_change_status` | `get_part_change_status` | `{token}`；纯内存查询，不读CAD、不打开窗口、不执行修改 |
-| `apply_part_changes` | `apply_part_changes` | `{token}`；完整模式复核并应用未进入原生确认链的预览，或返回仍保留的历史成功摘要 |
+| `apply_part_changes` | `apply_part_changes` | `{token}`；仅原五类业务可在未进入原生确认链时写入，或重放其保留的成功摘要；Pad/草稿/关联尺寸始终拒绝此入口，含成功重放 |
 | `execute_script` | `execute_script` | `{code,requestId}`；显式授权的 Python 脚本执行与请求状态 |
 | `get_script_status` | `get_script_status` | `{requestId}`；当前桥接服务会话中的请求状态，不执行脚本 |
 
-内嵌聊天注册精确19个工具：基础读取、视图/外观和脚本状态16项，加上`prepare_part_changes`、`request_part_change_approval`和`get_part_change_status`。其余6项`capture_view`、`execute_script`、`set_selection`、`set_visibility`、`recompute_document`、`apply_part_changes`不注册。Label/BOM/Link修改只能从完整预览进入FreeCAD原生确认窗口，模型不能提交布尔值来确认；有限首个Pad Length复用此链且必须原生人工确认，详见[Pad合同](PAD-LENGTH-EDIT.md)；原生端到端尚待验收。配置和实际清单必须精确匹配；开启可选Desk时再增加5个只读工具。
+内嵌聊天注册精确19个工具：基础读取、视图/外观和脚本状态16项，加上`prepare_part_changes`、`request_part_change_approval`和`get_part_change_status`。其余6项`capture_view`、`execute_script`、`set_selection`、`set_visibility`、`recompute_document`、`apply_part_changes`不注册。Label/BOM/Link修改只能从完整预览进入FreeCAD原生确认窗口，模型不能提交布尔值来确认；有限首个Pad Length复用此链且必须原生人工确认，详见[Pad合同](PAD-LENGTH-EDIT.md)。独立样件上的正式MCP、原生确认按钮自动化及撤销/重做已通过；用户人工、更多模型场景及跨平台仍待验收，范围见[验证记录](VERIFICATION.md)。配置和实际清单必须精确匹配；开启可选Desk时再增加5个只读工具。
+
+明确开启发现的完整模式额外注册`list_freecad_instances {}`与`select_freecad_instance {instanceId,serviceId}`，共27项；可选Desk后32项。普通完整25/Desk30、聊天19/Desk24及worker4项保持原清单，chat/worker无显式URL却要求发现时明确拒绝。列表和选择结果用`source_kind:instance_registry_and_status_handshake`，不声明`live_freecad_gui`来源。列表逐项报告ready/unavailable/incompatible/identity_mismatch，不扫描端口、不读取文档、不移除失联登记。初次唯一ready可自动绑定，多实例需选择；已绑定目标丢失或登记/服务身份改变后必须明确重新选择，不能自动采用另一个实例。
+
+每次工具调用从预检到HTTP请求持有同一目标客户端；同步调用在途时拒绝切换。`requestId`和预览token各有最多4096项会话内关联，不淘汰关联来允许改绑；已知标识移到另一实例/服务时返回`INSTANCE_AFFINITY_MISMATCH`。桥接另保留进程内的来源记录，带target的业务token必须在对应服务准备，未知token返回`INSTANCE_AFFINITY_UNKNOWN`。停止再启动监听即使`script_session_id`不变，旧服务的标识也不能被新服务认领。选择不迁移或取消原生审批，未知写入结果不自动重发。
 
 内部另有 `ping {}`，返回 `{pong:true}`，没有注册为 MCP 工具。
 
@@ -135,7 +153,7 @@
 
 ## Phoenix 业务预览与应用
 
-`prepare_part_changes` 复用工作台 Model/Controller，要求明确的空闲活动文档与 1–100 个不同对象。它**模型只读，但会创建内存 token**，因此 `readOnlyHint:true`、`idempotentHint:false`；不是完全无状态的读取。
+`prepare_part_changes`复用工作台Model/Controller，要求明确的空闲活动文档。原五项零件业务接受1–100个不同的`objects`；`set_pad_length`只接受一个Pad及明确的`body/lengthMm`；`create_drawing`只接受一个来源`objects`。`add_drawing_dimensions`不接受`objects`，必须明确`page/view`及1–8项`dimensions`。各操作不接受其它操作专属字段。它**模型只读，但会创建内存token**，因此`readOnlyHint:true`、`idempotentHint:false`；不是完全无状态的读取。
 
 | `operation` | 差异范围 |
 | --- | --- |
@@ -145,6 +163,8 @@
 | `recommend_properties` | 从明确完整的编号.版本-名称推荐正式值，只补空值并保留现值；歧义不猜测 |
 | `set_properties` | 设置明确提供的正式字段，每个对象使用相同字段集，可使用不同值 |
 | `set_pad_length` | 一个受支持的首个且最终Pad；明确`body`和mm单位的`lengthMm`，不接受`values`；必须原生人工确认 |
+| `create_drawing` | 一个明确来源`objects`，预览A4横向第一角三视图五节点；不接受属性、Pad或尺寸参数，必须原生人工确认 |
+| `add_drawing_dimensions` | 明确`page/view`及1–8项投影边、类型和纸面偏移；不接受`objects`、外部量值或格式覆盖，必须原生人工确认 |
 
 正式字段为 `PartNumber`、`PartVersion`、`TypeCode`、`ModelSeries`、`PartName`，属性组为 `CustomDefine`。属性操作不向 App::Link 来源转发写入。仅 `set_properties` 必须且允许提供 `values`：键必须与 `objects` 精确对应，每个对象至少一个字段，各对象字段集完全相同，不接受额外字段。空字符串可表示明确空值，仍需完整预览；文本及 HTTP 总字节边界均适用。
 
@@ -201,15 +221,17 @@ Node 生成固定的插件调用脚本，经 `execute_script` 复用工作台材
 
 记录包含 `request_id`、`created_at`、`started_at`、`finished_at`；时间为 Unix 秒。标准输出和错误输出各保留最多 8192 字符，截断由 `output_truncated` 标记。`result` 仅有限量 JSON 摘要：限制递归深度、条目数及字符串长度，序列化超过 128 KiB 时返回截断提示。执行异常返回工具错误，不把异常当成成功；查询一个 `failed` 记录本身可以成功，须继续检查其 `state` 和 `error`。
 
+`result` 内的 Python 整数按传输边界编码：绝对值不超过 `9007199254740991`（`2**53-1`）时仍为 JSON number；超过该范围且绝对值小于 `10**100` 时，使用与原生属性读取一致的 `{"kind":"integer","decimal":"9007199254740993","truncated":false}`。`decimal` 保留符号和完整十进制位数，不能为精确运算再转成 JavaScript Number。绝对值达到 `10**100` 时仍沿用 `{"type":"large_integer"}` 摘要，不展开十进制文本。布尔与0不变，列表、元组和字典内同样适用；外层仍受既有深度、条目数和字节预算限制，整数标签的 `truncated:false` 只说明该整数编码完整。执行返回、`get_script_status` 与同 ID 同代码重放使用同一已编码结果，不重复执行脚本。这是脚本结果传输的精度修复；本地当前文档面板及 Markdown 的 Integer/IntegerList 仍保留原生有符号64位支持，不为 JavaScript 缩小读取范围。
+
 完整终态结果仅保留最近 20 份；会话内最多记住 4096 个请求 ID 及代码摘要。完整结果过期后，用同 ID 重放返回 `SCRIPT_RESULT_EXPIRED`，不会重新执行；达到历史容量返回 `SCRIPT_HISTORY_FULL`。待执行记录也有数量上限，满时返回 `SCRIPT_QUEUE_FULL`。`get_script_status` 对过期或未知记录返回 `SCRIPT_NOT_FOUND`，这不证明该 ID 从未执行。
 
-记录仅存于桥接模块内存。**重载桥接模块或重启 FreeCAD 会重置记录并生成新的 `script_session_id`**；单纯停止、再启动同一个已加载模块的服务不保证清空记录。先通过连接状态记住会话 ID；超时后先查询原 ID，必要时仅在同一会话重放完全相同的 ID 和代码。会话已变或结果过期时，先核对文档实际状态，再决定下一步，不能依赖去重跨会话生效。
+记录仅存于桥接模块内存。**重载桥接模块或重启 FreeCAD 会重置记录并生成新的 `script_session_id`**；单纯停止、再启动同一个已加载模块的服务不保证清空记录。先通过连接状态记住会话 ID；超时后先查询原 ID，必要时仅在同一会话重放完全相同的 ID 和代码。会话已变或结果过期时，先核对文档实际状态，再决定下一步，不能依赖去重跨会话生效。 实例路由另绑定每次监听的`service_id`；新监听器不因脚本内存仍在就接管旧请求。路由身份已变时先核原实例与实际结果，不把原ID转到新服务重放。
 
 ## GUI 调度、超时与本机边界
 
-除 `ping`、`get_status`、`get_script_status` 外，桥接操作通过 Qt queued signal 排入 GUI 主线程。插件默认等待 15 秒：确认尚未开始的排队超时返回 `GUI_QUEUE_TIMEOUT` 并取消；已开始的操作超时返回 `GUI_TIMEOUT`，不强制中断。Node 默认等待 15000 ms，`PHOENIX_TIMEOUT_MS` 可设为 100–120000 的整数；它只改变 Node 等待时长，不改变插件的 GUI 等待上限。`BRIDGE_TIMEOUT` 表示 Node 没有及时取得结果，操作仍可能继续。Node 不自动重试。
+除 `ping`、`get_status`、`get_script_status`、`get_part_change_status` 外，桥接操作通过 Qt queued signal 排入 GUI 主线程。插件默认等待 15 秒：确认尚未开始的排队超时返回 `GUI_QUEUE_TIMEOUT` 并取消；已开始的操作超时返回 `GUI_TIMEOUT`，不强制中断。Node 默认等待 15000 ms，`PHOENIX_TIMEOUT_MS` 可设为 100–120000 的整数；它只改变 Node 等待时长，不改变插件的 GUI 等待上限。`BRIDGE_TIMEOUT` 表示 Node 没有及时取得结果，操作仍可能继续。Node 不自动重试。
 
-`PHOENIX_FREECAD_URL` 默认 `http://127.0.0.1:9876/`，只允许 `localhost` 或 `127.0.0.1` 的 HTTP 根地址，不接受账号密码、查询参数、片段或其他路径。端口无身份认证，也没有本机进程间的用户权限隔离；Origin/Sec-Fetch 检查不能阻止其他本机程序访问。仅用于可信本机环境，不对外监听。
+`PHOENIX_FREECAD_URL` 显式设置时固定直连；未设置按共享配置，缺省为 `http://127.0.0.1:9876/`。显式地址只允许 `localhost` 或 `127.0.0.1` 的 HTTP 根地址，不接受账号密码、查询参数、片段或其他路径。端口无身份认证，也没有本机进程间的用户权限隔离；Origin/Sec-Fetch 检查不能阻止其他本机程序访问。仅用于可信本机环境，不对外监听。
 
 FreeCAD 工作台显示为 **Phoenix Tools**。前三个图标入口分别为只读状态 `PhoenixTools_MCPStatus`、灰色启停 `PhoenixTools_ToggleMCP` 和齿轮 `PhoenixTools_Settings`；菜单和 tooltip 保留文字。手动停止始终确认，确认后再次核对状态。普通按钮独立可用，业务 MCP 通过两个预览/应用工具复用同一规则。设置默认中文，English 保存在本机，确认后立即刷新已有界面；`AutoStartMCP`默认关闭且下次FreeCAD启动生效；业务工具条显示使用`ToolbarButtonStyle=icon_text|icon`，默认图标+文字、保存立即刷新，MCP三控件固定图标；旧 `ConfirmStopMCP` 偏好不再读取或写入，不能关闭手动停止确认，保存不当场启停服务。语言不改变方法名、参数、命令 ID、对象值或正式字段；本轮没有跟随 FreeCAD 语言或业务/原生动态错误的完整翻译。
 
@@ -218,3 +240,9 @@ FreeCAD 工作台显示为 **Phoenix Tools**。前三个图标入口分别为只
 0.5.0 新增的 Desk Tools / 聊天接入是本机 GUI 入口，不是新增 MCP 工具。Desk 使用独立可信 CLI 与状态目录，未把启动、浏览器或下载能力暴露为本桥接方法。后续原生聊天已形成独立专属会话和受控 MCP 连接；它不镜像或接管当前 Codex Desktop 会话。普通命名写入在同一事务内额外复核回调后的目标 Label 和重名集合，派生 Link 来源保守拒绝，继续经原预览/应用合同，不改变协议版本。
 
 原生审批能力`part_approvals` v1与状态DTO、过期/关闭及去重规则见[原生确认链](NATIVE-PART-APPROVAL.md)。预览5分钟限制可确认期；终结后的纯状态摘要在32槽容量内保留，重复查询或请求不重复写入。
+
+## 关联尺寸扩展 v1
+
+`drawing_references` v1在既有`inspect_drawing_page`增加明确view与offset/limit：内部为viewName，索引0–2047、每窗最多50项，返回原生未缩放投影mm、缺失/未知/unsupported，以及受支持既有尺寸的native_measurement。无view保留原摘要；此扩展核对read_provenance，不声明完整枚举或投影ready。
+
+`drawing_dimensions` v1声明`prepare_part_changes.operation=add_drawing_dimensions`。外部参数为document/page/view及1–8项{edge,kind,xMm,yMm}；桥接为docName/objectNames:[page]/viewName/dimensions:[{edge,kind,x_mm,y_mm}]。五种kind为Distance/DistanceX/DistanceY/Diameter/Radius，Edge0起。完整preview及状态分别限128KiB/4KiB；native_gui_only、同token查询/一次应用与缺能力零派发，无脚本或direct apply回退。写入后DesignResult.kind=drawing_dimensions，逐项真实value_mm、measurement_verification=native_reference_and_value_checked，继续projection_verification=not_checked/manual_review_required=true。严格数据、坐标、冻结与验收边界见[关联尺寸合同](TECHDRAW-DIMENSIONS.md)。

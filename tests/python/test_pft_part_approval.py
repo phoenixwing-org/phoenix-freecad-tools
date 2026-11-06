@@ -6,6 +6,7 @@ import json
 import threading
 import types
 import unittest
+from test_pft_workbench_tools import bind_transaction_api
 from unittest.mock import patch
 
 import test_pft_business as fixtures
@@ -47,6 +48,7 @@ class PartApprovalTests(unittest.TestCase):
         self.app = types.SimpleNamespace(ActiveDocument=self.document, getDocument=self.documents.get,
             listDocuments=lambda: self.documents, getActiveTransaction=lambda: self.document.active_transaction,
             ParamGet=lambda path: self.preferences)
+        bind_transaction_api(self.app, self.document)
         self.gui_document = types.SimpleNamespace(getInEdit=lambda: None)
         self.gui = types.SimpleNamespace(getDocument=lambda name: self.gui_document)
         self.presenters = []
@@ -528,11 +530,41 @@ class PartApprovalTests(unittest.TestCase):
         stack = ExitStack()
         for name, value in (("_business", business), ("_server", None), ("_server_thread", None),
                             ("_dispatcher", None), ("_stop_thread", None),
+                            ("_listener_configuration", {"source": "default", "config_path": None,
+                                "preferred_port": 9876, "effective_port": 9876}),
                             ("_create_gui_dispatcher", Dispatcher), ("_PftBridgeHttpServer", Server)):
             stack.enter_context(patch.object(bridge, name, value))
         stack.enter_context(patch.object(bridge.threading, "Thread", Thread))
+        stack.enter_context(patch.dict(bridge.os.environ, {}, clear=True))
+        # Default startup must never read this machine's user configuration.
+        stack.enter_context(patch.object(bridge._mcp_settings, "read_config", return_value={
+            "source": "default", "settings": {"schema_version": 1, "bridge": {"preferred_port": 9876}},
+            "config_path": "/synthetic/PhoenixTools/mcp/config.json", "etag": None}))
         self.addCleanup(stack.close)
         return bridge, state, Thread
+
+
+    def test_invalid_shared_configuration_leaves_existing_native_approval_usable(self):
+        bridge, state, _ = self.fake_bridge_lifecycle()
+        preview = self.prepare()
+        self.assertEqual(self.request(preview["token"])["state"], "awaiting_confirmation")
+        presenter = self.presenters[-1]
+        epoch = business._approval_epoch
+        with patch.object(bridge._mcp_settings, "read_config",
+                          side_effect=bridge._mcp_settings.PftMcpSettingsError("MCP_SETTINGS_INVALID")):
+            with self.assertRaises(bridge.PftBridgeError) as raised:
+                bridge.start_server()
+        self.assertEqual(raised.exception.code, "MCP_SETTINGS_INVALID")
+        self.assertEqual(self.status(preview["token"])["state"], "awaiting_confirmation")
+        self.assertEqual(business._approval_epoch, epoch)
+        self.assertEqual(presenter.closures, 0)
+        self.assertEqual(state.servers, [])
+        self.assertEqual(state.dispatchers, [])
+        self.assertEqual(state.threads, [])
+        self.assert_no_write()
+        # A failed configuration read must not revoke the existing GUI grant.
+        self.assertEqual(presenter.confirm()["state"], "applied")
+        self.assertEqual(self.document.events, ["open", "commit"])
 
     def test_stop_without_server_closes_gate_until_successful_new_start(self):
         bridge, state, _ = self.fake_bridge_lifecycle()

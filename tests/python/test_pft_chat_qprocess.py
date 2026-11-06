@@ -9,6 +9,7 @@ import zlib
 from pathlib import Path
 import types
 import unittest
+from unittest.mock import patch
 
 ADDON = Path(__file__).resolve().parents[2] / 'addon' / 'PhoenixFreeCADTools'
 spec = importlib.util.spec_from_file_location('pft_chat_qprocess', ADDON / 'pft_chat_qprocess.py')
@@ -37,14 +38,18 @@ def synthetic_cached_thumbnail_event():
 
 
 class PftSignal:
-    def __init__(self): self.callbacks = []
-    def connect(self, callback): self.callbacks.append(callback)
-    def disconnect(self, callback): self.callbacks.remove(callback)
+    def __init__(self): self.callbacks, self.connect_calls, self.disconnect_calls = [], 0, 0
+    def connect(self, callback):
+        self.connect_calls += 1; self.callbacks.append(callback); return True
+    def disconnect(self, callback):
+        self.disconnect_calls += 1; self.callbacks.remove(callback)
     def emit(self, *values):
         for callback in tuple(self.callbacks): callback(*values)
 
 
 class PftQtCore:
+    now = 100.0
+
     def __init__(self):
         self.processes, self.timers = [], []
         self.application = object()
@@ -52,10 +57,14 @@ class PftQtCore:
         owner = self
         class PftProcess:
             FailedToStart, NormalExit = 0, 0
+            NotRunning, Starting, Running = 0, 1, 2
+            ProcessState = types.SimpleNamespace(NotRunning=0, Starting=1, Running=2)
             def __init__(self, parent):
                 owner.processes.append(self)
                 self.parent, self.killed, self.deleted = parent, 0, False
                 self.cpp_deleted, self.delete_calls = False, 0
+                self.state_value = self.Starting
+                self.pid = 1000 + len(owner.processes)
                 self.stdout, self.stderr, self.writes = bytearray(), bytearray(), []
                 for name in ('readyReadStandardOutput', 'readyReadStandardError', 'finished', 'errorOccurred', 'started', 'destroyed'):
                     setattr(self, name, PftSignal())
@@ -66,6 +75,8 @@ class PftQtCore:
                 if self.cpp_deleted: raise RuntimeError('Internal C++ object QProcess already deleted')
             def write(self, data): self.live(); self.writes.append(data); return len(data)
             def bytesToWrite(self): self.live(); return 0
+            def state(self): self.live(); return self.state_value
+            def processId(self): self.live(); return self.pid
             def kill(self): self.live(); self.killed += 1
             def deleteLater(self): self.live(); self.deleted = True; self.delete_calls += 1
             def readAllStandardOutput(self):
@@ -81,10 +92,13 @@ class PftQtCore:
                 self.parent, self.timeout, self.active, self.delay = parent, PftSignal(), False, None
                 owner.timers.append(self)
             def setSingleShot(self, value): self.single_shot = value
-            def start(self, milliseconds): self.active, self.delay = True, milliseconds
+            def start(self, milliseconds):
+                self.active, self.delay = True, milliseconds
+                self.deadline = PftQtCore.now + milliseconds / 1000
             def stop(self): self.active = False
             def expire(self):
                 if self.active:
+                    PftQtCore.now = max(PftQtCore.now, self.deadline)
                     if self.single_shot: self.active = False
                     self.timeout.emit()
         class PftEnvironment:
@@ -95,15 +109,109 @@ class PftQtCore:
 
 class PftChatProcessTests(unittest.TestCase):
     def setUp(self):
+        PftQtCore.now = 100.0
+        self.clock_patch = patch.object(transport_module, "time", types.SimpleNamespace(monotonic=lambda: PftQtCore.now), create=True)
+        self.clock_patch.start(); self.addCleanup(self.clock_patch.stop)
         self.core, self.parent = PftQtCore(), object()
         self.transport = transport_module.PftChatProcess(self.core, self.parent)
         self.data, self.exits, self.errors = [], [], []
     def start(self):
         self.transport.start('/opt/example/codex', ['app-server', '--listen', 'stdio://'],
             {'CODEX_HOME': '/var/example/isolated', 'HOME': '/var/example/user',
-             'NODE_OPTIONS': '--injected', 'OPENAI_API_KEY': 'never-inherit', 'HTTP_PROXY': 'never-inherit'},
+             'NODE_OPTIONS': '--injected', 'OPENAI_API_KEY': 'never-inherit', 'HTTP_PROXY': 'http://127.0.0.1:18888'},
             '/var/example/clean', self.data.append, self.exits.append, self.errors.append)
         return self.core.processes[-1]
+
+    def test_session_flag_stays_true_until_owned_wrapper_is_released(self):
+        self.assertIs(self.transport.has_active_session, False)
+        process = self.start()
+        self.assertIs(self.transport.has_active_session, True)
+        self.transport.stop()
+        self.assertIs(self.transport.has_active_session, True)
+        process.finished.emit(0, 0)
+        self.assertIs(self.transport.has_active_session, False)
+
+    def test_new_start_releases_only_failed_not_running_owned_session(self):
+        old = self.start()
+        old.started.emit()
+        timer = self.core.timers[-1]
+        self.transport.arm_timeout(10)
+        queued_timeout = timer.timeout.callbacks[-1]
+        self.transport.stop()
+        self.assertEqual(old.killed, 1)
+        self.assertIsNotNone(self.transport._session)
+        old.state_value = self.core.QProcess.NotRunning
+        new = self.start()
+        self.assertEqual(old.delete_calls, 1)
+        self.assertIs(self.transport._session['process'], new)
+        self.assertEqual(new.killed, 0)
+        old.finished.emit(0, 0)
+        old.finished.emit(0, 0)
+        old.errorOccurred.emit(1)
+        queued_timeout()
+        timer.timeout.emit()
+        self.assertEqual(old.delete_calls, 1)
+        self.assertEqual(self.exits, [])
+        self.assertEqual(self.errors, [])
+        self.assertIs(self.transport._session['process'], new)
+
+    def test_scoped_qt_not_running_enum_releases_failed_owned_session_without_kill(self):
+        old = self.start()
+        self.transport._session["failed"] = True
+        old.state_value = self.core.QProcess.ProcessState.NotRunning
+        del self.core.QProcess.NotRunning
+        new = self.start()
+        self.assertEqual(old.killed, 0)
+        self.assertEqual(old.delete_calls, 1)
+        self.assertIs(self.transport._session["process"], new)
+        self.assertEqual(self.errors, [])
+        self.assertEqual(self.exits, [])
+
+    def test_busy_or_unknown_owned_process_is_never_released_or_killed_again(self):
+        for state in (self.core.QProcess.Starting, self.core.QProcess.Running, None, 'unknown'):
+            with self.subTest(state=state):
+                self.setUp()
+                old = self.start()
+                self.transport.stop()
+                old.state_value = state
+                with self.assertRaises(transport_module.PftChatProcessError) as failure:
+                    self.start()
+                self.assertEqual(failure.exception.code, 'CHAT_PROCESS_BUSY')
+                self.assertEqual(old.killed, 1)
+                self.assertEqual(old.delete_calls, 0)
+                self.assertEqual(len(self.core.processes), 1)
+        self.setUp()
+        old = self.start()
+        old.state_value = self.core.QProcess.NotRunning
+        with self.assertRaises(transport_module.PftChatProcessError): self.start()
+        self.assertEqual(old.killed, 0)
+        self.assertEqual(old.delete_calls, 0)
+        self.transport.stop()
+        def unknown_state(): raise RuntimeError('Neutral unavailable process state')
+        old.state = unknown_state
+        with self.assertRaises(transport_module.PftChatProcessError): self.start()
+        self.assertEqual(old.killed, 1)
+        self.assertEqual(old.delete_calls, 0)
+
+    def test_disconnected_controller_can_explicitly_connect_after_stopped_session(self):
+        controller_spec = importlib.util.spec_from_file_location('neutral_process_controller', ADDON / 'pft_chat_controller.py')
+        controller_module = importlib.util.module_from_spec(controller_spec)
+        controller_spec.loader.exec_module(controller_module)
+        events = []
+        controller = controller_module.PftChatController(self.transport, events.append, lambda _url: True, network_environment=lambda: {})
+        values = ('/opt/neutral/codex', '/var/neutral/chat-home', '/var/neutral/chat-work')
+        controller.connect(*values)
+        old = self.core.processes[-1]
+        controller.disconnect()
+        old.state_value = self.core.QProcess.NotRunning
+        controller.connect(*values)
+        self.assertEqual(controller.snapshot['phase'], 'connecting')
+        self.assertIsNone(controller.snapshot['error'])
+        self.assertEqual(len(self.core.processes), 2)
+        self.assertEqual(old.killed, 1)
+        self.assertEqual(old.delete_calls, 1)
+        self.assertEqual(self.core.processes[-1].killed, 0)
+        self.assertNotIn('account/login/start', repr(self.core.processes[-1].writes))
 
     def test_start_uses_exact_program_args_clean_cwd_and_filtered_environment(self):
         process = self.start()
@@ -114,7 +222,8 @@ class PftChatProcessTests(unittest.TestCase):
         self.assertEqual(process.environment['OTEL_SDK_DISABLED'], 'true')
         self.assertIs(process.parent, self.core.application)
         self.assertIsNot(process.parent, self.parent)
-        for key in ('NODE_OPTIONS', 'OPENAI_API_KEY', 'HTTP_PROXY'):
+        self.assertEqual(process.environment['HTTP_PROXY'], 'http://127.0.0.1:18888')
+        for key in ('NODE_OPTIONS', 'OPENAI_API_KEY'):
             self.assertNotIn(key, process.environment)
         self.assertEqual(self.data + self.errors + self.exits, [])
 
@@ -228,7 +337,7 @@ class PftChatProcessTests(unittest.TestCase):
         old = self.start()
         self.transport.arm_timeout(30000)
         self.assertTrue(self.core.timers[-1].single_shot)
-        self.core.timers[-1].timeout.emit()
+        self.core.timers[-1].expire()
         self.assertEqual(self.errors[-1].code, 'CHAT_TIMEOUT')
         self.assertEqual(old.killed, 1)
         old.finished.emit(1, 0)
@@ -279,7 +388,8 @@ class PftChatProcessTests(unittest.TestCase):
         self.transport.arm_timeout(30, lambda: expired.append('current'))
         superseded()
         self.assertTrue(timer.active)
-        self.assertEqual(timer.delay, 30)
+        self.assertGreaterEqual(timer.delay, 30)
+        self.assertLessEqual(timer.delay, 31)
         self.assertEqual(expired, [])
         timer.expire()
         self.assertEqual(expired, ['current'])
@@ -298,7 +408,8 @@ class PftChatProcessTests(unittest.TestCase):
         timer.expire()
         queued()
         self.assertTrue(timer.active)
-        self.assertEqual(timer.delay, 50)
+        self.assertGreaterEqual(timer.delay, 50)
+        self.assertLessEqual(timer.delay, 51)
         self.assertEqual(process.writes, [b'{"id":3,"method":"thread/start"}\n'])
         self.assertEqual(self.errors, [])
         timer.expire()
@@ -389,6 +500,7 @@ class PftChatProcessTests(unittest.TestCase):
 
     def test_failed_to_start_and_partial_final_line_report_once(self):
         process = self.start()
+        process.state_value = self.core.QProcess.NotRunning
         process.errorOccurred.emit(self.core.QProcess.FailedToStart)
         process.finished.emit(1, 0)
         self.assertEqual(len(self.errors), 1)
@@ -532,6 +644,376 @@ class PftChatProcessTests(unittest.TestCase):
         self.assertEqual(new.killed, 0)
         self.assertFalse(new.deleted)
         self.assertEqual(self.errors, [])
+
+
+    def test_timeout_slot_is_connected_once_and_clear_rearm_never_disconnects_it(self):
+        self.start()
+        timer = self.core.timers[-1]
+        self.assertEqual(timer.timeout.connect_calls, 1)
+        handler = self.transport._session['timeout_handler']
+        for delay in (10, 20, 30, 40):
+            self.transport.arm_timeout(delay)
+            self.assertIs(self.transport._session['timeout_handler'], handler)
+            self.transport.clear_timeout()
+            self.assertIs(self.transport._session['timeout_handler'], handler)
+        self.assertEqual(timer.timeout.connect_calls, 1)
+        self.assertEqual(timer.timeout.disconnect_calls, 0)
+        self.assertEqual(len(timer.timeout.callbacks), 1)
+
+    def test_early_or_queued_old_signal_uses_current_absolute_deadline_without_renewal(self):
+        process = self.start()
+        self.transport.arm_timeout(10)
+        old_delivery = self.transport._session['timeout_handler']
+        PftQtCore.now = 100.005
+        self.transport.arm_timeout(100)
+        deadline = self.transport._session['timeout_deadline']
+        PftQtCore.now = 100.020  # The old deadline passed; the new one has not.
+        old_delivery()
+        self.assertEqual(self.transport._session['timeout_deadline'], deadline)
+        self.assertEqual(self.errors, [])
+        self.assertEqual(process.killed, 0)
+        self.assertTrue(self.core.timers[-1].active)
+        PftQtCore.now = deadline + 0.001
+        old_delivery()
+        old_delivery()
+        self.assertEqual([error.code for error in self.errors], ['CHAT_TIMEOUT'])
+        self.assertEqual(process.killed, 1)
+
+    def test_cleared_stable_slot_ignores_late_signal_even_after_old_deadline(self):
+        process = self.start()
+        self.transport.arm_timeout(10)
+        handler = self.transport._session['timeout_handler']
+        self.transport.clear_timeout()
+        PftQtCore.now = 200.0
+        handler()
+        self.assertIsNone(self.transport._session['timeout_deadline'])
+        self.assertEqual(self.errors, [])
+        self.assertEqual(process.killed, 0)
+        self.assertFalse(self.core.timers[-1].active)
+
+    def test_timeout_connection_failure_is_fatal_before_starting_the_owned_stub(self):
+        with patch.object(PftSignal, 'connect', return_value=False):
+            process = self.start()
+        self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_FAILED'])
+        self.assertEqual(process.killed, 0)
+        self.assertIsNone(self.transport._session)
+        self.assertFalse(hasattr(process, 'program'))
+
+    def test_standard_proxy_environment_is_explicit_and_never_admits_other_tokens(self):
+        keys = ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
+        environment = {key: 'http://127.0.0.1:18888' for key in keys}
+        environment.update(NODE_OPTIONS='--synthetic-injection', OPENAI_API_KEY='not-a-real-key',
+                           ANTHROPIC_API_KEY='not-a-real-key', SSH_AUTH_SOCK='/synthetic/agent')
+        self.transport.start('/opt/example/codex', [], environment, '/var/example/clean',
+                             self.data.append, self.exits.append, self.errors.append)
+        process = self.core.processes[-1]
+        for key in keys: self.assertEqual(process.environment[key], environment[key])
+        for key in ('NODE_OPTIONS', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'SSH_AUTH_SOCK'):
+            self.assertNotIn(key, process.environment)
+
+
+class PftFakeProcessLease:
+    """A retained ownership gate, with no filesystem or native process access."""
+    def __init__(self):
+        self.started_pids, self.releases = [], []
+        self.released = False
+        self.mark_error = self.release_error = None
+
+    def mark_started(self, pid):
+        self.started_pids.append(pid)
+        if self.mark_error:
+            raise self.mark_error
+
+    def _release(self, kind):
+        self.releases.append(kind)
+        if self.release_error:
+            raise self.release_error
+        self.released = True
+
+    def release_after_exit(self): self._release('exit')
+    def release_failed_to_start(self): self._release('never_started')
+
+
+class PftFakeProcessLeaseFactory:
+    def __init__(self):
+        self.calls, self.leases = [], []
+        self.next_mark_error = self.next_release_error = None
+
+    def __call__(self, home, cwd, program):
+        self.calls.append((home, cwd, program))
+        if any(not lease.released for lease in self.leases):
+            raise transport_module.PftChatProcessError('CHAT_PROCESS_LEASE_BUSY', 'Synthetic owned lease remains held.')
+        lease = PftFakeProcessLease()
+        lease.mark_error, lease.release_error = self.next_mark_error, self.next_release_error
+        self.leases.append(lease)
+        return lease
+
+
+class PftChatProcessLeaseIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.core, self.parent = PftQtCore(), object()
+        self.factory = PftFakeProcessLeaseFactory()
+        self.transport = transport_module.PftChatProcess(self.core, self.parent, self.factory)
+        self.data, self.exits, self.errors = [], [], []
+
+    def start(self, on_data=None, on_exit=None, on_error=None):
+        self.transport.start('/opt/example/codex', ['app-server', '--listen', 'stdio://'],
+            {'CODEX_HOME': '/var/example/isolated'}, '/var/example/clean',
+            self.data.append if on_data is None else on_data,
+            self.exits.append if on_exit is None else on_exit,
+            self.errors.append if on_error is None else on_error)
+        return self.core.processes[-1]
+
+    def test_qt_construction_failure_releases_never_started_and_redacts_exception(self):
+        with patch.object(self.core, 'QProcess', side_effect=RuntimeError('synthetic-private-constructor')):
+            with self.assertRaises(transport_module.PftChatProcessError) as caught:
+                self.start()
+        self.assertEqual(caught.exception.code, 'CHAT_PROCESS_FAILED')
+        self.assertNotIn('synthetic-private', caught.exception.message)
+        self.assertEqual(self.factory.leases[0].releases, ['never_started'])
+        self.assertIsNone(self.transport._session)
+
+    def test_qt_construction_cleanup_failure_retains_gate_and_redacts_exception(self):
+        self.factory.next_release_error = RuntimeError('synthetic-private-cleanup')
+        with patch.object(self.core, 'QProcess', side_effect=RuntimeError('synthetic-private-constructor')):
+            with self.assertRaises(transport_module.PftChatProcessError) as caught:
+                self.start()
+        self.assertEqual(caught.exception.code, 'CHAT_PROCESS_LEASE_RELEASE_UNVERIFIED')
+        self.assertNotIn('synthetic-private', caught.exception.message)
+        self.assertFalse(self.factory.leases[0].released)
+        with self.assertRaises(transport_module.PftChatProcessError):
+            self.start()
+        self.assertEqual(self.core.processes, [])
+
+    def test_acquire_uses_exact_three_paths_and_collision_never_creates_another_child(self):
+        process = self.start()
+        self.assertEqual(self.factory.calls, [('/var/example/isolated', '/var/example/clean', '/opt/example/codex')])
+        self.assertEqual(self.factory.leases[0].releases, [])
+        other = transport_module.PftChatProcess(self.core, self.parent, self.factory)
+        with self.assertRaises(transport_module.PftChatProcessError) as caught:
+            other.start('/opt/example/codex', [], {'CODEX_HOME': '/var/example/isolated'},
+                        '/var/example/clean', self.data.append, self.exits.append, self.errors.append)
+        self.assertEqual(caught.exception.code, 'CHAT_PROCESS_LEASE_BUSY')
+        self.assertEqual(len(self.core.processes), 1)
+        self.assertEqual(process.killed, 0)
+
+    def test_immediate_stop_then_late_started_records_pid_without_flushing_and_kills_running_child_once(self):
+        process = self.start()
+        lease = self.factory.leases[0]
+        self.transport.write(b'{"id":1,"method":"initialize"}\n')
+        self.transport.stop()
+        self.assertEqual(process.killed, 1)
+        self.assertEqual(lease.releases, [])
+        process.state_value = self.core.QProcess.Running
+        process.started.emit()
+        self.assertEqual(lease.started_pids, [process.pid])
+        self.assertEqual(process.writes, [])
+        self.assertEqual(process.killed, 2)
+        process.started.emit()
+        self.transport.stop()
+        self.assertEqual(lease.started_pids, [process.pid])
+        self.assertEqual(process.killed, 2)
+        self.assertEqual(lease.releases, [])
+        process.finished.emit(0, 0)
+        process.finished.emit(0, 0)
+        self.assertEqual(lease.releases, ['exit'])
+        self.assertEqual(self.data + self.exits + self.errors, [])
+
+    def test_mark_started_failure_keeps_lease_until_real_exit_and_never_flushes(self):
+        self.factory.next_mark_error = RuntimeError('synthetic-private-start-record')
+        process = self.start()
+        lease = self.factory.leases[0]
+        self.transport.write(b'{"id":1}\n')
+        process.started.emit()
+        self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_LEASE_UPDATE_UNVERIFIED'])
+        self.assertNotIn('synthetic-private', self.errors[0].message)
+        self.assertEqual(lease.releases, [])
+        self.assertEqual(process.writes, [])
+        self.assertEqual(process.killed, 1)
+        with self.assertRaises(transport_module.PftChatProcessError): self.start()
+        process.finished.emit(1, 0)
+        self.assertEqual(lease.releases, ['exit'])
+        self.assertEqual(self.exits, [])
+
+    def test_native_failed_to_start_releases_only_when_not_running_and_no_started_was_observed(self):
+        for state in (PftQtCore().QProcess.NotRunning, PftQtCore().QProcess.Starting, None):
+            with self.subTest(state=state):
+                self.setUp()
+                process = self.start()
+                lease = self.factory.leases[0]
+                process.state_value = state
+                process.errorOccurred.emit(self.core.QProcess.FailedToStart)
+                expected = ['never_started'] if state == self.core.QProcess.NotRunning else []
+                self.assertEqual(lease.releases, expected)
+                self.assertEqual(len(self.errors), 1)
+                process.finished.emit(1, 0)
+                self.assertEqual(lease.releases, expected or ['exit'])
+                process.errorOccurred.emit(self.core.QProcess.FailedToStart)
+                self.assertEqual(len(lease.releases), 1)
+
+    def test_observed_started_then_failed_to_start_does_not_claim_never_started(self):
+        process = self.start()
+        lease = self.factory.leases[0]
+        process.started.emit()
+        process.state_value = self.core.QProcess.NotRunning
+        process.errorOccurred.emit(self.core.QProcess.FailedToStart)
+        self.assertEqual(lease.releases, [])
+        process.finished.emit(1, 0)
+        self.assertEqual(lease.releases, ['exit'])
+
+    def test_exception_after_invoking_start_never_manufactures_failed_to_start_evidence(self):
+        for observed_started in (False, True):
+            with self.subTest(observed_started=observed_started):
+                self.setUp()
+                def raise_after_invocation(process, program, args):
+                    process.program, process.args = program, args
+                    process.state_value = self.core.QProcess.Running
+                    if observed_started:
+                        process.started.emit()
+                    raise RuntimeError('synthetic-private-start-exception')
+                with patch.object(self.core.QProcess, 'start', raise_after_invocation):
+                    process = self.start()
+                lease = self.factory.leases[0]
+                self.assertEqual(lease.releases, [])
+                self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_FAILED'])
+                self.assertNotIn('synthetic-private', self.errors[0].message)
+                self.assertEqual(process.killed, 1)
+                self.assertIsNotNone(self.transport._session)
+                process.finished.emit(1, 0)
+                self.assertEqual(lease.releases, ['exit'])
+                self.assertEqual(self.exits, [])
+
+    def test_prestart_configuration_failure_releases_never_started_once_without_kill(self):
+        with patch.object(PftSignal, 'connect', return_value=False):
+            process = self.start()
+        lease = self.factory.leases[0]
+        self.assertEqual(lease.releases, ['never_started'])
+        self.assertEqual(process.killed, 0)
+        self.assertFalse(hasattr(process, 'program'))
+        self.assertIsNone(self.transport._session)
+        self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_FAILED'])
+
+    def test_qobject_disappearance_cleans_wrapper_but_keeps_lease_as_a_gate(self):
+        process = self.start()
+        lease = self.factory.leases[0]
+        process.started.emit()
+        process.cpp_deleted = True
+        process.destroyed.emit()
+        self.assertIsNone(self.transport._session)
+        self.assertEqual(lease.releases, [])
+        self.assertEqual(len(self.errors), 1)
+        with self.assertRaises(transport_module.PftChatProcessError) as caught: self.start()
+        self.assertEqual(caught.exception.code, 'CHAT_PROCESS_LEASE_BUSY')
+        self.assertEqual(len(self.core.processes), 1)
+        self.assertEqual(lease.releases, [])
+
+    def test_confirmed_not_running_releases_old_lease_before_new_start_and_late_callbacks_are_inert(self):
+        old = self.start()
+        old_lease = self.factory.leases[0]
+        old.started.emit()
+        timer = self.core.timers[-1]
+        self.transport.stop()
+        old.state_value = self.core.QProcess.NotRunning
+        new = self.start()
+        new_lease = self.factory.leases[1]
+        self.assertEqual(old_lease.releases, ['exit'])
+        self.assertEqual(new_lease.releases, [])
+        old.finished.emit(0, 0)
+        old.errorOccurred.emit(self.core.QProcess.FailedToStart)
+        old.started.emit()
+        old.destroyed.emit()
+        timer.timeout.emit()
+        self.assertEqual(old_lease.releases, ['exit'])
+        self.assertEqual(new_lease.started_pids, [])
+        self.assertEqual(new_lease.releases, [])
+        self.assertEqual(new.killed, 0)
+        self.assertIs(self.transport._session['process'], new)
+
+    def test_lease_release_failure_is_sanitized_once_and_retained_gate_blocks_reconnect(self):
+        self.factory.next_release_error = RuntimeError('synthetic-private-release-error')
+        process = self.start()
+        lease = self.factory.leases[0]
+        process.started.emit()
+        process.finished.emit(0, 0)
+        process.finished.emit(0, 0)
+        self.assertEqual(lease.releases, ['exit'])
+        self.assertFalse(lease.released)
+        self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_LEASE_RELEASE_UNVERIFIED'])
+        self.assertNotIn('synthetic-private', self.errors[0].message)
+        self.assertEqual(self.exits, [])
+        self.assertIsNone(self.transport._session)
+        with self.assertRaises(transport_module.PftChatProcessError) as caught: self.start()
+        self.assertEqual(caught.exception.code, 'CHAT_PROCESS_LEASE_BUSY')
+        self.assertEqual(len(self.core.processes), 1)
+
+    def test_error_callback_reconnects_only_after_confirmed_old_exit_and_old_finally_cannot_kill_new_child(self):
+        def on_error(error):
+            self.errors.append(error)
+            self.start()
+        old = self.start(on_error=on_error)
+        old_lease = self.factory.leases[0]
+        old.started.emit()
+        old.state_value = self.core.QProcess.NotRunning
+        old.output(b'not-json\n')
+        new = self.core.processes[-1]
+        self.assertIsNot(new, old)
+        self.assertEqual(old_lease.releases, ['exit'])
+        self.assertEqual(len(self.errors), 1)
+        self.assertEqual(new.killed, 0)
+        self.assertEqual(self.factory.leases[1].releases, [])
+        old.finished.emit(1, 0)
+        self.assertEqual(self.factory.leases[1].releases, [])
+
+    def test_exit_callback_can_start_new_connection_without_old_duplicate_exit_touching_lease(self):
+        def on_exit(code):
+            self.exits.append(code)
+            self.start()
+        old = self.start(on_exit=on_exit)
+        old_lease = self.factory.leases[0]
+        old.started.emit()
+        old.finished.emit(0, 0)
+        new = self.core.processes[-1]
+        self.assertIsNot(new, old)
+        self.assertEqual(old_lease.releases, ['exit'])
+        self.assertEqual(self.exits, [0])
+        old.finished.emit(0, 0)
+        old.destroyed.emit()
+        self.assertEqual(self.exits, [0])
+        self.assertEqual(self.factory.leases[1].releases, [])
+        self.assertEqual(new.killed, 0)
+
+    def test_real_exit_evidence_survives_trailing_stdout_callback_stop_and_qobject_deletion(self):
+        process = None
+        def on_data(value):
+            self.data.append(value)
+            self.transport.stop()
+            process.cpp_deleted = True
+            process.destroyed.emit()
+        process = self.start(on_data=on_data)
+        lease = self.factory.leases[0]
+        process.started.emit()
+        process.stdout.extend(b'{"id":1,"result":{}}\n')
+        process.finished.emit(0, 0)
+        self.assertEqual(self.data, [{'id': 1, 'result': {}}])
+        self.assertEqual(lease.releases, ['exit'])
+        self.assertIsNone(self.transport._session)
+        self.assertEqual(process.killed, 0)
+        self.assertEqual(self.exits, [])
+
+    def test_duplicate_started_same_pid_is_idempotent_but_changed_pid_fails_without_releasing(self):
+        process = self.start()
+        lease = self.factory.leases[0]
+        process.started.emit()
+        process.started.emit()
+        self.assertEqual(lease.started_pids, [process.pid])
+        process.pid += 1
+        process.started.emit()
+        self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_LEASE_UPDATE_UNVERIFIED'])
+        self.assertEqual(lease.releases, [])
+        self.assertEqual(process.killed, 1)
+        process.finished.emit(1, 0)
+        self.assertEqual(lease.releases, ['exit'])
 
 
 if __name__ == '__main__': unittest.main()

@@ -40,7 +40,7 @@ FreeCAD 1.1把原生处理计数包装为Python int。0不能直接解释为失�
 
 工具必须读取并验证两种原生表示，拒绝ReadOnly、Immutable、LockDynamic或静态只读24。隐藏本身不等于只读；合法动态属性和其它已知原生位保留。缺API、异常、未知或畸形标志均停止。原生Python setter主要拒绝Immutable，不能靠setter成功来证明可写。[状态/编辑模式](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/App/PropertyContainerPyImp.cpp#L207-L377)、[setter](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/App/PropertyContainerPyImp.cpp#L680-L698)
 
-预览后再次核对可写性及明确空闲/撤销状态，才进入自有事务。无法确认时不写、不关闭外来事务，也不更改重复Label等偏好。[事务API](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/App/ApplicationPy.cpp#L1126-L1145)、[文档事务](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/App/DocumentPyImp.cpp#L591-L594)、[编辑态](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Gui/DocumentPyImp.cpp#L160-L172)
+预览后再次核对可写性及明确空闲/撤销状态，才进入自有事务。共享业务事务直接绑定`App.setActiveTransaction`返回的原生ID，提交/回滚始终传入该ID调用`App.closeActiveTransaction`；不从无返回值的文档开启接口之后认领当前事务。读取待提交状态后再次核ID，关闭不确定或反验期间出现外来事务时停止，不回退或重复关闭。无法确认时不写、不关闭外来事务，也不更改重复Label等偏好。[事务API](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/App/ApplicationPy.cpp#L1126-L1145)、[文档事务](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/App/DocumentPyImp.cpp#L591-L594)、[编辑态](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Gui/DocumentPyImp.cpp#L160-L172)
 
 ## 验收边界
 

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import types
 import unittest
+from test_pft_workbench_tools import bind_transaction_api
 from unittest.mock import patch
 
 ADDON = Path(__file__).resolve().parents[2] / "addon" / "PhoenixFreeCADTools"
@@ -56,13 +57,16 @@ class Document:
         self.events.append("open")
         self.next_transaction_id += 1
         self.active_transaction = (title, self.next_transaction_id)
+        self.HasPendingTransaction = True
         self.before = [(obj, {key: value.copy() if isinstance(value, (dict, list)) else value for key, value in obj.__dict__.items()}) for obj in self.Objects]
     def commitTransaction(self):
         self.events.append("commit")
         self.active_transaction = None
+        self.HasPendingTransaction = False
     def abortTransaction(self):
         self.events.append("abort")
         self.active_transaction = None
+        self.HasPendingTransaction = False
         self.restore()
     def restore(self):
         self.Objects = [obj for obj, _ in self.before]
@@ -90,6 +94,7 @@ class BusinessTests(unittest.TestCase):
         self.prefs = Preferences()
         self.app = types.SimpleNamespace(ActiveDocument=self.doc, getDocument=self.documents.get,
             listDocuments=lambda: self.documents, getActiveTransaction=lambda: self.doc.active_transaction, ParamGet=lambda path: self.prefs)
+        bind_transaction_api(self.app, self.doc)
         def selection_forbidden(*args): raise AssertionError("selection must not be inspected or changed")
         self.gui = types.SimpleNamespace(getDocument=lambda name: types.SimpleNamespace(getInEdit=lambda: None),
             Selection=types.SimpleNamespace(getSelection=selection_forbidden, getSelectionEx=selection_forbidden,

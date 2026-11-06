@@ -103,15 +103,15 @@ class Document:
         for name, before in state.items(): self.objects[name].ViewObject.restore(before)
     def openTransaction(self, title):
         self.opened += 1
-        self.current, self.app.transaction = self.snapshot(), True
+        self.current, self.app.transaction = self.snapshot(), (title, self.opened)
     def commitTransaction(self):
         self.commits += 1
         self.undo_stack.append((self.current, self.snapshot()))
-        self.current, self.app.transaction = None, False
+        self.current, self.app.transaction = None, None
     def abortTransaction(self):
         self.aborts += 1
         self.restore(self.current)
-        self.current, self.app.transaction = None, False
+        self.current, self.app.transaction = None, None
     def undo(self):
         before, after = self.undo_stack.pop()
         self.restore(before)
@@ -134,9 +134,22 @@ class VisualToolsTests(unittest.TestCase):
     def setUp(self):
         visual._plans.clear()
         self.doc = Document()
-        self.app = types.SimpleNamespace(Material=Material, ActiveDocument=self.doc, transaction=False)
+        self.app = types.SimpleNamespace(Material=Material, ActiveDocument=self.doc, transaction=None)
         self.app.getDocument = lambda name: self.doc if name == self.doc.Name else None
         self.app.getActiveTransaction = lambda: self.app.transaction
+        def set_active_transaction(title):
+            # The application API returns its allocated ID; Document.openTransaction
+            # remains void, matching the fixed native Python wrappers.
+            self.doc.opened += 1
+            self.doc.current = self.doc.snapshot()
+            self.app.transaction = (title, self.doc.opened)
+            return self.doc.opened
+        self.app.setActiveTransaction = set_active_transaction
+        self.closure_calls = []
+        def close_active_transaction(abort=False, transaction_id=0):
+            self.closure_calls.append((abort, transaction_id))
+            return self.doc.abortTransaction() if abort else self.doc.commitTransaction()
+        self.app.closeActiveTransaction = close_active_transaction
         self.doc.app = self.app
         self.editing, self.commands = None, []
         self.gui_doc = types.SimpleNamespace(getInEdit=lambda: self.editing,
@@ -362,6 +375,250 @@ class VisualToolsTests(unittest.TestCase):
             self.assert_error("VISUAL_APPLY_FAILED", lambda: self.apply(plan))
         self.assertEqual(plain_snapshot(self.doc), before)
         self.assertEqual(self.doc.aborts, 1)
+
+    def test_foreign_transaction_after_shape_setter_never_commits_aborts_or_writes_next_target(self):
+        first = self.doc.add("First")
+        second = self.doc.add("Second")
+        plan = self.prepare(["First", "Second"], "half_transparent")
+        foreign = ("Synthetic unrelated edit", 900)
+        first.ViewObject.pollute = lambda: setattr(self.app, "transaction", foreign)
+        self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: self.apply(plan))
+        self.assertEqual(self.app.transaction, foreign)
+        self.assertEqual((first.ViewObject.assignments, second.ViewObject.assignments), (1, 0))
+        self.assertEqual((self.doc.commits, self.doc.aborts), (0, 0))
+        self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan))
+        self.assertEqual(self.app.transaction, foreign)
+
+    def test_link_checks_ownership_between_each_instance_material_setter(self):
+        for changed_property in ("ShapeMaterial", "OverrideMaterial"):
+            with self.subTest(property=changed_property):
+                self.setUp()
+                source = self.doc.add("Source")
+                link = self.doc.add("Instance", source=source)
+                source_before = plain_snapshot(self.doc)["Source"]
+                plan = self.prepare(["Instance"], "half_transparent")
+                assignments = []
+                original_setattr = View.__setattr__
+                foreign = ("Synthetic unrelated edit", 901)
+                def reentrant_setattr(view, name, value):
+                    original_setattr(view, name, value)
+                    if view is link.ViewObject and name in ("ShapeMaterial", "OverrideMaterial"):
+                        assignments.append(name)
+                        if name == changed_property:
+                            self.app.transaction = foreign
+                with patch.object(View, "__setattr__", reentrant_setattr):
+                    self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: self.apply(plan))
+                self.assertEqual(assignments, ["ShapeMaterial"] if changed_property == "ShapeMaterial"
+                                 else ["ShapeMaterial", "OverrideMaterial"])
+                self.assertEqual(plain_snapshot(self.doc)["Source"], source_before)
+                self.assertEqual(self.app.transaction, foreign)
+                self.assertEqual((self.doc.commits, self.doc.aborts), (0, 0))
+
+    def test_material_constructor_reentrancy_is_checked_before_any_setter(self):
+        obj = self.doc.add("Part")
+        plan = self.prepare(["Part"], "half_transparent")
+        foreign = ("Synthetic unrelated edit", 902)
+        def changed_owner(**values):
+            self.app.transaction = foreign
+            return Material(**values)
+        with patch.object(self.app, "Material", side_effect=changed_owner):
+            self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: self.apply(plan))
+        self.assertEqual(obj.ViewObject.assignments, 0)
+        self.assertEqual(self.app.transaction, foreign)
+        self.assertEqual((self.doc.commits, self.doc.aborts), (0, 0))
+
+    def test_invalid_numeric_transaction_identity_after_open_never_authorizes_a_write_or_close(self):
+        for active in (None, False, True, ("Synthetic edit", True), ("Synthetic edit", 0),
+                       ("Synthetic edit", "1"), ("Synthetic edit", 1, "extra")):
+            with self.subTest(value_type=type(active).__name__):
+                self.setUp()
+                obj = self.doc.add("Part")
+                plan = self.prepare(["Part"], "half_transparent")
+                original_open = self.app.setActiveTransaction
+                def unknown_owner(title):
+                    owned = original_open(title)
+                    self.app.transaction = active
+                    return owned
+                self.app.setActiveTransaction = unknown_owner
+                self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: self.apply(plan))
+                self.assertEqual(obj.ViewObject.assignments, 0)
+                self.assertEqual((self.doc.commits, self.doc.aborts), (0, 0))
+                self.assertEqual(self.app.transaction, active)
+
+    def test_commit_return_requires_closed_native_transaction_and_never_retries_closure(self):
+        for replacement in ("same", "foreign"):
+            with self.subTest(replacement=replacement):
+                self.setUp()
+                self.doc.add("Part")
+                plan = self.prepare(["Part"], "half_transparent")
+                original_commit = self.doc.commitTransaction
+                def uncertain_commit():
+                    owned = self.app.transaction
+                    original_commit()
+                    self.app.transaction = owned if replacement == "same" else ("Synthetic unrelated edit", 903)
+                self.doc.commitTransaction = uncertain_commit
+                code = "VISUAL_COMMIT_UNVERIFIED" if replacement == "same" else "VISUAL_TRANSACTION_CHANGED"
+                self.assert_error(code, lambda: self.apply(plan))
+                self.assertEqual((self.doc.commits, self.doc.aborts), (1, 0))
+                self.assertIsNotNone(self.app.transaction)
+                self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan))
+                self.assertEqual((self.doc.commits, self.doc.aborts), (1, 0))
+
+    def test_commit_exception_before_or_after_native_close_does_not_abort_again(self):
+        for timing in ("before_close", "after_close"):
+            with self.subTest(timing=timing):
+                self.setUp()
+                self.doc.add("Part")
+                plan = self.prepare(["Part"], "half_transparent")
+                original_commit = self.doc.commitTransaction
+                def failed_commit():
+                    if timing == "after_close":
+                        original_commit()
+                    else:
+                        self.doc.commits += 1
+                    raise RuntimeError("synthetic unreported native detail")
+                self.doc.commitTransaction = failed_commit
+                error = self.assert_error("VISUAL_COMMIT_UNVERIFIED", lambda: self.apply(plan))
+                self.assertNotIn("synthetic", error.message)
+                self.assertEqual((self.doc.commits, self.doc.aborts), (1, 0))
+                self.assertIsNone(self.app.transaction) if timing == "after_close" else self.assertIsNotNone(self.app.transaction)
+
+    def test_commit_callback_material_pollution_is_reported_after_closure_without_rollback(self):
+        obj = self.doc.add("Part")
+        plan = self.prepare(["Part"], "half_transparent")
+        original_commit = self.doc.commitTransaction
+        def changed_after_commit():
+            original_commit()
+            obj.ViewObject._appearance[0].Shininess = 99
+        self.doc.commitTransaction = changed_after_commit
+        self.assert_error("VISUAL_COMMIT_UNVERIFIED", lambda: self.apply(plan))
+        self.assertEqual((self.doc.commits, self.doc.aborts), (1, 0))
+        self.assertIsNone(self.app.transaction)
+        self.assertEqual(obj.ViewObject.ShapeAppearance[0].Shininess, 99)
+
+    def test_rollback_requires_closed_native_transaction_and_preserves_new_foreign_id(self):
+        for replacement in ("same", "foreign"):
+            with self.subTest(replacement=replacement):
+                self.setUp()
+                obj = self.doc.add("Part")
+                before = plain_snapshot(self.doc)
+                plan = self.prepare(["Part"], "half_transparent")
+                obj.ViewObject.fail_next = True
+                original_abort = self.doc.abortTransaction
+                def uncertain_abort():
+                    owned = self.app.transaction
+                    original_abort()
+                    self.app.transaction = owned if replacement == "same" else ("Synthetic unrelated edit", 904)
+                self.doc.abortTransaction = uncertain_abort
+                code = "VISUAL_ROLLBACK_UNVERIFIED" if replacement == "same" else "VISUAL_TRANSACTION_CHANGED"
+                self.assert_error(code, lambda: self.apply(plan))
+                self.assertEqual(plain_snapshot(self.doc), before)
+                self.assertEqual((self.doc.commits, self.doc.aborts), (0, 1))
+                self.assertIsNotNone(self.app.transaction)
+                self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan))
+                self.assertEqual((self.doc.commits, self.doc.aborts), (0, 1))
+
+    def test_open_exception_never_claims_rollback_or_closes_an_unknown_transaction(self):
+        obj = self.doc.add("Part")
+        plan = self.prepare(["Part"], "half_transparent")
+        def failed_open(_title):
+            self.app.transaction = ("Synthetic unknown open", 905)
+            raise RuntimeError("synthetic unreported open detail")
+        self.app.setActiveTransaction = failed_open
+        self.assert_error("VISUAL_ROLLBACK_UNVERIFIED", lambda: self.apply(plan))
+        self.assertEqual(obj.ViewObject.assignments, 0)
+        self.assertEqual((self.doc.commits, self.doc.aborts), (0, 0))
+        self.assertEqual(self.app.transaction, ("Synthetic unknown open", 905))
+
+    def test_opening_callback_cannot_replace_returned_ownership_even_with_same_transaction_name(self):
+        for same_name in (False, True):
+            with self.subTest(same_name=same_name):
+                self.setUp()
+                obj = self.doc.add("Part")
+                plan = self.prepare(["Part"], "half_transparent")
+                original_open = self.app.setActiveTransaction
+                def replaced_before_return(title):
+                    owned_id = original_open(title)
+                    self.doc.commitTransaction()  # A controlled callback closes the old transaction.
+                    original_open(title if same_name else "Synthetic unrelated edit")
+                    return owned_id  # The official result identifies this acquisition, not current.
+                self.app.setActiveTransaction = replaced_before_return
+                self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: self.apply(plan))
+                self.assertEqual(self.app.transaction[1], 2)
+                self.assertEqual(obj.ViewObject.assignments, 0)
+                self.assertEqual((self.doc.commits, self.doc.aborts), (1, 0))
+                self.assertEqual(self.closure_calls, [])  # Only the fixture callback closed a transaction.
+
+    def test_invalid_application_transaction_return_is_not_replaced_with_the_current_id(self):
+        for returned in (None, False, True, 0, -1, "1", ("Synthetic edit", 1)):
+            with self.subTest(value_type=type(returned).__name__):
+                self.setUp()
+                obj = self.doc.add("Part")
+                plan = self.prepare(["Part"], "half_transparent")
+                original_open = self.app.setActiveTransaction
+                def invalid_result(title):
+                    original_open(title)
+                    return returned
+                self.app.setActiveTransaction = invalid_result
+                self.assert_error("VISUAL_TRANSACTION_CHANGED", lambda: self.apply(plan))
+                self.assertEqual(obj.ViewObject.assignments, 0)
+                self.assertEqual(self.app.transaction[1], 1)
+                self.assertEqual(self.closure_calls, [])
+
+    def test_missing_application_transaction_apis_fail_before_opening_or_writing(self):
+        for name in ("setActiveTransaction", "closeActiveTransaction"):
+            with self.subTest(name=name):
+                self.setUp()
+                obj = self.doc.add("Part")
+                plan = self.prepare(["Part"], "half_transparent")
+                setattr(self.app, name, None)
+                self.assert_error("DOCUMENT_STATE_UNKNOWN", lambda: self.apply(plan))
+                self.assertEqual((self.doc.opened, obj.ViewObject.assignments), (0, 0))
+                self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan))
+
+    def test_same_capability_is_consumed_before_reentrant_preflight_getter(self):
+        self.doc.add("Part")
+        plan = self.prepare(["Part"], "half_transparent")
+        original_get = self.app.getDocument
+        nested = []
+        def reentrant_get(name):
+            if not nested:
+                nested.append(self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan)).code)
+            return original_get(name)
+        self.app.getDocument = reentrant_get
+        self.apply(plan)
+        self.assertEqual(nested, ["VISUAL_PLAN_USED"])
+        self.assertEqual((self.doc.opened, self.doc.commits, self.doc.aborts), (1, 1, 0))
+        self.assertEqual(self.closure_calls, [(False, 1)])
+
+    def test_same_capability_is_consumed_during_postcommit_callback_including_a_noop(self):
+        for initial in (0.0, 0.5):
+            with self.subTest(noop=initial == 0.5):
+                self.setUp()
+                self.doc.add("Part", [Material(Transparency=initial)])
+                plan = self.prepare(["Part"], "half_transparent")
+                original_commit = self.doc.commitTransaction
+                nested = []
+                def reentrant_commit():
+                    original_commit()
+                    nested.append(self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan)).code)
+                self.doc.commitTransaction = reentrant_commit
+                result = self.apply(plan)
+                self.assertEqual(nested, ["VISUAL_PLAN_USED"])
+                self.assertEqual((self.doc.opened, self.doc.commits, self.doc.aborts), (1, 1, 0))
+                self.assertEqual(self.closure_calls, [(False, 1)])
+                self.assertEqual(result["changed_count"], 1 if initial == 0.0 else 0)
+                self.assertTrue(self.apply(plan)["replayed"])
+                self.assertEqual(len(self.closure_calls), 1)
+
+    def test_failed_native_preflight_consumes_plan_without_opening_a_transaction(self):
+        self.doc.add("Part")
+        plan = self.prepare(["Part"], "half_transparent")
+        self.app.ActiveDocument = None
+        self.assert_error("DOCUMENT_NOT_ACTIVE", lambda: self.apply(plan))
+        self.app.ActiveDocument = self.doc
+        self.assert_error("VISUAL_PLAN_USED", lambda: self.apply(plan))
+        self.assertEqual(self.doc.opened, 0)
 
     def test_abort_failure_is_reported_without_claiming_restoration(self):
         obj = self.doc.add("Part")

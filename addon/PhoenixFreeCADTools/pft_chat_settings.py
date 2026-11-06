@@ -14,6 +14,7 @@ _KEYS = {"enabled": ("Bool", "EnableFreeCADTools", False),
          "cli_entry": ("String", "MCPCLIEntry", "")}
 _CHAT_PREFERENCE_KEYS = {"model_id": ("String", "ModelId", ""),
                          "font_point_size": ("Int", "FontPointSize", 0)}
+_CHAT_HISTORY_KEYS = {"retain_history": ("Bool", "RetainChatHistory", False)}
 
 
 class PftChatSettingsError(ValueError):
@@ -126,11 +127,26 @@ def load_chat_preferences(app):
     return values
 
 
-def save_chat_preferences(app, model_id, font_point_size):
+def load_chat_history_preference(app):
+    """Opt-in for newly created chats only; never read a conversation store."""
+    try:
+        value = app.ParamGet(PREFERENCE_PATH).GetBool("RetainChatHistory", False)
+        return value if type(value) is bool else False
+    except Exception:
+        return False
+
+
+def save_chat_preferences(app, model_id, font_point_size, *, retain_history=None):
     """Persist validated choices through the native user-parameter save API."""
     values = {"model_id": _validate_model_id(model_id),
               "font_point_size": _validate_font_point_size(font_point_size)}
-    return _save_chat_values(app, _CHAT_PREFERENCE_KEYS, values)
+    keys = _CHAT_PREFERENCE_KEYS
+    if retain_history is not None:
+        if type(retain_history) is not bool:
+            raise PftChatSettingsError("保留聊天设置必须使用布尔值。")
+        values["retain_history"] = retain_history
+        keys = {**keys, **_CHAT_HISTORY_KEYS}
+    return _save_chat_values(app, keys, values)
 
 
 def load_chat_desk_configuration(app):

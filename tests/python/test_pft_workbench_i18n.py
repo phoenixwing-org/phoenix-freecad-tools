@@ -271,10 +271,10 @@ class InterfaceLanguageTests(unittest.TestCase):
                     self.assertIn(node.value, i18n.ENGLISH, (filename, node.lineno, node.value))
 
     def test_native_chat_and_document_tools_fixed_messages_have_real_translations(self):
-        filenames = ('pft_chat_views.py', 'pft_chat_settings.py', 'pft_chat_profile.py', 'pft_chat_controller.py', 'pft_chat_qprocess.py',
+        filenames = ('pft_chat_views.py', 'pft_chat_settings.py', 'pft_chat_profile.py', 'pft_chat_process_lease.py', 'pft_chat_session_store.py', 'pft_chat_history.py', 'pft_chat_controller.py', 'pft_chat_qprocess.py',
                      'pft_document_tools.py', 'pft_document_tools_views.py', 'pft_panel_host.py',
                      'pft_visual_tools.py', 'pft_appearance_views.py', 'pft_appearance_controls.py', 'pft_thumbnail.py',
-                     'pft_thumbnail_capture.py', 'pft_thumbnail_views.py')
+                     'pft_thumbnail_capture.py', 'pft_thumbnail_views.py', 'pft_mcp_settings_views.py')
         for filename in filenames:
             source = ADDON / filename
             if filename == 'pft_panel_host.py' and not source.exists():
@@ -439,6 +439,17 @@ class SettingsDialogTests(unittest.TestCase):
         self.assertEqual(self.widgets.messages[-1][1], 'Phoenix: MCP bridge status')
         self.assertIn('Running', self.widgets.messages[-1][2])
         self.assertIn('chat client connection separately', self.widgets.messages[-1][2])
+
+    def test_status_shows_only_valid_short_instance_and_service_identities(self):
+        snapshot={"running":True,"instance_routing":{"version":1,"instance_id":"a"*32,
+                  "service_id":"b"*32,"pid":1234,"guard_required":True}}
+        views.show_mcp_status_dialog(self.gui,snapshot)
+        message=self.widgets.messages[-1][2]
+        self.assertIn("aaaaaaaa · PID 1234",message)
+        self.assertIn("服务标识：bbbbbbbb",message)
+        self.assertNotIn("a"*32,message)
+        views.show_mcp_status_dialog(self.gui,{**snapshot,"instance_routing":{"version":1,"instance_id":"/private/fixture"}})
+        self.assertNotIn("/private/fixture",self.widgets.messages[-1][2])
 
     def test_stop_confirmation_defaults_cancel_and_warns_started_operations_continue(self):
         for language in ('zh', 'en'):

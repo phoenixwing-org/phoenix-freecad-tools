@@ -64,20 +64,49 @@ class Document:
         self.events.append("open")
         self.next_transaction_id += 1
         self.active_transaction = (title, self.next_transaction_id)
+        self.HasPendingTransaction = True
         self.before = [(obj, {key: value.copy() if isinstance(value, (dict, list)) else value
                              for key, value in obj.__dict__.items()}) for obj in self.Objects]
 
     def commitTransaction(self):
         self.events.append("commit")
         self.active_transaction = None
+        self.HasPendingTransaction = False
 
     def abortTransaction(self):
         self.events.append("abort")
         self.active_transaction = None
+        self.HasPendingTransaction = False
         self.Objects = [obj for obj, _ in self.before]
         for obj, before in self.before:
             obj.__dict__.clear()
             obj.__dict__.update(before)
+
+
+def bind_transaction_api(app, document, counter_name="next_transaction_id"):
+    """Expose native application allocation/ID-bound closure on neutral fakes.
+
+    Capture the allocated ID before a document-open callback can substitute a
+    foreign transaction. Dynamic document methods retain existing fault hooks.
+    """
+    def allocate(title):
+        allocated_id = getattr(document, counter_name) + 1
+        document.openTransaction(title)
+        return allocated_id
+
+    def close(abort, transaction_id):
+        current = document.active_transaction
+        if (type(abort) is not bool or type(transaction_id) is not int or
+                not isinstance(current, tuple) or current[1] != transaction_id):
+            raise AssertionError("fixture close requires its exact application ID")
+        if abort:
+            document.abortTransaction()
+        else:
+            document.commitTransaction()
+
+    app.setActiveTransaction = allocate
+    app.closeActiveTransaction = close
+    return app
 
 
 class WorkbenchToolsTests(unittest.TestCase):
@@ -90,6 +119,7 @@ class WorkbenchToolsTests(unittest.TestCase):
             getActiveTransaction=lambda: self.document.active_transaction,
             listDocuments=lambda: {self.document.Name: self.document},
         )
+        bind_transaction_api(self.app, self.document)
         self.gui = types.SimpleNamespace(
             getDocument=lambda name: types.SimpleNamespace(getInEdit=lambda: None),
             Selection=types.SimpleNamespace(

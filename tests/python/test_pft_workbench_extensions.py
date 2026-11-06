@@ -4,8 +4,9 @@ import sys
 from pathlib import Path
 import types
 import unittest
+from unittest.mock import patch
 
-from test_pft_workbench_tools import Object, Document
+from test_pft_workbench_tools import Object, Document, bind_transaction_api
 
 ADDON = Path(__file__).resolve().parents[2] / "addon" / "PhoenixFreeCADTools"
 sys.path.insert(0, str(ADDON))
@@ -42,6 +43,7 @@ class ExtensionTests(unittest.TestCase):
         self.prefs = Preferences()
         self.app = types.SimpleNamespace(ParamGet=lambda path: self.prefs, ActiveDocument=self.document, getActiveTransaction=lambda: self.document.active_transaction,
             listDocuments=lambda: {self.document.Name: self.document, self.source_doc.Name: self.source_doc})
+        bind_transaction_api(self.app, self.document)
         self.gui = types.SimpleNamespace(getDocument=lambda name: types.SimpleNamespace(getInEdit=lambda: None),
             Selection=types.SimpleNamespace(getSelection=lambda: [self.link], getSelectionEx=lambda: []))
 
@@ -340,6 +342,7 @@ class ExtensionTests(unittest.TestCase):
         link.native_check = True
         self.document = UndoDocument([link])
         self.app.ActiveDocument = self.document
+        bind_transaction_api(self.app, self.document)
         rows = model.build_link_label_preview(self.document, [link], self.app.listDocuments().values())
         count = controller.apply_link_labels(self.app, self.gui, self.document, [link], [model._snapshot(link)], rows)
         self.assertEqual(count, 1)
@@ -453,26 +456,38 @@ class ExtensionTests(unittest.TestCase):
         self.assertIs(self.prefs.GetBool("DuplicateLabels"), False)
 
     def test_failed_first_abort_ownership_read_is_not_retried_after_preference_restore(self):
-        reads = []
+        reads, abort_reads = [], []
+        in_abort = [False]
         original_read = self.app.getActiveTransaction
+        original_abort = controller._PftOwnedTransaction.abort_once
         before_preferences = dict(self.prefs.values)
+        def abort_phase(owner):
+            in_abort[0] = True
+            try:
+                return original_abort(owner)
+            finally:
+                in_abort[0] = False
         def reject_then_fail_first_abort_read():
             self.link.__dict__["Label"] = "Native rejected"
             def transient_read():
                 reads.append(self.prefs.GetBool("DuplicateLabels"))
-                # The first read checks ownership after the setter; the next
-                # is the first rollback attempt, before preference restoration.
-                if len(reads) == 2:
-                    raise RuntimeError("synthetic transient ownership read failure")
+                # Inject at the rollback phase rather than relying on how
+                # many ID reads an ownership/pending-state check performs.
+                if in_abort[0]:
+                    abort_reads.append(self.prefs.GetBool("DuplicateLabels"))
+                    if len(abort_reads) == 1:
+                        raise RuntimeError("synthetic transient ownership read failure")
                 return original_read()
             self.app.getActiveTransaction = transient_read
         link = self.install_label_callback(reject_then_fail_first_abort_read)
         rows = self.preview()
-        with self.assertRaises(controller.PftWriteError) as failure:
-            controller.apply_link_labels(self.app, self.gui, self.document, [link], [model._snapshot(link)], rows)
+        with patch.object(controller._PftOwnedTransaction, 'abort_once', abort_phase):
+            with self.assertRaises(controller.PftWriteError) as failure:
+                controller.apply_link_labels(self.app, self.gui, self.document, [link], [model._snapshot(link)], rows)
         self.assertEqual(failure.exception.code, "PART_TRANSACTION_CHANGED")
         self.assertEqual(self.document.events, ["open"])
-        self.assertEqual(reads, [True, True])  # No retry after restoring preferences.
+        self.assertEqual(abort_reads, [True])  # No retry after restoring preferences.
+        self.assertTrue(reads and all(value is True for value in reads))
         self.assertEqual(self.prefs.values, before_preferences)
         self.assertEqual(self.prefs.events, [("set", "DuplicateLabels", True), ("set", "DuplicateLabels", False)])
         self.assertIsNotNone(self.document.active_transaction)

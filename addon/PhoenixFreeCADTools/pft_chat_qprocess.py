@@ -3,6 +3,7 @@
 
 import json
 import math
+import time
 
 # Inbound: one 1 MiB MCP result plus 256 KiB for app-server JSONL wrapping.
 _PFT_LINE_LIMIT = 1280 * 1024
@@ -11,7 +12,9 @@ _PFT_WRITE_LIMIT = 512 * 1024
 _PFT_STDERR_LIMIT = 16 * 1024
 _PFT_ENVIRONMENT = frozenset(("PATH", "HOME", "USERPROFILE", "SystemRoot", "SYSTEMROOT",
                             "WINDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
-                            "TEMP", "TMP", "CODEX_HOME", "OTEL_SDK_DISABLED", "DO_NOT_TRACK"))
+                            "TEMP", "TMP", "CODEX_HOME", "OTEL_SDK_DISABLED", "DO_NOT_TRACK",
+                            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                            "http_proxy", "https_proxy", "all_proxy", "no_proxy"))
 
 
 class PftChatProcessError(RuntimeError):
@@ -68,13 +71,42 @@ class PftChatProcess:
     A dock can be deleted as soon as its closeEvent returns. The process must
     outlive that dock so asynchronous kill/finished delivery remains safe.
     """
-    def __init__(self, core, parent):
+    def __init__(self, core, parent, lease_factory=None):
         self.core, self.parent = core, parent
+        self._lease_factory = lease_factory
         self._session = None
 
+    @property
+    def has_active_session(self):
+        """A wrapper is still owned; inspecting this flag never probes a PID."""
+        return self._session is not None
+
+    def _release_stopped_session(self):
+        session = self._session
+        if (session is None or session["finished"] or session["finishing"] or
+                not (session["failed"] or session["killed"])):
+            return
+        # A killed child can reach NotRunning without a delivered finished.
+        # Only an explicit new start may retire that exact owned wrapper.
+        process_class = self.core.QProcess
+        not_running = getattr(process_class, "NotRunning", None)
+        if not_running is None:
+            not_running = getattr(getattr(process_class, "ProcessState", None), "NotRunning", None)
+        try:
+            state = session["process"].state()
+        except (AttributeError, RuntimeError, TypeError):
+            return
+        if not_running is not None and type(state) is not bool and state == not_running:
+            session["confirm_exit"]()
+            session["release"]()
+
     def start(self, program, args, env, cwd, on_data, on_exit, on_error):
+        self._release_stopped_session()
         if self._session is not None:
             raise PftChatProcessError("CHAT_PROCESS_BUSY", "聊天进程尚未退出，请稍后重试。")
+        # Acquire before creating or starting a child. The native view supplies
+        # the production factory; isolated protocol tests may omit file I/O.
+        lease = self._lease_factory(env.get("CODEX_HOME"), cwd, program) if self._lease_factory is not None else None
         core = self.core
         application = getattr(core, "QCoreApplication", None)
         try:
@@ -82,13 +114,27 @@ class PftChatProcess:
         except RuntimeError:
             owner = None
         # Never parent the child to the transient panel, even without an app.
-        process = core.QProcess(owner)
-        timer = core.QTimer(process)
-        timer.setSingleShot(True)
+        try:
+            process = core.QProcess(owner)
+            timer = core.QTimer(process)
+            timer.setSingleShot(True)
+        except Exception:
+            # No call to QProcess.start has occurred. There cannot be a child.
+            if lease is not None:
+                try:
+                    lease.release_failed_to_start()
+                except Exception:
+                    raise PftChatProcessError("CHAT_PROCESS_LEASE_RELEASE_UNVERIFIED",
+                        "聊天进程登记清理未确认；请核对专属配置后再连接。") from None
+            raise PftChatProcessError("CHAT_PROCESS_FAILED",
+                "无法运行聊天服务；请检查专属配置与 Codex 执行文件。") from None
         session = {"process": process, "timer": timer, "stdout": bytearray(), "stderr": 0,
                    "pending": bytearray(), "started": False, "failed": False, "killed": False,
                    "finished": False, "finishing": False, "object_gone": False,
-                   "timeout_generation": 0, "timeout_callback": None, "timeout_handler": None}
+                   "lease": lease, "lease_release_attempted": False, "spawn_invoked": False,
+                   "exit_confirmed": False, "pid": None, "running_kill_sent": False,
+                   "timeout_generation": 0, "timeout_deadline": None, "timeout_callback": None,
+                   "timeout_handler": None, "timeout_connection": None}
         self._session = session
 
         def current():
@@ -96,16 +142,30 @@ class PftChatProcess:
 
         def stop_timer():
             session["timeout_generation"] += 1
-            session["timeout_callback"] = None
-            handler, session["timeout_handler"] = session["timeout_handler"], None
+            session["timeout_callback"] = session["timeout_deadline"] = None
             try:
                 timer.stop()
             except RuntimeError:
                 pass
-            if handler is not None:
+
+        def confirm_exit(never_started=False):
+            # Native exit evidence belongs to this captured session, even when
+            # a trailing data/error callback closes the dock or reconnects.
+            session["exit_confirmed"] = True
+            if lease is None or session["lease_release_attempted"]:
+                return
+            session["lease_release_attempted"] = True
+            try:
+                if never_started:
+                    lease.release_failed_to_start()
+                else:
+                    lease.release_after_exit()
+            except Exception:
+                session["failed"] = True
                 try:
-                    timer.timeout.disconnect(handler)
-                except (RuntimeError, TypeError):
+                    on_error(PftChatProcessError("CHAT_PROCESS_LEASE_RELEASE_UNVERIFIED",
+                        "聊天进程登记清理未确认；请核对专属配置后再连接。"))
+                except Exception:
                     pass
 
         def release():
@@ -123,9 +183,15 @@ class PftChatProcess:
                 pass
 
         def kill_owned():
-            if session["finished"] or session["killed"]:
+            if session["finished"] or session["exit_confirmed"]:
+                return
+            # A kill requested during Starting may precede a late started
+            # signal. Send once more to that same now-running owned handle.
+            if session["killed"] and (not session["started"] or session["running_kill_sent"]):
                 return
             session["killed"] = True
+            if session["started"]:
+                session["running_kill_sent"] = True
             if session["object_gone"]:
                 release()
                 return
@@ -156,7 +222,7 @@ class PftChatProcess:
             release()  # A deleted QObject cannot deliver another finished.
 
         session["kill_owned"], session["object_gone_callback"], session["fail"] = kill_owned, object_gone, failed
-        session["stop_timer"] = stop_timer
+        session["stop_timer"], session["release"], session["confirm_exit"] = stop_timer, release, confirm_exit
 
         def drain_stdout():
             if not current() or session["failed"]:
@@ -202,6 +268,7 @@ class PftChatProcess:
             if session["finished"] or session["finishing"]:
                 return
             session["finishing"] = True
+            confirm_exit()
             active = current()
             if active:
                 drain_stdout()
@@ -220,12 +287,41 @@ class PftChatProcess:
             if not current():
                 return
             failed("CHAT_PROCESS_FAILED", "无法运行聊天服务；请检查专属配置与 Codex 执行文件。")
-            if error == core.QProcess.FailedToStart:
-                release()  # FailedToStart is not guaranteed to emit finished.
+            if error == core.QProcess.FailedToStart and not session["started"]:
+                # Only a native signal plus NotRunning proves a failed launch.
+                try:
+                    state = process.state()
+                    not_running = getattr(core.QProcess, "NotRunning", None)
+                    if not_running is None:
+                        not_running = core.QProcess.ProcessState.NotRunning
+                    if type(state) is not bool and state == not_running:
+                        confirm_exit(never_started=True)
+                        release()  # FailedToStart may never emit finished.
+                except (AttributeError, RuntimeError, TypeError):
+                    pass
 
         def started():
-            if current() and not session["failed"]:
-                session["started"] = True
+            if not current() or session["finishing"]:
+                return
+            was_started = session["started"]
+            session["started"] = True
+            if lease is not None:
+                try:
+                    pid = process.processId()
+                    if type(pid) is not int or pid <= 0 or (was_started and pid != session["pid"]):
+                        raise ValueError("unconfirmed owned child PID")
+                    if not was_started:
+                        session["pid"] = pid
+                        lease.mark_started(pid)
+                except Exception:
+                    failed("CHAT_PROCESS_LEASE_UPDATE_UNVERIFIED",
+                        "聊天进程登记未确认，连接已停止；不会自动重试。")
+                    kill_owned()
+                    return
+            if session["failed"] or session["killed"]:
+                kill_owned()
+                return
+            if not was_started:
                 pending = bytes(session["pending"])
                 session["pending"].clear()
                 try:
@@ -236,7 +332,40 @@ class PftChatProcess:
                 if accepted != len(pending):
                     failed("CHAT_WRITE_FAILED", "无法发送聊天消息，连接已停止。")
 
+        def timed_out():
+            if (not current() or session["failed"] or session["finishing"]
+                    or session["object_gone"] or session["killed"]):
+                return
+            deadline = session["timeout_deadline"]
+            if deadline is None:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                # A queued signal from an earlier arm (or an early coarse Qt
+                # timer) cannot expire the current operation or renew its budget.
+                try:
+                    timer.start(max(1, math.ceil(remaining * 1000)))
+                except RuntimeError:
+                    failed("CHAT_PROCESS_FAILED", "无法运行聊天服务；请检查专属配置与 Codex 执行文件。")
+                return
+            callback = session["timeout_callback"]
+            stop_timer()  # Consume first; an optional callback may arm anew.
+            if callback is None:
+                failed("CHAT_TIMEOUT", "聊天操作超时，已停止本次专属连接；不会自动重试。")
+                return
+            try:
+                callback()
+            except Exception:
+                failed("CHAT_TIMEOUT_CALLBACK_FAILED", "聊天超时处理失败，连接已停止；不会自动重试。")
+
+        # One stable slot for the lifetime of this exact owned session. Repeated
+        # arms change only deadline/state; they never reconnect Python closures.
+        session["timeout_handler"] = timed_out
         try:
+            connection = timer.timeout.connect(timed_out)
+            if not connection:
+                raise RuntimeError("timeout connection unavailable")
+            session["timeout_connection"] = connection
             process.readyReadStandardOutput.connect(drain_stdout)
             process.readyReadStandardError.connect(drain_stderr)
             process.finished.connect(finished)
@@ -253,9 +382,16 @@ class PftChatProcess:
             environment.insert("DO_NOT_TRACK", "1")
             process.setProcessEnvironment(environment)
             process.setWorkingDirectory(cwd)
+            session["spawn_invoked"] = True
             process.start(program, list(args))
         except Exception:
-            process_error(core.QProcess.FailedToStart)
+            # An exception after invoking start may follow an actual spawn.
+            # Never manufacture FailedToStart evidence for that path.
+            if not session["spawn_invoked"]:
+                confirm_exit(never_started=True)
+            failed("CHAT_PROCESS_FAILED", "无法运行聊天服务；请检查专属配置与 Codex 执行文件。")
+            if not session["spawn_invoked"]:
+                release()
 
     def write(self, data):
         session = self._session
@@ -277,33 +413,18 @@ class PftChatProcess:
             raise PftChatProcessError("CHAT_WRITE_FAILED", "无法发送聊天消息。") from None
 
     def arm_timeout(self, milliseconds, on_timeout=None):
-        """Bound an operation; optional metadata may supply a nonfatal callback."""
+        """Arm the session's stable slot; metadata may use a nonfatal callback."""
         session = self._session
         if (session is None or session["failed"] or session["finished"]
                 or session["finishing"] or session["object_gone"] or session["killed"]):
             return
+        if type(milliseconds) is not int or not 1 <= milliseconds <= 2147483647:
+            session["fail"]("CHAT_PROCESS_FAILED", "无法运行聊天服务；请检查专属配置与 Codex 执行文件。")
+            return
         session["stop_timer"]()
-        generation = session["timeout_generation"]
         session["timeout_callback"] = on_timeout
-
-        def timed_out():
-            if (self._session is not session or session["timeout_generation"] != generation
-                    or session["failed"] or session["finished"] or session["finishing"]
-                    or session["object_gone"] or session["killed"]):
-                return
-            callback = session["timeout_callback"]
-            session["stop_timer"]()
-            if callback is None:
-                session["fail"]("CHAT_TIMEOUT", "聊天操作超时，已停止本次专属连接；不会自动重试。")
-                return
-            try:
-                callback()
-            except Exception:
-                session["fail"]("CHAT_TIMEOUT_CALLBACK_FAILED", "聊天超时处理失败，连接已停止；不会自动重试。")
-
-        session["timeout_handler"] = timed_out
+        session["timeout_deadline"] = time.monotonic() + milliseconds / 1000
         try:
-            session["timer"].timeout.connect(timed_out)
             session["timer"].start(milliseconds)
         except RuntimeError:
             session["fail"]("CHAT_PROCESS_FAILED", "无法运行聊天服务；请检查专属配置与 Codex 执行文件。")

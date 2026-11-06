@@ -15,6 +15,15 @@ _pft_addon_dir = _pft_os.path.dirname(_pft_os.path.abspath(_pft_source_file))
 if _pft_addon_dir not in _pft_sys.path:
     _pft_sys.path.insert(0, _pft_addon_dir)
 
+_pft_development = None
+if _pft_os.environ.get("PFT_DEVELOPMENT") == "1":
+    import pft_development as _pft_development
+    import FreeCAD as _pft_development_app
+    import FreeCADGui as _pft_development_gui
+    if _pft_os.path.realpath(_pft_development.__file__) != _pft_os.path.realpath(_pft_os.path.join(_pft_addon_dir, "pft_development.py")):
+        raise RuntimeError("Development module belongs to another addon.")
+    _pft_development.configure_bootstrap(_pft_development_app, _pft_development_gui)
+
 _pft_module_name = "pft_workbench_gui"
 _pft_module_spec = _pft_import_util.spec_from_file_location(
     _pft_module_name, _pft_os.path.join(_pft_addon_dir, "pft_workbench_gui.py")
@@ -31,3 +40,6 @@ except Exception:
     else:
         _pft_sys.modules[_pft_module_name] = _pft_previous_module
     raise
+
+if _pft_development is not None:
+    _pft_development.register(_pft_gui_module.App, _pft_gui_module.Gui, _pft_gui_module.PftWorkbench)

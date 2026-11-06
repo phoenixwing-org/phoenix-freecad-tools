@@ -3,15 +3,19 @@
 import copy
 import json
 from collections import deque
+from functools import wraps
+from pathlib import Path
 
 from pft_workbench_i18n import tr
 import pft_visual_tools as visual
 
 TRANSLATABLE_STRINGS = (
-    "对象外观", "随机配色", "透明度", "确定", "取消", "混合",
+    "对象外观", "随机配色", "轴测并适合窗口", "透明度", "确定", "取消", "混合",
+    "不透明", "微透", "半透", "高透明",
     "0% 不透明，100% 完全透明", "Phoenix：预览所选对象外观",
     "外观事务已变化，未接管或取消其他操作。",
     "外观预览已结束，请重新打开。", "外观预览已取消。",
+    "外观操作正在处理中，请稍后再试。",
     "外观预览失败，已恢复初始外观。", "外观回滚无法确认，请检查当前外观与撤销记录。",
     "请先选择当前文档中的完整对象。", "对象或外观已变化，未覆盖其他修改。",
     "检测到其他修改，未提交或取消这些修改。",
@@ -46,7 +50,7 @@ _SAFE_ERROR_CODES = frozenset((
     "UNDO_DISABLED", "VISUAL_PREVIEW_FAILED", "VISUAL_PREVIEW_TOO_LARGE", "VISUAL_ROLLBACK_UNVERIFIED",
     "VISUAL_SESSION_CONTAMINATED", "VISUAL_SESSION_ENDED", "VISUAL_SNAPSHOT_CHANGED",
     "VISUAL_TARGET_CHANGED", "VISUAL_TARGETS_REQUIRED", "VISUAL_TRANSACTION_CHANGED", "VISUAL_BODY_TIP_OVERLAP",
-    "VISUAL_COMMIT_UNVERIFIED",
+    "VISUAL_COMMIT_UNVERIFIED", "VISUAL_OPERATION_IN_PROGRESS",
 ))
 
 
@@ -134,6 +138,20 @@ class _AppearanceObserver:
     slotAddedDynamicExtension = _observer_event("added_dynamic_extension")
 
 
+def _exclusive_mutation(method):
+    @wraps(method)
+    def invoke(session, *args, **kwargs):
+        visual._main_thread()
+        if session._mutating:
+            raise session._error("VISUAL_OPERATION_IN_PROGRESS", "外观操作正在处理中，请稍后再试。")
+        session._mutating = True
+        try:
+            return method(session, *args, **kwargs)
+        finally:
+            session._mutating = False
+    return invoke
+
+
 class PftAppearancePreviewSession:
     """Read on construction; preview writes stay in one native transaction.
 
@@ -158,6 +176,7 @@ class PftAppearancePreviewSession:
         self.state = "ready"
         self.preview_count = 0
         self._foreign_change, self._writing = False, False
+        self._mutating = False
         self._expected_view_change = None
         self._expected_tip_view = None
         self._expected_body_member_views = ()
@@ -430,17 +449,29 @@ class PftAppearancePreviewSession:
             raise self._error("VISUAL_SESSION_ENDED", "外观预览已结束，请重新打开。")
 
     def _owner(self):
+        self._ensure_open()
         if self.transaction_id is None or _transaction_id(self.app) != self.transaction_id:
             raise self._error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。")
         if self._foreign_change:
             raise self._error("VISUAL_SESSION_CONTAMINATED", "检测到其他修改，未提交或取消这些修改。")
         if self.app.getDocument(self.document_name) is not self.document:
             raise self._error("VISUAL_TARGET_CHANGED", "视觉目标已关闭或变化，请刷新后重新选择。")
+        # The document getter can synchronously replace the global transaction.
+        # Read its numeric ID last, before the remaining process-local checks.
+        if _transaction_id(self.app) != self.transaction_id:
+            raise self._error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。")
+        # A native ownership getter can synchronously invalidate the session or
+        # report a foreign edit. Never revive a terminal session after it returns.
+        self._ensure_open()
+        if self._foreign_change:
+            raise self._error("VISUAL_SESSION_CONTAMINATED", "检测到其他修改，未提交或取消这些修改。")
 
     def _current(self, require_active=True):
         self._ensure_open()
         if self.transaction_id is None:
-            visual._context(self.app, self.gui, self.document_name, undo=True)
+            document, _ = visual._context(self.app, self.gui, self.document_name, undo=True)
+            if document is not self.document:
+                raise self._error("VISUAL_TARGET_CHANGED", "视觉目标已关闭或变化，请刷新后重新选择。")
         else:
             self._owner()
             if require_active:
@@ -507,22 +538,36 @@ class PftAppearancePreviewSession:
         self._checkpoint("invalid")
 
     def _open_transaction(self):
+        if not all(callable(getattr(self.app, name, None)) for name in
+                   ("setActiveTransaction", "closeActiveTransaction")):
+            raise self._error("DOCUMENT_STATE_UNKNOWN", "无法确认文档事务或编辑状态，未执行视觉操作。")
         self._attach_observers()
         self._writing = True
         try:
-            self.document.openTransaction("Phoenix：预览所选对象外观")
-        except Exception:
-            self._detach_observers()
-            raise
+            # Plan construction and observer installation call native getters.
+            # Recheck idle/identity after those callbacks, before opening an ID.
+            self._current()
+            if self.app.getActiveTransaction() is not None:
+                raise self._error("DOCUMENT_BUSY", "当前文档正在编辑或已有未完成事务，请先完成或取消。")
+            # Document.openTransaction is void. Only the native allocation result
+            # identifies this operation if an opening callback replaces the ID.
+            transaction_id = self.app.setActiveTransaction("Phoenix：预览所选对象外观")
+            if type(transaction_id) is not int or transaction_id <= 0:
+                raise self._error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。")
+            self.transaction_id = transaction_id
+            self.owned_transaction_id = transaction_id
+            self._update_diagnostics()
+            self._owner()
+        except Exception as error:
+            # A failed/unknown open does not authorize adopting whichever ID is
+            # current or attempting a compensating close on it.
+            reported = (error if isinstance(error, visual.PftVisualToolsError) else
+                        self._error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。"))
+            self._failure("primary", reported)
+            self.invalidate()
+            raise reported from None
         finally:
             self._writing = False
-        transaction_id = _transaction_id(self.app)
-        if transaction_id is None:
-            raise self._error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。")
-        self.transaction_id = transaction_id
-        self.owned_transaction_id = transaction_id
-        self._update_diagnostics()
-        self._owner()
 
     def _restore_initial_check(self):
         expected = []
@@ -543,22 +588,26 @@ class PftAppearancePreviewSession:
         self._diagnostic["rollback_status"] = "unverified"
         self._checkpoint("rollback_abort")
         try:
-            self.document.abortTransaction()
+            # Snapshot reads above may synchronously report foreign edits.
+            # Confirm ownership again immediately before the bound native close.
+            self._owner()
+            self.app.closeActiveTransaction(True, self.transaction_id)
+            self._checkpoint("rollback_close_verify")
+            visual._check_transaction_closed(self.app, self.transaction_id)
+            self._checkpoint("rollback_verify")
+            self._restore_initial_check()
+            visual._check_transaction_closed(self.app, self.transaction_id)
+            self._ensure_open()
+        except Exception as error:
+            self._diagnostic["rollback_status"] = "unverified"
+            reported = (error if isinstance(error, visual.PftVisualToolsError) else
+                        self._error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。"))
+            self._failure("rollback", reported)
+            self.invalidate()
+            raise self._diagnosed_error(reported) from None
         finally:
             self._writing = False
-        self._checkpoint("rollback_close_verify")
-        active = self.app.getActiveTransaction()
-        if active is not None:
-            same_id = (isinstance(active, (tuple, list)) and len(active) == 2
-                       and type(active[1]) is int and active[1] == self.transaction_id)
-            error = (self._error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。") if same_id
-                     else self._error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。"))
-            self._diagnostic["rollback_status"] = "unverified"
-            self._failure("rollback", error)
-            raise self._diagnosed_error(error) from None
         self.transaction_id = None
-        self._checkpoint("rollback_verify")
-        self._restore_initial_check()
         for entry, before in zip(self.entries, self.initial):
             entry["before"] = copy.deepcopy(before)
         members = [member for guard in self.body_tips + self.source_body_tips for member in guard["members"]]
@@ -584,12 +633,21 @@ class PftAppearancePreviewSession:
                                                              if member["propagates"])
                     break
         try:
+            # Native material construction can call back after the outer loop's
+            # guard; recheck immediately around every actual view setter.
+            self._owner()
+            if self.app.ActiveDocument is not self.document:
+                raise self._error("DOCUMENT_NOT_ACTIVE", "活动文档已变化，请刷新后重试。")
             setattr(view, property_name, value)
+            self._owner()
+            if self.app.ActiveDocument is not self.document:
+                raise self._error("DOCUMENT_NOT_ACTIVE", "活动文档已变化，请刷新后重试。")
         finally:
             self._expected_view_change = None
             self._expected_tip_view = None
             self._expected_body_member_views = ()
 
+    @_exclusive_mutation
     def _preview(self, action, transparency=None):
         rollback_permitted = False
         if self.state in ("ready", "previewing"):
@@ -634,6 +692,7 @@ class PftAppearancePreviewSession:
             self._owner()
             visual._check_before(self.document, expected)
             self._check_body_tips(after_entries=entries)
+            self._owner()
             self._retain_tip_preview(entries)
             self.entries = expected
             self.state = "previewing"
@@ -670,6 +729,7 @@ class PftAppearancePreviewSession:
     def preview_transparency(self, value):
         return self._preview("set_transparency", value)
 
+    @_exclusive_mutation
     def accept(self):
         self._current()
         summary = self._summary()
@@ -681,16 +741,12 @@ class PftAppearancePreviewSession:
                 try:
                     self._writing = True
                     try:
-                        self.document.commitTransaction()
+                        self._owner()
+                        self.app.closeActiveTransaction(False, self.transaction_id)
                     finally:
                         self._writing = False
                     self._checkpoint("commit_close_verify")
-                    active = self.app.getActiveTransaction()
-                    if active is not None:
-                        same_id = (isinstance(active, (tuple, list)) and len(active) == 2
-                                   and type(active[1]) is int and active[1] == self.transaction_id)
-                        raise (self._error("VISUAL_COMMIT_UNVERIFIED", "外观事务提交后未确认关闭，请检查当前外观与撤销记录。") if same_id
-                               else self._error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。"))
+                    visual._check_transaction_closed(self.app, self.transaction_id, committing=True)
                     # Closing the native transaction is not proof that its
                     # synchronous callbacks stayed within our appearance edit.
                     # It is already closed: report the contamination and retain
@@ -698,21 +754,32 @@ class PftAppearancePreviewSession:
                     if self._foreign_change:
                         self._diagnostic["commit_status"] = "closed_contaminated"
                         raise self._error("VISUAL_SESSION_CONTAMINATED", "外观事务提交期间检测到其他修改，请检查当前外观与撤销记录。")
+                    if self.app.getDocument(self.document_name) is not self.document:
+                        raise self._error("VISUAL_TARGET_CHANGED", "视觉目标已关闭或变化，请刷新后重新选择。")
+                    visual._check_before(self.document, self.entries)
+                    self._check_body_tips()
+                    visual._check_transaction_closed(self.app, self.transaction_id, committing=True)
+                    self._ensure_open()
                 except Exception as error:
-                    self._failure("commit", error)
+                    reported = (error if isinstance(error, visual.PftVisualToolsError) and error.code in (
+                        "VISUAL_TRANSACTION_CHANGED", "VISUAL_COMMIT_UNVERIFIED", "VISUAL_SESSION_CONTAMINATED") else
+                        self._error("VISUAL_COMMIT_UNVERIFIED", "外观事务提交后未确认关闭，请检查当前外观与撤销记录。"))
+                    self._failure("commit", reported)
                     self.invalidate()
                     # Neither another commit nor an abort is authorized once
                     # native closure is uncertain or a foreign ID has appeared.
-                    raise self._diagnosed_error(error) from None
+                    raise self._diagnosed_error(reported) from None
                 self.transaction_id = None
                 self._diagnostic["commit_status"] = "verified"
             else:
                 self._abort()
+        self._ensure_open()
         self.state = "accepted"
         self._detach_observers()
         self._checkpoint("accepted")
         return summary
 
+    @_exclusive_mutation
     def cancel(self):
         self._ensure_open()
         if self.transaction_id is not None:
@@ -720,6 +787,7 @@ class PftAppearancePreviewSession:
             # and the exact expected appearance still prove it is ours.
             self._current(require_active=False)
             self._abort()
+        self._ensure_open()
         self.state = "cancelled"
         self._detach_observers()
         self._checkpoint("cancelled")
@@ -733,12 +801,12 @@ def apply_random_color(app, gui, document_name, objects):
 
 
 def _qt():
-    from PySide import QtCore
+    from PySide import QtCore, QtGui
     try:
         from PySide import QtWidgets
     except ImportError:
         from PySide import QtGui as QtWidgets
-    return QtCore, QtWidgets
+    return QtCore, QtGui, QtWidgets
 
 
 def _enum(owner, group, name):
@@ -758,26 +826,37 @@ def _selected_scope(app, gui):
 def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
                           on_applied=None, on_error=None):
     """Show a small nonmodal panel for a fixed explicit scope; return its dialog."""
-    core, widgets = _qt()
+    core, qtgui, widgets = _qt()
     if parent is not None:
         for existing in parent.findChildren(widgets.QDialog, "PhoenixTools_AppearancePanel"):
             if existing.isVisible():
-                existing.raise_()
-                existing.activateWindow()
-                return existing
+                if getattr(getattr(existing, "_pft_session", None), "state", None) in ("ready", "previewing"):
+                    existing.raise_()
+                    existing.activateWindow()
+                    return existing
+                existing.close()
     if scope is None:
         scope = get_scope() if get_scope is not None else _selected_scope(app, gui)
     if not isinstance(scope, (tuple, list)) or len(scope) != 2:
         raise visual.PftVisualToolsError("VISUAL_TARGETS_REQUIRED", "请先选择当前文档中的完整对象。")
     session = PftAppearancePreviewSession(app, gui, scope[0], scope[1])
+    ended = [False]
 
     class AppearanceDialog(widgets.QDialog):
         def accept(self):
+            if session._mutating:
+                return
+            if ended[0] or session.state not in ("ready", "previewing"):
+                finish_preview()
+                return
             try:
                 summary = session.accept()
             except Exception as error:
                 report(error)
+                if session.state not in ("ready", "previewing"):
+                    finish_preview()
                 return
+            finish_preview()
             try:
                 if on_applied is not None:
                     on_applied(summary)
@@ -785,6 +864,8 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
                 super().accept()
 
         def reject(self):
+            if session._mutating:
+                return
             try:
                 if session.state in ("ready", "previewing"):
                     session.cancel()
@@ -792,9 +873,15 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
                 report(error)
                 # Ownership loss is terminal: leave the external transaction alone.
                 session.invalidate()
+            finish_preview()
             super().reject()
 
         def closeEvent(self, event):
+            if session._mutating:
+                # A close while a native call is reentering cannot discard its
+                # live transaction. Do not queue or replay the close later.
+                event.ignore()
+                return
             self.reject()
             event.accept()
 
@@ -813,7 +900,16 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
     random_button.setObjectName("PhoenixTools_AppearanceRandomColor")
     if callable(getattr(random_button, "setAutoDefault", None)):
         random_button.setAutoDefault(False)
-    layout.addWidget(random_button)
+    random_row = widgets.QHBoxLayout()
+    random_row.addWidget(random_button, 1)
+    view_button = widgets.QToolButton(dialog)
+    view_button.setObjectName("PhoenixTools_AppearanceAxonometricFit")
+    view_button.setToolTip(tr("轴测并适合窗口"))
+    view_button.setAccessibleName(tr("轴测并适合窗口"))
+    view_button.setIcon(qtgui.QIcon(str(Path(__file__).resolve().parent / "Resources" / "icons" / "axonometric-fit.svg")))
+    view_button.setToolButtonStyle(_enum(core.Qt, "ToolButtonStyle", "ToolButtonIconOnly"))
+    random_row.addWidget(view_button)
+    layout.addLayout(random_row)
     row = widgets.QHBoxLayout()
     row.addWidget(widgets.QLabel(tr("透明度"), dialog))
     slider = widgets.QSlider(dialog)
@@ -829,6 +925,19 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
     spin.setKeyboardTracking(False)
     row.addWidget(spin)
     layout.addLayout(row)
+    preset_row = widgets.QHBoxLayout()
+    preset_buttons = {}
+    for value, label in ((0, "不透明"), (25, "微透"), (50, "半透"), (75, "高透明")):
+        button = widgets.QToolButton(dialog)
+        button.setObjectName("PhoenixTools_AppearanceTransparencyPreset%d" % value)
+        button.setText(tr(label))
+        button.setToolTip("%s: %d%%" % (tr("透明度"), value))
+        button.setCheckable(True)
+        button.setSizePolicy(_enum(widgets.QSizePolicy, "Policy", "Expanding"),
+                             _enum(widgets.QSizePolicy, "Policy", "Fixed"))
+        preset_buttons[value] = button
+        preset_row.addWidget(button, 1)
+    layout.addLayout(preset_row)
     status = widgets.QLabel("", dialog)
     status.setObjectName("PhoenixTools_AppearanceStatus")
     status.setWordWrap(True)
@@ -843,16 +952,33 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
     layout.addWidget(buttons)
     updating = [False]
 
+    def finish_preview():
+        if ended[0]:
+            return
+        ended[0] = True
+        random_button.setEnabled(False)
+        view_button.setEnabled(False)
+        slider.setEnabled(False)
+        spin.setEnabled(False)
+        for button in preset_buttons.values():
+            button.setEnabled(False)
+        buttons.button(_enum(widgets.QDialogButtonBox, "StandardButton", "Ok")).setEnabled(False)
+        timer.stop()
+
     def sync(value):
         updating[0] = True
         try:
             slider.setValue(value if value is not None else 0)
             spin.setValue(value if value is not None else 0)
+            for percent, button in preset_buttons.items():
+                button.setChecked(value == percent)
             status.setText(tr("混合") if value is None else "")
         finally:
             updating[0] = False
 
     def report(error):
+        if ended[0]:
+            return
         session._failure("reported", error)
         message = getattr(error, "message", None)
         message = (tr(message) if message in (visual.TRANSLATABLE_STRINGS + TRANSLATABLE_STRINGS)
@@ -888,6 +1014,9 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
     def preview(action, value=None):
         if updating[0]:
             return
+        if ended[0] or session.state not in ("ready", "previewing"):
+            finish_preview()
+            return
         try:
             if action == "random_color":
                 session.preview_random_color()
@@ -897,12 +1026,27 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
         except Exception as error:
             report(error)
             if session.state not in ("ready", "previewing"):
-                random_button.setEnabled(False)
-                slider.setEnabled(False)
-                spin.setEnabled(False)
+                finish_preview()
+
+    def adjust_view(*_):
+        if ended[0] or session.state not in ("ready", "previewing"):
+            finish_preview()
+            return
+        try:
+            # Fixed scope must remain active and idle, allowing only this
+            # session's own preview transaction. Never activate another doc.
+            session.validate()
+        except Exception as error:
+            report(error)
+            return
+        try:
+            from pft_workbench_tools import run_axonometric_fit
+            run_axonometric_fit(app, gui)
+        except Exception:
+            report(visual.PftVisualToolsError("VIEW_ACTION_FAILED", "原生视图操作失败。"))
 
     def slider_changed(value):
-        if updating[0]:
+        if updating[0] or ended[0]:
             return
         updating[0] = True
         try:
@@ -912,21 +1056,28 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
         preview("set_transparency", value)
 
     def spin_changed(value):
-        if not updating[0]:
-            preview("set_transparency", value)
+        if updating[0] or ended[0]:
+            return
+        preview("set_transparency", value)
 
     sync(session.transparency())
     slider.valueChanged.connect(slider_changed)
     spin.valueChanged.connect(spin_changed)
     random_button.clicked.connect(lambda *_: preview("random_color"))
+    view_button.clicked.connect(adjust_view)
+    for value, button in preset_buttons.items():
+        # Direct preview also handles a mixed state whose slider already shows 0.
+        button.clicked.connect(lambda _checked=False, percent=value: preview("set_transparency", percent))
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
     timer = core.QTimer(dialog)
     timer.setInterval(250)
 
     def guard():
-        if session.state not in ("ready", "previewing"):
-            timer.stop()
+        if session._mutating:
+            return
+        if ended[0] or session.state not in ("ready", "previewing"):
+            finish_preview()
             return
         try:
             session.validate()
@@ -937,10 +1088,7 @@ def show_appearance_panel(app, gui, parent=None, scope=None, get_scope=None,
                 session.cancel()
             except Exception:
                 session.invalidate()
-            random_button.setEnabled(False)
-            slider.setEnabled(False)
-            spin.setEnabled(False)
-            timer.stop()
+            finish_preview()
 
     timer.timeout.connect(guard)
     timer.start()

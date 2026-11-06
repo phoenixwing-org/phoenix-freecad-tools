@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 _RESULT_CONTRACT = None
+_DRAWING_RESULT_CONTRACT = None
+_DIMENSION_RESULT_CONTRACT = None
 
 
 _HANDLES = OrderedDict()
@@ -21,9 +23,13 @@ _ERROR_CODES = frozenset((
     "PART_PREFERENCE_RESTORE_UNVERIFIED", "PART_ROLLBACK_AND_PREFERENCE_UNVERIFIED",
     "PAD_UNSUPPORTED", "PAD_PLAN_STALE", "PAD_PARAMETER_VERIFY_FAILED", "PAD_GEOMETRY_VERIFY_FAILED",
     "PAD_RECOMPUTE_UNVERIFIED", "PAD_NATIVE_CONFIRMATION_REQUIRED",
+    "DRAWING_UNSUPPORTED", "DRAWING_PLAN_STALE", "DRAWING_TEMPLATE_UNAVAILABLE", "DRAWING_CREATE_FAILED",
+    "DRAWING_RECOMPUTE_UNVERIFIED", "DRAWING_PROJECTION_UNAVAILABLE", "DRAWING_NATIVE_CONFIRMATION_REQUIRED", "DRAWING_RESULT_INVALID",
+    "DIMENSION_UNSUPPORTED", "DIMENSION_PLAN_STALE", "DIMENSION_CREATE_FAILED", "DIMENSION_RECOMPUTE_UNVERIFIED",
+    "DIMENSION_VALUE_UNVERIFIED", "DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "DIMENSION_RESULT_INVALID",
 ))
 TRANSLATABLE_STRINGS = (
-    "确认零件修改", "文档：%s", "操作：%s", "原预览到期时间：%s", "仅点击“确认修改”会修改文档；可撤销，不会自动保存。",
+    "确认零件修改", "确认图纸创建", "确认图纸尺寸", "文档：%s", "操作：%s", "原预览到期时间：%s", "仅点击“确认修改”会修改文档；可撤销，不会自动保存。",
     "对象", "字段", "原值", "新值", "状态", "详情", "确认修改", "取消", "关闭",
     "等待原生确认；请检查全部预览行。", "正在修改，请等待结果。", "预览尚未进入确认状态。",
     "修改结果未确认（%s）。请检查文档和撤销记录；本窗口不会重试。",
@@ -63,6 +69,48 @@ def _pad_result(value, expected):
     return _RESULT_CONTRACT.validate_design_result(value, expected)
 
 
+def _drawing_contract():
+    global _DRAWING_RESULT_CONTRACT
+    if _DRAWING_RESULT_CONTRACT is None:
+        filename = Path(__file__).resolve().with_name("pft_drawing_contract.py")
+        spec = importlib.util.spec_from_file_location("_pft_approval_drawing_contract", filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _DRAWING_RESULT_CONTRACT = module
+    return _DRAWING_RESULT_CONTRACT
+
+
+def _dimension_contract():
+    global _DIMENSION_RESULT_CONTRACT
+    if _DIMENSION_RESULT_CONTRACT is None:
+        filename = Path(__file__).resolve().with_name("pft_drawing_dimensions_contract.py")
+        spec = importlib.util.spec_from_file_location("_pft_approval_dimensions_contract", filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _DIMENSION_RESULT_CONTRACT = module
+    return _DIMENSION_RESULT_CONTRACT
+
+
+def _dimension_preview(result):
+    request = _dimension_contract().validate_request(result.get("design_request"))
+    rows = result["rows"]
+    keys = {"object", "field", "old", "new", "status", "edge", "kind", "value_mm", "x_mm", "y_mm", "source", "note"}
+    if (result["can_apply"] is not True or result["changed_count"] != len(request["dimensions"])
+            or len(rows) != result["changed_count"]):
+        raise ValueError()
+    dimensions = []
+    for row in rows:
+        if (set(row) != keys or row["field"] != "TechDraw dimension" or row["old"] is not None
+                or row["status"] != "change" or row["new"] != row["value_mm"] or type(row["new"]) not in (int, float)
+                or row["source"] != "native_cached_projected_geometry" or type(row["note"]) is not str
+                or not 1 <= len(row["note"]) <= 2048):
+            raise ValueError()
+        dimensions.append({"name": row["object"], **{key: row[key] for key in ("edge", "kind", "value_mm", "x_mm", "y_mm")}})
+    _dimension_contract().validate_result({"kind": "drawing_dimensions", "page": request["page"], "view": request["view"],
+        "dimensions": dimensions, "measurement_verification": "native_reference_and_value_checked",
+        "projection_verification": "not_checked", "manual_review_required": True}, request)
+
+
 def _preview_copy(preview):
     try:
         result = json.loads(json.dumps(preview, ensure_ascii=False, allow_nan=False))
@@ -74,6 +122,17 @@ def _preview_copy(preview):
                 or any(type(row) is not dict or not {"object", "field", "old", "new", "status"}.issubset(row)
                        for row in result["rows"])):
             raise ValueError()
+        if result["operation"] == "add_drawing_dimensions":
+            _dimension_preview(result)
+        if result["operation"] == "create_drawing":
+            request = _drawing_contract().validate_design_request(result.get("design_request"))
+            rows = result["rows"]
+            if (result["can_apply"] is not True or result["changed_count"] != 5 or len(rows) != 5
+                    or any(row["status"] != "change" for row in rows)
+                    or rows[0]["object"] != request["page"]
+                    or len({row["object"] for row in rows}) != 5
+                    or request["source"] in {row["object"] for row in rows}):
+                raise ValueError()
         if result["operation"] == "set_pad_length":
             request = result.get("design_request")
             if (type(request) is not dict or set(request) != {"body", "pad", "length_mm"}
@@ -122,7 +181,8 @@ class _ApprovalHandle:
         try:
             self.dialog = ApprovalDialog(gui.getMainWindow())
             self.dialog.setObjectName("pftPartApprovalDialog")
-            self.dialog.setWindowTitle(translate("确认零件修改"))
+            self.dialog.setWindowTitle(translate("确认图纸尺寸" if preview["operation"] == "add_drawing_dimensions" else
+                                                 "确认图纸创建" if preview["operation"] == "create_drawing" else "确认零件修改"))
             self.dialog.setModal(False)
             self.dialog.setWindowModality(_enum(core.Qt, "WindowModality", "NonModal"))
             self.dialog.setMinimumWidth(0)
@@ -208,6 +268,28 @@ class _ApprovalHandle:
                     or type(result.get("changed_count")) is not int
                     or result["changed_count"] != status["changed_count"] or result["changed_count"] > 500
                     or result.get("saves_document") is not False):
+                raise ValueError("PART_APPROVAL_STATUS_INVALID")
+        if self.preview["operation"] == "add_drawing_dimensions":
+            if (status["changed_count"] != self.preview["changed_count"]
+                    or status["state"] in {"applying", "applied"} and status["native_confirmation"] is not True):
+                raise ValueError("PART_APPROVAL_STATUS_INVALID")
+            if status["state"] == "applied":
+                if set(status["result"]) != {"changed_count", "saves_document", "design_result"}:
+                    raise ValueError("PART_APPROVAL_STATUS_INVALID")
+                result = _dimension_contract().validate_result(status["result"]["design_result"], self.preview["design_request"])
+                if len(result["dimensions"]) != status["changed_count"]:
+                    raise ValueError("PART_APPROVAL_STATUS_INVALID")
+            elif status.get("result") is not None:
+                raise ValueError("PART_APPROVAL_STATUS_INVALID")
+        if self.preview["operation"] == "create_drawing":
+            if (status["changed_count"] != 5 or status["state"] in {"applying", "applied"}
+                    and status["native_confirmation"] is not True):
+                raise ValueError("PART_APPROVAL_STATUS_INVALID")
+            if status["state"] == "applied":
+                if set(status["result"]) != {"changed_count", "saves_document", "design_result"}:
+                    raise ValueError("PART_APPROVAL_STATUS_INVALID")
+                _drawing_contract().validate_design_result(status["result"]["design_result"], self.preview["design_request"])
+            elif status.get("result") is not None:
                 raise ValueError("PART_APPROVAL_STATUS_INVALID")
         if self.preview["operation"] == "set_pad_length":
             if status["changed_count"] > 1 or (status["state"] in {"applying", "applied"}

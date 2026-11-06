@@ -157,6 +157,37 @@ class ChatPreferenceTests(unittest.TestCase):
     def setUp(self):
         self.app = App()
 
+    def test_history_retention_is_opt_in_and_legacy_saves_preserve_it(self):
+        self.assertIs(settings.load_chat_history_preference(self.app), False)
+        self.assertEqual(self.app.preference.writes, [])
+        result = settings.save_chat_preferences(self.app, "selected", 12, retain_history=True)
+        self.assertIs(result["retain_history"], True)
+        self.assertIs(settings.load_chat_history_preference(self.app), True)
+        settings.save_chat_preferences(self.app, "selected", 14)
+        self.assertIs(settings.load_chat_history_preference(self.app), True)
+        settings.save_chat_preferences(self.app, "selected", 14, retain_history=False)
+        self.assertIs(settings.load_chat_history_preference(self.app), False)
+
+    def test_invalid_retention_never_writes_or_saves_any_preference(self):
+        for value in (0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaises(settings.PftChatSettingsError):
+                settings.save_chat_preferences(self.app, "", 0, retain_history=value)
+        self.assertEqual(self.app.preference.writes, [])
+        for value in (1, "true", None):
+            self.app.preference.values["RetainChatHistory"] = value
+            self.assertIs(settings.load_chat_history_preference(self.app), False)
+
+    def test_retention_and_other_chat_preferences_rollback_together(self):
+        self.app.preference.values.update(ModelId="before", FontPointSize=10, RetainChatHistory=False)
+        before = dict(self.app.preference.values)
+        def save(_group):
+            if self.app.preference.values != before:
+                raise RuntimeError("synthetic persistence failure")
+        self.app.saveParameter = save
+        with self.assertRaises(settings.PftChatSettingsError):
+            settings.save_chat_preferences(self.app, "after", 14, retain_history=True)
+        self.assertEqual(self.app.preference.values, before)
+
     def test_legacy_mcp_configuration_and_chat_preferences_are_independent(self):
         legacy = {"EnableFreeCADTools": True, "NodeExecutable": "old-node", "MCPCLIEntry": "old-cli"}
         self.app.preference.values.update(legacy)

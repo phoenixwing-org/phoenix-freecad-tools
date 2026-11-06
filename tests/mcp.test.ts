@@ -9,6 +9,9 @@ import { pftAppearanceScript } from '../src/pft-appearance.js';
 import { PFT_RECOMPUTE_CAPABILITY } from '../src/pft-recompute.js';
 import { PFT_PART_APPROVAL_CAPABILITY } from '../src/pft-part-approval.js';
 import { PFT_PAD_LENGTH_CAPABILITY } from '../src/pft-pad-length.js';
+import { PFT_DRAWING_CAPABILITY } from '../src/pft-drawing.js';
+import { PFT_DRAWING_DIMENSIONS_CAPABILITY } from '../src/pft-drawing-dimensions.js';
+import { PFT_DRAWING_REFERENCES_CAPABILITY } from '../src/pft-drawing-references.js';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
@@ -66,12 +69,16 @@ async function session(t: TestContext, toolScope: 'full' | 'chat' = 'full', desk
     script: ((params: Record<string, unknown>) => unknown) | undefined;
     recomputeCapability: unknown; recompute: ((params: Record<string, unknown>) => unknown) | undefined;
     recomputeError: { code: string; message: string } | undefined;
-    padLengthCapability: unknown; partApprovalCapability: unknown; partApproval: ((method: string, params: Record<string, unknown>) => unknown) | undefined;
+    drawingDimensionsCapability: unknown; dimensionPreview: ((params: Record<string, unknown>) => unknown) | undefined;
+    padLengthCapability: unknown; drawingCapability: unknown; drawingPreview: ((params: Record<string, unknown>) => unknown) | undefined;
+    partApprovalCapability: unknown; partApproval: ((method: string, params: Record<string, unknown>) => unknown) | undefined;
     partApprovalError: { code: string; message: string } | undefined; partApprovalMode: string;
     read: ((method: string, params: Record<string, unknown>) => unknown) | undefined; readError: { code: string; message: string } | undefined }
     = { methods: METHODS, capture: undefined, readProvenance: undefined, script: undefined, read: undefined, readError: undefined,
       recomputeCapability: PFT_RECOMPUTE_CAPABILITY, recompute: undefined, recomputeError: undefined,
-      padLengthCapability: undefined, partApprovalCapability: PFT_PART_APPROVAL_CAPABILITY, partApproval: undefined, partApprovalError: undefined, partApprovalMode: 'normal' };
+      drawingDimensionsCapability: undefined, dimensionPreview: undefined,
+      padLengthCapability: undefined, drawingCapability: undefined, drawingPreview: undefined,
+      partApprovalCapability: PFT_PART_APPROVAL_CAPABILITY, partApproval: undefined, partApprovalError: undefined, partApprovalMode: 'normal' };
   const bridge = httpServer(async (req, res) => {
     let text = ''; for await (const chunk of req) text += chunk;
     const body = JSON.parse(text) as Call; calls.push(body);
@@ -90,10 +97,16 @@ async function session(t: TestContext, toolScope: 'full' | 'chat' = 'full', desk
       ...(state.readProvenance === undefined ? {} : { read_provenance: state.readProvenance }),
       ...(state.recomputeCapability === undefined ? {} : { recompute_result: state.recomputeCapability }),
       ...(state.partApprovalCapability === undefined ? {} : { part_approvals: state.partApprovalCapability }),
-      ...(state.padLengthCapability === undefined ? {} : { pad_length_write: state.padLengthCapability }) };
+      ...(state.padLengthCapability === undefined ? {} : { pad_length_write: state.padLengthCapability }),
+      ...(state.drawingCapability === undefined ? {} : { drawing_create: state.drawingCapability }),
+      ...(state.drawingDimensionsCapability === undefined ? {} : { drawing_dimensions: state.drawingDimensionsCapability }) };
     else if ((READ_METHODS.includes(body.method) || body.method === 'inspect_design') && state.read) data = state.read(body.method, body.params);
     else if (body.method === 'inspect_design') data = designRead(body.params);
     else if (body.method === 'list_documents') data = ['PublicSample'];
+    else if (body.method === 'prepare_part_changes' && body.params.operation === 'add_drawing_dimensions') data = state.dimensionPreview
+      ? state.dimensionPreview(body.params) : dimensionPreviewResult(body.params);
+    else if (body.method === 'prepare_part_changes' && body.params.operation === 'create_drawing') data = state.drawingPreview
+      ? state.drawingPreview(body.params) : drawingPreviewResult(body.params);
     else if (approvalMethod) data = state.partApproval ? state.partApproval(body.method, body.params) : approvalStatus(String(body.params.token));
     else if (body.method === 'recompute_document') data = state.recompute ? state.recompute(body.params) : { document: body.params.docName,
       saved: false, recompute_invoked: true, native_object_count: 0, checked_object_count: 0, object_status: 'no_invalid_or_pending',
@@ -1104,4 +1117,178 @@ test('Pad虚假完成与几何坏结果被整笔拒绝，固定失败状态保�
   const failed = await client.callTool({ name: 'get_part_change_status', arguments: { token } });
   assert.equal(failed.isError, undefined);
   assert.equal((failed.structuredContent?.data as Record<string, unknown>).error_code, 'PAD_RECOMPUTE_UNVERIFIED');
+});
+
+const drawingToken = 'neutral_mcp_drawing_confirmation01';
+const drawingNodes = ['NeutralPage', 'NeutralTemplate', 'NeutralFront', 'NeutralTop', 'NeutralIso'];
+function drawingPreviewResult(params: Record<string, unknown>): Record<string, unknown> {
+  const source = (params.objectNames as string[])[0];
+  return { document: params.docName, operation: 'create_drawing', token: drawingToken, state: 'prepared', can_apply: true,
+    expires_at: '2030-01-01T00:00:00Z', ttl_seconds: 300, changed_count: 5,
+    rows: drawingNodes.map(object => ({ object, field: 'TechDraw draft node', old: null, new: 'Neutral draft node',
+      status: 'change', reason: '', source: 'cached_native_typed_snapshot', note: 'Projection not checked' })),
+    requires_confirmation: true, saves_document: false, storage: 'memory_only',
+    design_request: { source, page: drawingNodes[0] } };
+}
+function drawingAppliedStatus(): Record<string, unknown> {
+  return { ...approvalStatus(drawingToken, 'applied'), operation: 'create_drawing', changed_count: 5,
+    native_confirmation: true, result: { changed_count: 5, saves_document: false, design_result: {
+      kind: 'drawing_draft', source: '中立实体', page: drawingNodes[0], template: drawingNodes[1],
+      views: [{ name: drawingNodes[2], kind: 'front' }, { name: drawingNodes[3], kind: 'top' },
+        { name: drawingNodes[4], kind: 'axonometric' }], scale: 1, projection: 'first_angle', paper: 'A4_landscape',
+      projection_verification: 'not_checked', manual_review_required: true } } };
+}
+
+test('内置出图复用25/19工具及精确manifest，不把离线能力当成已创建', async t => {
+  for (const scope of ['full', 'chat'] as const) {
+    const { client, calls } = await session(t, scope);
+    const tools = (await client.listTools()).tools;
+    assert.equal(tools.length, scope === 'full' ? 25 : 19);
+    const prepare = tools.find(tool => tool.name === 'prepare_part_changes')!;
+    assert.match(prepare.description!, /create_drawing/u);
+    assert.match(prepare.description!, /not_checked/u);
+    const manifest = (await client.callTool({ name: 'get_capabilities', arguments: {} })).structuredContent!;
+    assert.deepEqual(manifest.drawing_create, PFT_DRAWING_CAPABILITY);
+    assert.ok((manifest.phoenix_operations as string[]).includes('create_drawing'));
+    assert.equal(manifest.connection_checked, false);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('full/chat出图严格派发单源Unicode预览并读取人工确认状态，不调用apply或脚本', async t => {
+  for (const scope of ['full', 'chat'] as const) {
+    const { client, calls, state } = await session(t, scope);
+    state.drawingCapability = PFT_DRAWING_CAPABILITY;
+    const args = { document: '中立文档', objects: ['中立实体'], operation: 'create_drawing' };
+    const result = await client.callTool({ name: 'prepare_part_changes', arguments: args });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(calls, [{ method: 'get_status', params: {} }, { method: 'prepare_part_changes',
+      params: { docName: args.document, objectNames: args.objects, operation: args.operation } }]);
+    assert.deepEqual((result.structuredContent?.data as Record<string, unknown>).design_request,
+      { source: '中立实体', page: 'NeutralPage' });
+    state.partApproval = () => ({ ...approvalStatus(drawingToken), operation: 'create_drawing', changed_count: 5 });
+    const pending = await client.callTool({ name: 'request_part_change_approval', arguments: { token: drawingToken } });
+    assert.equal(pending.isError, undefined);
+    assert.equal((pending.structuredContent?.data as Record<string, unknown>).state, 'awaiting_confirmation');
+    state.partApproval = () => drawingAppliedStatus();
+    const applied = await client.callTool({ name: 'get_part_change_status', arguments: { token: drawingToken } });
+    assert.equal(applied.isError, undefined);
+    assert.deepEqual((applied.structuredContent?.data as Record<string, unknown>).result, drawingAppliedStatus().result);
+    assert.equal(calls.some(call => ['apply_part_changes', 'execute_script', 'recompute_document'].includes(call.method)), false);
+  }
+});
+
+test('出图拒绝Pad/属性/模板路径/未知字段或多个源，schema失败时零RPC', async t => {
+  const { client, calls } = await session(t, 'chat');
+  const args = { document: 'NeutralDocument', objects: ['NeutralPart'], operation: 'create_drawing' };
+  for (const input of [{ ...args, objects: [] }, { ...args, objects: ['NeutralPart', 'OtherPart'] },
+    { ...args, objects: ['part/path'] }, { ...args, objects: ['x'.repeat(65)] },
+    { ...args, document: 'x\u200by' }, { ...args, values: { NeutralPart: { PartName: 'Neutral name' } } },
+    ...['body', 'lengthMm', 'length', 'template', 'page', 'confirmed', 'approved', 'native_confirmation', 'unknown']
+      .map(key => ({ ...args, [key]: true }))]) {
+    const result = await client.callTool({ name: 'prepare_part_changes', arguments: input });
+    assert.equal(result.isError, true, JSON.stringify(input));
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('旧或畸形出图能力零派发；错误source预览拒绝且不自动重发', async t => {
+  const { client, calls, state } = await session(t, 'chat');
+  const args = { document: 'NeutralDocument', objects: ['NeutralPart'], operation: 'create_drawing' };
+  for (const capability of [undefined, null, {}, { ...PFT_DRAWING_CAPABILITY, projection_verification: 'verified' }]) {
+    state.drawingCapability = capability;
+    const before = calls.length;
+    const result = await client.callTool({ name: 'prepare_part_changes', arguments: args });
+    assert.equal(result.isError, true);
+    assert.deepEqual(calls.slice(before).map(row => row.method), ['get_status']);
+  }
+  state.drawingCapability = PFT_DRAWING_CAPABILITY;
+  state.drawingPreview = params => ({ ...drawingPreviewResult(params), design_request: { source: 'OtherPart', page: 'NeutralPage' } });
+  const before = calls.length;
+  const result = await client.callTool({ name: 'prepare_part_changes', arguments: args });
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.slice(before).map(row => row.method), ['get_status', 'prepare_part_changes']);
+});
+
+
+const dimensionToken = 'neutral_mcp_dimension_confirmation01';
+const dimensionArgs = { document: 'NeutralDocument', operation: 'add_drawing_dimensions', page: 'NeutralPage', view: 'NeutralFront',
+  dimensions: [{ edge: 'Edge0', kind: 'Distance', xMm: 0, yMm: 10 }, { edge: 'Edge4', kind: 'Diameter', xMm: 20, yMm: 30 }] };
+function dimensionPreviewResult(params: Record<string, unknown>): Record<string, unknown> {
+  const items = params.dimensions as Record<string, unknown>[];
+  return { document: params.docName, operation: 'add_drawing_dimensions', token: dimensionToken, state: 'prepared', can_apply: true,
+    expires_at: '2030-01-01T00:00:00Z', ttl_seconds: 300, changed_count: items.length,
+    rows: items.map((item, i) => ({ object: 'NeutralDimension' + i, field: 'TechDraw dimension', old: null,
+      new: i ? 80. : 600., status: 'change', ...item, value_mm: i ? 80. : 600., source: 'native_cached_projected_geometry',
+      note: 'Native cached geometry mm; view relative paper mm offsets; manual review required.' })),
+    requires_confirmation: true, saves_document: false, storage: 'memory_only',
+    design_request: { page: (params.objectNames as string[])[0], view: params.viewName, dimensions: items } };
+}
+function dimensionAppliedStatus(): Record<string, unknown> {
+  return { ...approvalStatus(dimensionToken, 'applied'), document: dimensionArgs.document, operation: dimensionArgs.operation,
+    changed_count: 2, native_confirmation: true, result: { changed_count: 2, saves_document: false, design_result: {
+      kind: 'drawing_dimensions', page: dimensionArgs.page, view: dimensionArgs.view,
+      dimensions: dimensionArgs.dimensions.map(({ edge, kind, xMm, yMm }, i) => ({ name: 'NeutralDimension' + i,
+        edge, kind, x_mm: xMm, y_mm: yMm, value_mm: i ? 80. : 600. })),
+      measurement_verification: 'native_reference_and_value_checked', projection_verification: 'not_checked', manual_review_required: true } } };
+}
+
+test('full/chat尺寸复用25/19工具，双cap可发现且明确预览/原生状态，无apply和脚本', async t => {
+  for (const scope of ['full', 'chat'] as const) {
+    const { client, calls, state } = await session(t, scope);
+    assert.equal((await client.listTools()).tools.length, scope === 'full' ? 25 : 19);
+    const capabilities = (await client.callTool({ name: 'get_capabilities', arguments: {} })).structuredContent!;
+    assert.deepEqual(capabilities.drawing_dimensions, PFT_DRAWING_DIMENSIONS_CAPABILITY);
+    assert.deepEqual(capabilities.drawing_references, PFT_DRAWING_REFERENCES_CAPABILITY);
+    assert.equal(calls.length, 0);
+    state.drawingDimensionsCapability = PFT_DRAWING_DIMENSIONS_CAPABILITY;
+    const preview = await client.callTool({ name: 'prepare_part_changes', arguments: dimensionArgs });
+    assert.equal(preview.isError, undefined);
+    assert.deepEqual(calls.at(-1), { method: 'prepare_part_changes', params: { docName: dimensionArgs.document,
+      objectNames: [dimensionArgs.page], viewName: dimensionArgs.view, operation: dimensionArgs.operation,
+      dimensions: dimensionArgs.dimensions.map(({ edge, kind, xMm, yMm }) => ({ edge, kind, x_mm: xMm, y_mm: yMm })) } });
+    state.partApproval = () => ({ ...approvalStatus(dimensionToken), document: dimensionArgs.document,
+      operation: dimensionArgs.operation, changed_count: 2 });
+    const pending = await client.callTool({ name: 'request_part_change_approval', arguments: { token: dimensionToken } });
+    assert.equal(pending.isError, undefined);
+    assert.equal((pending.structuredContent?.data as Record<string, unknown>).state, 'awaiting_confirmation');
+    state.partApproval = dimensionAppliedStatus;
+    const applied = await client.callTool({ name: 'get_part_change_status', arguments: { token: dimensionToken } });
+    assert.equal(applied.isError, undefined);
+    assert.deepEqual((applied.structuredContent?.data as Record<string, unknown>).result, dimensionAppliedStatus().result);
+    assert.equal(calls.some(call => ['apply_part_changes', 'execute_script', 'recompute_document'].includes(call.method)), false);
+  }
+});
+
+test('尺寸输入边界在SDK schema拒绝，旧cap零派发且损坏预览不会重试', async t => {
+  const { client, calls, state } = await session(t, 'chat');
+  for (const args of [{ ...dimensionArgs, objects: ['NeutralPage'] }, { ...dimensionArgs, values: {} },
+    { ...dimensionArgs, confirmed: true }, { ...dimensionArgs, dimensions: [] },
+    { ...dimensionArgs, dimensions: [dimensionArgs.dimensions[0], dimensionArgs.dimensions[0]] },
+    { ...dimensionArgs, dimensions: [{ edge: 'Edge2048', kind: 'Distance', xMm: 0, yMm: 0 }] },
+    { ...dimensionArgs, dimensions: [{ edge: 'Edge0', kind: 'Distance', xMm: 1001, yMm: 0 }] }]) {
+    assert.equal((await client.callTool({ name: 'prepare_part_changes', arguments: args })).isError, true);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await client.callTool({ name: 'prepare_part_changes', arguments: dimensionArgs })).isError, true);
+  assert.deepEqual(calls.map(call => call.method), ['get_status']);
+  state.drawingDimensionsCapability = PFT_DRAWING_DIMENSIONS_CAPABILITY;
+  state.dimensionPreview = params => ({ ...dimensionPreviewResult(params), design_request: {
+    page: 'OtherPage', view: dimensionArgs.view, dimensions: params.dimensions } });
+  const before = calls.length;
+  assert.equal((await client.callTool({ name: 'prepare_part_changes', arguments: dimensionArgs })).isError, true);
+  assert.deepEqual(calls.slice(before).map(call => call.method), ['get_status', 'prepare_part_changes']);
+});
+
+test('投影引用窗口须view及新cap；旧无view图页摘要保留原派发', async t => {
+  const { client, calls } = await session(t, 'chat');
+  assert.equal((await client.callTool({ name: 'inspect_drawing_page', arguments: { document: 'NeutralDocument', page: 'NeutralPage', offset: 0 } })).isError, true);
+  assert.equal(calls.length, 0);
+  const read = await client.callTool({ name: 'inspect_drawing_page', arguments: { document: 'NeutralDocument', page: 'NeutralPage', view: 'NeutralFront', offset: 0, limit: 6 } });
+  assert.equal(read.isError, true);
+  assert.deepEqual(calls.map(call => call.method), ['get_status']);
+  const before = calls.length;
+  const legacy = await client.callTool({ name: 'inspect_drawing_page', arguments: { document: 'NeutralDocument', page: 'NeutralPage' } });
+  assert.equal(legacy.isError, undefined);
+  assert.deepEqual(calls.slice(before), [{ method: 'get_status', params: {} }, { method: 'inspect_drawing_page', params: { docName: 'NeutralDocument', pageName: 'NeutralPage' } }]);
 });

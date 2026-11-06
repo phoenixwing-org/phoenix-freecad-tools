@@ -1,11 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isAbsolute, resolve } from 'node:path';
 import type { PftDeskConfig } from './adapters/pft-desk-client.js';
+import { pftReadMcpSettings } from './pft-mcp-settings.js';
+import { pftResolveInstanceDirectory } from './pft-instance-registry.js';
+
+type PftConnectionSource = {
+  source: 'environment' | 'user_config' | 'default';
+  config_path: string | null;
+  preferred_port: number;
+};
+export type PftConnectionConfiguration = PftConnectionSource & ({
+  version: 1; scope: 'single_bridge'; target_url: string; discovery_supported: false;
+} | {
+  version: 2; scope: 'instance_discovery'; target_url: null; discovery_supported: true;
+  runtime_directory: string;
+});
 
 export interface Config {
   freecadUrl: string;
+  connectionConfiguration?: PftConnectionConfiguration;
+  instanceDiscovery?: { runtimeDirectory: string };
   timeoutMs: number;
-  toolScope?: 'full' | 'chat';
+  toolScope?: 'full' | 'chat' | 'worker';
   desk?: PftDeskConfig;
   deskChatReads?: boolean;
 }
@@ -41,6 +57,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (toolScope !== 'full' && toolScope !== 'chat') {
     throw new Error('PHOENIX_FREECAD_TOOL_SCOPE 仅允许 full 或 chat');
   }
+  const workerScope = env.PHOENIX_FREECAD_SCOPE;
+  if (workerScope !== undefined && workerScope !== 'worker') throw new Error('PHOENIX_FREECAD_SCOPE 仅允许 worker');
   const desk = deskConfig(env);
   const deskChatFlag = env.PHOENIX_DESK_CHAT_READS;
   if (deskChatFlag !== undefined && deskChatFlag !== '0' && deskChatFlag !== '1') {
@@ -54,6 +72,35 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(deskChatFlag === undefined ? {} : { deskChatReads: deskChatFlag === '1' }),
     freecadUrl: localUrl(env.PHOENIX_FREECAD_URL ?? 'http://127.0.0.1:9876/', 'PHOENIX_FREECAD_URL'),
     timeoutMs,
-    toolScope,
+    toolScope: workerScope === 'worker' ? 'worker' : toolScope,
   };
+}
+
+/** Startup I/O is explicit. An explicit URL remains fixed and never reads shared settings. */
+export async function loadConfig(env: NodeJS.ProcessEnv = process.env,
+  options: Parameters<typeof pftReadMcpSettings>[0] = {}): Promise<Config> {
+  const config = readConfig(env);
+  if (env.PHOENIX_FREECAD_URL !== undefined) {
+    return { ...config, connectionConfiguration: { version: 1, scope: 'single_bridge',
+      source: 'environment', config_path: null, preferred_port: Number(new URL(config.freecadUrl).port || 80),
+      target_url: config.freecadUrl, discovery_supported: false } };
+  }
+  const shared = await pftReadMcpSettings({ ...options, env });
+  const url = `http://127.0.0.1:${shared.preferredPort}/`;
+  if (shared.settings.schema_version === 2 && shared.settings.discovery.enabled) {
+    if (config.toolScope === 'chat' || config.toolScope === 'worker') {
+      throw new Error('聊天和工作进程须配置明确的 FreeCAD 地址，不支持自动发现。');
+    }
+    const runtimeDirectory = pftResolveInstanceDirectory({
+      ...(options.home === undefined ? {} : { home: options.home }),
+      ...(options.platform === undefined ? {} : { platform: options.platform }), env,
+    });
+    return { ...config, freecadUrl: url, instanceDiscovery: { runtimeDirectory },
+      connectionConfiguration: { version: 2, scope: 'instance_discovery',
+        source: shared.source, config_path: shared.configPath, preferred_port: shared.preferredPort,
+        target_url: null, discovery_supported: true, runtime_directory: runtimeDirectory } };
+  }
+  return { ...config, freecadUrl: url, connectionConfiguration: { version: 1, scope: 'single_bridge',
+    source: shared.source, config_path: shared.configPath, preferred_port: shared.preferredPort,
+    target_url: url, discovery_supported: false } };
 }

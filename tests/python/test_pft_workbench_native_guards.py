@@ -2,6 +2,7 @@
 """FreeCAD 1.1 native return types, exercised only with synthetic Python objects."""
 import types
 import unittest
+from test_pft_workbench_tools import bind_transaction_api
 from unittest.mock import patch
 
 import test_pft_business as fixtures
@@ -191,6 +192,7 @@ class PreviewApplyGuardTests(unittest.TestCase):
         documents = {self.doc.Name: self.doc, self.source_doc.Name: self.source_doc}
         self.app = types.SimpleNamespace(ActiveDocument=self.doc, getActiveTransaction=lambda: self.doc.active_transaction,
             getDocument=documents.get, listDocuments=lambda: documents, ParamGet=lambda path: self.prefs)
+        bind_transaction_api(self.app, self.doc)
         self.gui_doc = types.SimpleNamespace(getInEdit=lambda: None)
         self.gui = types.SimpleNamespace(getDocument=lambda name: self.gui_doc)
         self.params = {"docName": self.doc.Name, "objectNames": [self.target.Name], "operation": operation}
@@ -337,6 +339,7 @@ class SynchronousWriteGuardTests(unittest.TestCase):
         self.app = types.SimpleNamespace(ActiveDocument=self.document,
             getActiveTransaction=lambda: self.document.active_transaction,
             listDocuments=lambda: documents, ParamGet=lambda path: self.prefs)
+        bind_transaction_api(self.app, self.document)
         self.gui = types.SimpleNamespace(getDocument=lambda name: types.SimpleNamespace(getInEdit=lambda: None))
         self.trace = []
         for obj in (self.first, self.second):

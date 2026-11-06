@@ -630,7 +630,7 @@ class PftDocumentPanelTests(unittest.TestCase):
         self.widgets.click("PhoenixTools_DocumentRefresh")
         self.assertTrue(toggle.isChecked())
         self.assertTrue(self.widgets.named("PhoenixTools_DocumentTargetSection").visible)
-        self.assertEqual(toggle.text, "对象范围（已选 2 / 3）")
+        self.assertEqual(toggle.text, "对象范围（已选 1 / 3）")
         combo = self.widgets.named("PhoenixTools_DocumentSelector")
         combo.setCurrentIndex(next(i for i, row in enumerate(combo.rows) if row[1] == "Second"))
         self.assertTrue(toggle.isChecked())
@@ -640,6 +640,94 @@ class PftDocumentPanelTests(unittest.TestCase):
         self.assertFalse(toggle.isChecked())
         self.assertEqual(toggle.text, "对象范围（已选 1 / 1）")
         self.assertIs(self.app.ActiveDocument, self.doc)
+
+    def test_refresh_keeps_manual_scope_and_reads_latest_selected_data_once(self):
+        self.show()
+        self.widgets.named("PhoenixDocumentTarget_Body").setChecked(False)
+        self.widgets.named("PhoenixDocumentTarget_Pad").setChecked(True)
+        self.pad.Label = "Updated in-memory feature"
+        self.pad.shape.BoundBox.XLength = 87
+        extra = PftObject(self.doc, "Extra")
+        before = (self.body.reads, self.pad.reads, extra.reads)
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read:
+            self.widgets.click("PhoenixTools_DocumentRefresh")
+        read.assert_called_once()
+        self.assertEqual(read.call_args.kwargs["target_names"], ["Pad"])
+        self.assertEqual((self.body.reads, self.pad.reads, extra.reads), (before[0], before[1] + 1, before[2]))
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Body").isChecked())
+        self.assertTrue(self.widgets.named("PhoenixDocumentTarget_Pad").isChecked())
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Extra").isChecked())
+        self.assertIn("Pad | Updated in-memory feature | 87", self.widgets.named("PhoenixTools_DocumentDimensions").toPlainText())
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentTargets").rows, 3)
+        self.assertEqual(self.gui.Selection.records, [])
+        self.assertIs(self.app.ActiveDocument, self.doc)
+
+    def test_refresh_preserves_all_unchecked_even_with_new_recommended_objects(self):
+        self.show()
+        self.widgets.named("PhoenixDocumentTarget_Body").setChecked(False)
+        extra = PftObject(self.doc, "Extra")
+        before = (self.body.reads, self.pad.reads, extra.reads)
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read:
+            self.widgets.click("PhoenixTools_DocumentRefresh")
+        read.assert_called_once()
+        self.assertEqual(read.call_args.kwargs["target_names"], [])
+        self.assertEqual((self.body.reads, self.pad.reads, extra.reads), before)
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentTargetToggle").text, "对象范围（已选 0 / 3）")
+        self.assertIn("未选择尺寸对象。", self.widgets.named("PhoenixTools_DocumentDimensions").toPlainText())
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Extra").isChecked())
+
+    def test_refresh_removes_deleted_targets_without_selecting_their_container(self):
+        self.show()
+        self.widgets.named("PhoenixDocumentTarget_Body").setChecked(False)
+        self.widgets.named("PhoenixDocumentTarget_Pad").setChecked(True)
+        self.doc.Objects.remove(self.pad)
+        self.body.Group, self.body.Tip = [], None
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read:
+            self.widgets.click("PhoenixTools_DocumentRefresh")
+        read.assert_called_once()
+        self.assertEqual(read.call_args.kwargs["target_names"], [])
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentTargets").rows, 1)
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Body").isChecked())
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentTargetToggle").text, "对象范围（已选 0 / 1）")
+
+    def test_refresh_does_not_transfer_a_check_to_a_same_named_replacement_object(self):
+        self.show()
+        self.widgets.named("PhoenixDocumentTarget_Body").setChecked(False)
+        self.widgets.named("PhoenixDocumentTarget_Pad").setChecked(True)
+        self.doc.Objects.remove(self.pad)
+        replacement = PftObject(self.doc, "Pad", "PartDesign::Pad")
+        self.body.Group, self.body.Tip = [replacement], replacement
+        self.widgets.click("PhoenixTools_DocumentRefresh")
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Pad").isChecked())
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Body").isChecked())
+        self.assertEqual(replacement.reads, 0)
+
+    def test_actual_document_switch_uses_recommended_scope_instead_of_old_checks(self):
+        second = PftDoc("Second")
+        PftObject(second, "OtherBody", "PartDesign::Body")
+        self.app.documents[second.Name] = second
+        self.show()
+        self.widgets.named("PhoenixDocumentTarget_Body").setChecked(False)
+        self.widgets.named("PhoenixDocumentTarget_Pad").setChecked(True)
+        combo = self.widgets.named("PhoenixTools_DocumentSelector")
+        combo.setCurrentIndex(next(index for index, row in enumerate(combo.rows) if row[1] == second.Name))
+        self.assertTrue(self.widgets.named("PhoenixDocumentTarget_OtherBody").isChecked())
+        combo.setCurrentIndex(next(index for index, row in enumerate(combo.rows) if row[1] == self.doc.Name))
+        self.assertTrue(self.widgets.named("PhoenixDocumentTarget_Body").isChecked())
+        self.assertFalse(self.widgets.named("PhoenixDocumentTarget_Pad").isChecked())
+        self.assertIs(self.app.ActiveDocument, self.doc)
+        self.assertEqual(self.gui.Selection.records, [])
+
+    def test_refresh_same_named_reopened_document_does_not_inherit_empty_scope(self):
+        self.show()
+        self.widgets.named("PhoenixDocumentTarget_Body").setChecked(False)
+        replacement = PftDoc(self.doc.Name)
+        PftObject(replacement, "Body", "PartDesign::Body")
+        self.app.documents[self.doc.Name] = replacement
+        self.app.ActiveDocument = replacement
+        self.widgets.click("PhoenixTools_DocumentRefresh")
+        self.assertTrue(self.widgets.named("PhoenixDocumentTarget_Body").isChecked())
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentTargetToggle").text, "对象范围（已选 1 / 1）")
 
     def test_empty_state_initially_expands_and_english_summary_translates_before_format(self):
         self.app.ActiveDocument = None; self.app.documents = {}
@@ -722,6 +810,64 @@ class PftDocumentPanelTests(unittest.TestCase):
         self.assertEqual(self.widgets.messages[-1][0], "information")
         self.assertEqual(self.widgets.save_options, {"options": 4})
         self.assertEqual(list(self.folder.glob(".pft-markdown-*")), [])
+    def test_markdown_export_freezes_filename_and_text_before_nested_dialog_changes(self):
+        self.doc.FileName, self.doc.Label = "/fixture/First.FCStd", "First frozen document"
+        second = PftDoc("Second")
+        PftObject(second, "SecondBody", "PartDesign::Body")
+        self.app.documents[second.Name] = second
+        self.show()
+        original = self.widgets.named("PhoenixTools_DocumentMarkdown").toPlainText()
+        target = self.folder / "First.md"
+        def choose(*args, **_kwargs):
+            self.assertEqual(args[2], "/fixture/First.md")
+            self.app.ActiveDocument = second
+            self.widgets.named("PhoenixTools_DocumentFollowTimer").timeout.emit()
+            self.widgets.named("PhoenixDocumentTarget_SecondBody").setChecked(False)
+            with patch.object(views, "_choose_property_names", return_value=(True, ())):
+                self.widgets.click("PhoenixTools_DocumentPropertySettings")
+            return str(target), "Markdown"
+        def confirm(_core, _widgets, _parent, plan):
+            self.assertEqual(plan["text"], original)
+            self.doc.Label = "Changed after export began"
+            self.app.ActiveDocument = self.doc
+            self.widgets.named("PhoenixTools_DocumentFollowTimer").timeout.emit()
+            self.widgets.click("PhoenixTools_DocumentRefresh")
+            self.assertNotEqual(self.widgets.named("PhoenixTools_DocumentMarkdown").toPlainText(), original)
+            return True
+        with patch.object(self.widgets.QFileDialog, "getSaveFileName", side_effect=choose), \
+             patch.object(views, "_preview_export", side_effect=confirm), \
+             patch.object(views.tools, "write_markdown_export") as write:
+            self.widgets.click("PhoenixTools_DocumentExportAction")
+        write.assert_called_once()
+        self.assertEqual(write.call_args.args[0]["path"], str(target))
+        self.assertEqual(write.call_args.args[0]["text"], original)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.gui.Selection.records, [])
+
+    def test_markdown_export_keeps_frozen_text_when_same_named_document_reopens(self):
+        self.doc.FileName, self.doc.Label = "/fixture/First.FCStd", "Original source"
+        self.show()
+        original = self.widgets.named("PhoenixTools_DocumentMarkdown").toPlainText()
+        target = self.folder / "First.md"
+        replacement = PftDoc(self.doc.Name)
+        replacement.Label = "Replacement source"
+        PftObject(replacement, "ReplacementBody", "PartDesign::Body")
+        def choose(*args, **_kwargs):
+            self.assertEqual(args[2], "/fixture/First.md")
+            self.app.documents[self.doc.Name] = replacement
+            self.app.ActiveDocument = replacement
+            self.widgets.named("PhoenixTools_DocumentFollowTimer").timeout.emit()
+            return str(target), "Markdown"
+        with patch.object(self.widgets.QFileDialog, "getSaveFileName", side_effect=choose), \
+             patch.object(views, "_preview_export", return_value=True) as preview, \
+             patch.object(views.tools, "write_markdown_export") as write:
+            self.widgets.click("PhoenixTools_DocumentExportAction")
+        self.assertEqual(preview.call_args.args[-1]["text"], original)
+        write.assert_called_once()
+        self.assertEqual(write.call_args.args[0]["text"], original)
+        self.assertNotIn("Replacement source", write.call_args.args[0]["text"])
+        self.assertFalse(target.exists())
+
     def test_changed_file_during_confirmation_is_retained_and_reports_safe_error(self):
         self.show()
         target = self.folder / "notes.md"; target.write_text("old")

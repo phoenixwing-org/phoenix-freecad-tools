@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import threading
@@ -44,6 +45,60 @@ class ScriptTests(unittest.TestCase):
         with self.assertRaises(Error) as conflict:
             runtime.claim({'code':'pass','requestId':'test-script'},Error)
         self.assertEqual(conflict.exception.code,'REQUEST_ID_CONFLICT')
+
+    def test_json_safe_integer_boundaries_and_signed64_values_remain_exact(self):
+        safe = 2 ** 53 - 1
+        for value in (0, -1, 1, safe, -safe):
+            with self.subTest(value=value):
+                result = runtime._json_value(value)
+                self.assertIs(type(result), int)
+                self.assertEqual(result, value)
+        for value in (False, True):
+            self.assertIs(runtime._json_value(value), value)
+        for value in (2 ** 53, -(2 ** 53), 2 ** 53 + 1, -(2 ** 53 + 1),
+                      -(2 ** 63), 2 ** 63 - 1, 10 ** 100 - 1, -(10 ** 100 - 1)):
+            with self.subTest(value=value):
+                result = runtime._json_value(value)
+                self.assertEqual(result, {'kind': 'integer', 'decimal': str(value), 'truncated': False})
+                self.assertEqual(int(result['decimal']), value)
+                self.assertEqual(json.loads(json.dumps(result, allow_nan=False)), result)
+
+    def test_execute_status_and_identical_replay_keep_nested_integer_encoding(self):
+        values = [False, True, 0, 2 ** 53 - 1, -(2 ** 53 - 1),
+                  2 ** 53, -(2 ** 53), 2 ** 53 + 1, -(2 ** 53 + 1),
+                  -(2 ** 63), 2 ** 63 - 1, 10 ** 100, -(10 ** 100)]
+        expected = [False, True, 0, 2 ** 53 - 1, -(2 ** 53 - 1)]
+        expected += [{'kind': 'integer', 'decimal': str(value), 'truncated': False}
+                     for value in values[5:11]]
+        expected += [{'type': 'large_integer'}, {'type': 'large_integer'}]
+        code = 'App.counter += 1\nresult = {"nested": {"values": ' + repr(values) + '}}'
+        request = 'exact-integer-result'
+        result = self.run_script(code, request)
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(result['result'], {'nested': {'values': expected}})
+        self.assertIs(result['result']['nested']['values'][0], False)
+        self.assertIs(result['result']['nested']['values'][1], True)
+        self.assertIs(type(result['result']['nested']['values'][2]), int)
+        self.assertEqual(result['stdout'], '')
+        self.assertFalse(result['output_truncated'])
+        self.assertEqual(runtime.status(request, Error), result)
+        fresh, repeated = runtime.claim({'code': code, 'requestId': request}, Error)
+        self.assertFalse(fresh)
+        self.assertEqual(repeated, result)
+        self.assertEqual(runtime.status(request, Error), repeated)
+        self.assertEqual(self.app.counter, 1)
+
+    def test_extreme_integer_summary_and_existing_nested_budgets_are_unchanged(self):
+        for value in (10 ** 100, -(10 ** 100), 10 ** 100 + 1, -(10 ** 100 + 1), 2 ** 20000):
+            with self.subTest(bits=value.bit_length(), negative=value < 0):
+                self.assertEqual(runtime._json_value(value), {'type': 'large_integer'})
+        value = 2 ** 53 + 1
+        self.assertEqual(runtime._json_value(value, depth=6), {'truncated': True})
+        self.assertEqual(runtime._json_value(value, budget=[0]), {'truncated': True})
+        bounded = runtime._json_value([value] * 101)
+        self.assertEqual(len(bounded), 100)
+        self.assertTrue(all(item == {'kind': 'integer', 'decimal': str(value), 'truncated': False}
+                            for item in bounded))
 
     def test_failure_retains_state_and_does_not_claim_rollback(self):
         with self.assertRaises(Error) as failure:

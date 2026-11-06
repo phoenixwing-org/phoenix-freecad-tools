@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import types
 import unittest
+from test_pft_workbench_tools import bind_transaction_api
 from unittest.mock import patch
 
 import test_pft_part_approval as approval_fixtures
@@ -196,6 +197,7 @@ class RealPadCoreApprovalTests(unittest.TestCase):
         opened = {document.Name: document}
         app = types.SimpleNamespace(ActiveDocument=document, getDocument=opened.get,
             listDocuments=lambda: dict(opened), getActiveTransaction=lambda: document.active_transaction)
+        bind_transaction_api(app, document, counter_name="next_transaction")
         gui = types.SimpleNamespace(getDocument=lambda name: types.SimpleNamespace(getInEdit=lambda: None))
         presenters = []
         def present(*args):

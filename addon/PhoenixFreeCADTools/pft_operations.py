@@ -54,7 +54,7 @@ _KEYS = {
     "get_selection": {"docName"},
     "measure_geometry": {"docName", "objectName", "subelement"},
     "list_drawing_pages": {"docName"},
-    "inspect_drawing_page": {"docName", "pageName"},
+    "inspect_drawing_page": {"docName", "pageName", "viewName", "offset", "limit"},
     "view_standard": {"docName", "view", "fit"},
     "set_selection": {"docName", "objectNames"},
     "set_visibility": {"docName", "objectNames", "visible"},
@@ -81,12 +81,23 @@ def validate(method, params, ErrorClass):
         revision = params["expectedRevision"]
         if type(revision) is not int or not 0 <= revision <= 9007199254740991 or "expectedDocumentInstanceToken" not in params:
             raise ErrorClass("INVALID_PARAMS", "expectedRevision 必须是安全非负整数，并同时提供 expectedDocumentInstanceToken。")
-    for field in ("docName", "objectName", "pageName"):
+    for field in ("docName", "objectName", "pageName", "viewName"):
         if field in params and not _valid_name(params[field]):
             raise ErrorClass("INVALID_PARAMS", field + " 必须是非空内部名称，不能含控制字符。")
     required = "objectName" if method in {"get_object_info", "measure_geometry"} else "pageName" if method == "inspect_drawing_page" else None
     if required and required not in params:
         raise ErrorClass("INVALID_PARAMS", "缺少 " + required + "。")
+    if method == "inspect_drawing_page":
+        if "viewName" not in params and any(key in params for key in ("offset", "limit")):
+            raise ErrorClass("INVALID_PARAMS", "投影边索引窗口必须明确 viewName。")
+        if "viewName" in params:
+            if any(unicodedata.category(char) == "Cf" for char in params["viewName"]):
+                raise ErrorClass("INVALID_PARAMS", "viewName 不能含格式控制字符。")
+            helper = _drawing_references_helper(ErrorClass)
+            try:
+                helper.validate_window(params.get("offset", 0), params.get("limit", helper.DEFAULT_LIMIT))
+            except helper.PftDrawingReferencesError as error:
+                raise ErrorClass(error.code, error.message) from None
     if method in {"set_selection", "set_visibility", "recompute_document"} and "docName" not in params:
         raise ErrorClass("INVALID_PARAMS", "修改操作必须明确指定 docName。")
     if method in {"set_selection", "set_visibility"}:
@@ -151,6 +162,30 @@ def _document_state_helper():
         except Exception:
             sys.modules.pop(name, None)
             raise
+    return helper
+
+
+def _drawing_references_helper(ErrorClass):
+    """Load the stateless reference helper only from this installed addon."""
+    filename = Path(__file__).resolve().with_name("pft_drawing_references.py")
+    name = "pft_drawing_references"
+    helper = sys.modules.get(name)
+    if helper is not None:
+        try:
+            if Path(getattr(helper, "__file__", None)).resolve() != filename:
+                raise ValueError()
+        except Exception:
+            raise ErrorClass("STATE_SOURCE_MISMATCH", "投影引用模块来源冲突，请重新加载一致的插件。") from None
+    else:
+        spec = importlib.util.spec_from_file_location(name, filename)
+        helper = importlib.util.module_from_spec(spec)
+        sys.modules[name] = helper
+        try:
+            spec.loader.exec_module(helper)
+        except Exception:
+            if sys.modules.get(name) is helper:
+                sys.modules.pop(name, None)
+            raise ErrorClass("STATE_SOURCE_MISMATCH", "投影引用模块无法从一致插件来源加载。") from None
     return helper
 
 
@@ -720,7 +755,7 @@ def perform(method, params, App, Gui, ErrorClass):
     document_name = _name(document)
     result = {"document": document_name, "source_kind": "live_freecad_gui"}
     read_state = None
-    if method in _CONSISTENT_READS:
+    if method in _CONSISTENT_READS or method == "inspect_drawing_page" and "viewName" in params:
         try:
             state_helper = _document_state_helper()
         except PftDocumentStateSourceMismatch:
@@ -846,8 +881,23 @@ def perform(method, params, App, Gui, ErrorClass):
             content["sources"] = sources[:MAX_ITEMS]
             content["sources_truncated"] = len(sources) > MAX_ITEMS
             content["properties"] = {field: serializer.value(_attr(obj, field)) for field in ("X", "Y", "Scale", "Direction", "Rotation", "Type", "FormatSpec", "MeasureType") if _attr(obj, field) is not None}
+            if ("viewName" in params and type(content["TypeId"]) is str
+                    and content["TypeId"] == "TechDraw::DrawViewDimension"):
+                if (obj.Document is not document or not _valid_name(content["Name"])
+                        or document.getObject(content["Name"]) is not obj):
+                    raise ErrorClass("DRAWING_REFERENCES_UNSUPPORTED", "缓存尺寸只读取当前目标文档中注册的同一原生对象。")
+                content["native_measurement"] = _drawing_references_helper(ErrorClass).read_dimension(obj)
             contents.append(content)
         result.update({"page": _page_summary(page, document, serializer), "template": template_data, "objects": contents, "total": len(views), "truncated": len(views) > MAX_ITEMS, "recomputed": False, "references_validated": False})
+        if "viewName" in params:
+            helper = _drawing_references_helper(ErrorClass)
+            view = _object(document, params["viewName"], ErrorClass)
+            try:
+                result["projected_geometry"] = helper.read_window(document, page, view,
+                    params.get("offset", 0), params.get("limit", helper.DEFAULT_LIMIT))
+            except helper.PftDrawingReferencesError as error:
+                raise ErrorClass(error.code, error.message) from None
+            serializer.warn("投影边编号从0开始；只查询所请求缓存索引，不推断边总数、可见性或异步投影已完成。")
         serializer.warn("仅返回原生来源和现有状态；没有修复、重算或证明所有尺寸引用有效。")
     elif method == "view_standard":
         fit = params.get("fit", False)

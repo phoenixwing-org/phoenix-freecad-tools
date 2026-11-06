@@ -107,12 +107,24 @@ class _PftOwnedTransaction:
         self.verify_commit = verify_commit
         self.transaction_id = None
         self.abort_attempted = False
+        self.closure_attempted = False
+        self.document_materialized = False
+        self.write_attempted = False
 
     def _read(self):
         getter = getattr(self.app, "getActiveTransaction", None)
         if not callable(getter):
             raise RuntimeError("transaction getter unavailable")
         return getter()
+
+    def _pending(self):
+        try:
+            pending = self.document.HasPendingTransaction
+        except Exception:
+            pending = None
+        if type(pending) is not bool:
+            raise PftWriteError("PART_TRANSACTION_STATE_UNAVAILABLE", "无法读取当前事务状态，未执行新的写入或关闭操作。")
+        return pending
 
     def open(self, title):
         _ensure_main_thread()
@@ -122,35 +134,64 @@ class _PftOwnedTransaction:
             raise PftWriteError("PART_TRANSACTION_STATE_UNAVAILABLE", "无法读取当前事务状态，未执行新的写入或关闭操作。") from None
         if current is not None:
             raise PftWriteError("PART_TRANSACTION_CHANGED", "工具事务归属已变化或无法确认，未提交或取消其他操作。")
+        if not all(callable(getattr(self.app, name, None)) for name in
+                   ("setActiveTransaction", "closeActiveTransaction")):
+            raise PftWriteError("PART_TRANSACTION_STATE_UNAVAILABLE", "无法读取当前事务状态，未执行新的写入或关闭操作。")
         try:
-            self.document.openTransaction(title)
-            transaction_id = _valid_transaction_id(self._read())
-            if transaction_id is None:
+            # Document.openTransaction is void. Only the application allocation
+            # result binds this operation if an opening callback replaces it.
+            transaction_id = self.app.setActiveTransaction(title)
+            if type(transaction_id) is not int or transaction_id <= 0:
                 raise RuntimeError("opened transaction identity unavailable")
         except Exception:
             # Native open may already have changed state; no known ID means
             # neither abort nor another open is authorized.
             raise PftWriteError("PART_TRANSACTION_OPEN_UNVERIFIED", "工具事务开启结果无法确认；未写入对象或尝试关闭未知事务，请检查当前事务。") from None
         self.transaction_id = transaction_id
+        self.check()
 
-    def check(self):
-        try:
-            owned = self.transaction_id is not None and _valid_transaction_id(self._read()) == self.transaction_id
-        except Exception:
-            owned = False
-        if not owned:
+    def check(self, require_pending=False, before_write=False):
+        # A native application ID precedes materialization of the document's
+        # undo transaction. Only the initial, untouched phase permits false.
+        def identity():
+            try:
+                return self.transaction_id is not None and _valid_transaction_id(self._read()) == self.transaction_id
+            except Exception:
+                return False
+        if not identity():
             raise PftWriteError("PART_TRANSACTION_CHANGED", "工具事务归属已变化或无法确认，未提交或取消其他操作。")
+        if type(require_pending) is not bool or type(before_write) is not bool:
+            raise PftWriteError("PART_TRANSACTION_STATE_UNAVAILABLE", "无法读取当前事务状态，未执行新的写入或关闭操作。")
+        pending = self._pending()
+        if not identity():
+            raise PftWriteError("PART_TRANSACTION_CHANGED", "工具事务归属已变化或无法确认，未提交或取消其他操作。")
+        if require_pending:
+            self.write_attempted = True
+        if not pending and (self.document_materialized or self.write_attempted):
+            raise PftWriteError("PART_TRANSACTION_CHANGED", "工具事务归属已变化或无法确认，未提交或取消其他操作。")
+        if pending:
+            self.document_materialized = True
+        if before_write:
+            # Set before invoking a native setter: it may partly write, run a
+            # callback and raise before the next ownership check is reached.
+            self.write_attempted = True
+        return pending
 
     def abort_once(self):
-        if self.abort_attempted:
+        if self.closure_attempted:
             return
         # Lock the one-shot intent before inspecting ownership. A failed read
         # must not permit an outer exception handler to retry after the Link
         # preference scope has already restored DuplicateLabels.
-        self.abort_attempted = True
+        self.abort_attempted = self.closure_attempted = True
+        close = getattr(self.app, "closeActiveTransaction", None)
         self.check()
         try:
-            self.document.abortTransaction()
+            if not callable(close):
+                raise RuntimeError("native transaction close unavailable")
+            # Bind both materialized and still-empty application transactions
+            # to the exact allocated ID. Never fall back to document closure.
+            close(True, self.transaction_id)
             current = self._read()
         except Exception:
             raise PftWriteError("PART_ROLLBACK_UNVERIFIED", "工具事务回滚结果无法确认，请检查当前修改与撤销记录；不会重复关闭。") from None
@@ -159,32 +200,48 @@ class _PftOwnedTransaction:
             if current_id is not None and current_id != self.transaction_id:
                 raise PftWriteError("PART_TRANSACTION_CHANGED", "工具事务归属已变化或无法确认，未提交或取消其他操作。")
             raise PftWriteError("PART_ROLLBACK_UNVERIFIED", "工具事务回滚结果无法确认，请检查当前修改与撤销记录；不会重复关闭。")
-        self.transaction_id = None
+        try:
+            restored = self._pending() is False and self._read() is None
+        except Exception:
+            restored = False
+        if not restored:
+            raise PftWriteError("PART_ROLLBACK_UNVERIFIED", "工具事务回滚结果无法确认，请检查当前修改与撤销记录；不会重复关闭。")
         if self.verify_rollback is not None:
             try:
                 self.verify_rollback()
+                if not (self._pending() is False and self._read() is None):
+                    raise RuntimeError("transaction changed during rollback verification")
             except Exception:
                 raise PftWriteError("PART_ROLLBACK_UNVERIFIED", "工具事务回滚结果无法确认，请检查当前修改与撤销记录；不会重复关闭。") from None
+        self.transaction_id = None
 
     def commit(self):
+        if self.closure_attempted:
+            raise PftWriteError("PART_COMMIT_UNVERIFIED", "工具事务提交关闭无法确认，请检查当前修改与撤销记录；不会再次提交或回滚。")
+        self.closure_attempted = True
+        close = getattr(self.app, "closeActiveTransaction", None)
         self.check()
         try:
-            self.document.commitTransaction()
-            closed = self._read() is None
+            if not callable(close):
+                raise RuntimeError("native transaction close unavailable")
+            close(False, self.transaction_id)
+            closed = self._read() is None and self._pending() is False and self._read() is None
         except Exception:
             closed = False
         if not closed:
             # A raising commit may already have committed. Re-closing or aborting
             # is unsafe even if a later read happens to show the old ID.
             raise PftWriteError("PART_COMMIT_UNVERIFIED", "工具事务提交关闭无法确认，请检查当前修改与撤销记录；不会再次提交或回滚。") from None
-        self.transaction_id = None
         if self.verify_commit is not None:
             try:
                 self.verify_commit()
+                if not (self._pending() is False and self._read() is None):
+                    raise RuntimeError("transaction changed during commit verification")
             except Exception:
                 # The native transaction has already closed. Target verification
                 # failure cannot justify aborting or committing anything else.
                 raise PftWriteError("PART_COMMIT_UNVERIFIED", "工具事务提交后目标状态与预览不一致或无法验证，请检查当前修改与撤销记录；不会再次提交或回滚。") from None
+        self.transaction_id = None
 
 
 def _run_transaction(app, document, title, write, verify_rollback=None, verify_commit=None):
@@ -211,9 +268,9 @@ def _write_labels_exact(rows, check_owner):
     for row in rows:
         check_owner()
         _ensure_writable(row["object"], "Label")
-        check_owner()
+        check_owner(before_write=True)
         setattr(row["object"], "Label", row["new_label"])
-        check_owner()
+        check_owner(require_pending=True)
     _verify_label_targets(rows)
 
 
@@ -339,8 +396,9 @@ def apply_properties(app, gui, document, objects, snapshots, selected_fields, va
             check_owner()
             obj, field = row["object"], row["field"]
             if row["missing"]:
+                check_owner(before_write=True)
                 obj.addProperty("App::PropertyString", field, BOM_GROUP, descriptions[field])
-                check_owner()
+                check_owner(require_pending=True)
                 try:
                     current = _property_snapshot(obj, field)
                     created = current["exists"] and current["type"] == row["expected_type"]
@@ -349,9 +407,9 @@ def apply_properties(app, gui, document, objects, snapshots, selected_fields, va
                 if not created:
                     raise PftWriteError("PART_PROPERTY_VERIFY_FAILED", "新增属性的存在或类型与预览不一致，未写入请求值。")
             _ensure_writable(obj, field)
-            check_owner()
+            check_owner(before_write=True)
             setattr(obj, field, row["new_value"])
-            check_owner()
+            check_owner(require_pending=True)
         verify_values()
         check_owner()
     if changed:

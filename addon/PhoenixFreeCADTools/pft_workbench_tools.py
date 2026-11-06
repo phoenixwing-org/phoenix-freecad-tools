@@ -96,6 +96,16 @@ def show_document_tools_dialog():
     return show(app, gui)
 
 
+def show_help_dialog():
+    import FreeCADGui as gui
+    from pft_help import PftHelpError
+    from pft_help_views import show_help_dialog as show
+    try:
+        return show(gui)
+    except PftHelpError as error:
+        raise PftToolError(str(error)) from None
+
+
 def run_axonometric_fit(app=None, gui=None):
     """Change only the active 3D camera, using native APIs even during editing."""
     if app is None:

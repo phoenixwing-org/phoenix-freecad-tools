@@ -40,6 +40,7 @@ TRANSLATABLE_STRINGS = (
     "当前 FreeCAD 未提供所需原生命令。", "原生视图操作失败。", "外观预览已失效或变化，请重新预览。",
     "此外观预览已结束，请重新预览。", "外观快照在预览后变化，未执行修改。", "外观写入结果与预览不一致，事务已取消。",
     "外观修改失败，事务已取消。", "外观回滚无法确认，请检查当前外观与撤销记录。", "Phoenix：修改所选对象外观",
+    "外观事务已变化，未接管或取消其他操作。", "外观事务提交后未确认关闭，请检查当前外观与撤销记录。",
     "外观诊断超过256个材质或128 KiB限制，请减少目标。",
     "透明度诊断仅报告当前原生属性，不证明最终屏幕显示效果。",
     "Link 的本地 ShapeMaterial 与来源材质分别报告；未启用覆盖时，本地值可能尚未生效。",
@@ -438,6 +439,44 @@ def prepare_appearance(app, gui, document_name, object_names, action, transparen
     return public
 
 
+def _active_transaction_id(app):
+    try:
+        active = app.getActiveTransaction()
+        if (isinstance(active, (tuple, list)) and len(active) == 2
+                and type(active[1]) is int and active[1] > 0):
+            return active[1]
+    except Exception:
+        pass
+    raise _error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。") from None
+
+
+def _check_transaction_owner(app, document, transaction_id):
+    try:
+        if (type(transaction_id) is int and transaction_id > 0
+                and _active_transaction_id(app) == transaction_id
+                and app.getDocument(document.Name) is document):
+            return
+    except Exception:
+        pass
+    raise _error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。") from None
+
+
+def _check_transaction_closed(app, transaction_id, *, committing=False):
+    code, message = (("VISUAL_COMMIT_UNVERIFIED", "外观事务提交后未确认关闭，请检查当前外观与撤销记录。")
+                     if committing else
+                     ("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。"))
+    try:
+        active = app.getActiveTransaction()
+    except Exception:
+        raise _error(code, message) from None
+    if active is None:
+        return
+    if (isinstance(active, (tuple, list)) and len(active) == 2
+            and type(active[1]) is int and active[1] == transaction_id):
+        raise _error(code, message) from None
+    raise _error("VISUAL_TRANSACTION_CHANGED", "外观事务已变化，未接管或取消其他操作。") from None
+
+
 def apply_appearance(app, gui, plan):
     """Recheck the full plan and apply only its intended materials atomically."""
     _main_thread()
@@ -450,42 +489,82 @@ def apply_appearance(app, gui, plan):
         return {**record["summary"], "replayed": True}
     if record["state"] != "pending":
         raise _error("VISUAL_PLAN_USED", "此外观预览已结束，请重新预览。")
-    document, _ = _context(app, gui, plan["document"], undo=True)
-    if document is not record["document"]:
-        raise _error("VISUAL_SNAPSHOT_CHANGED", "外观快照在预览后变化，未执行修改。")
-    entries = record["entries"]
-    _check_before(document, entries)
-    opened = False
+    # Consume the capability before any native getter can synchronously call
+    # back into apply, including preflight and a post-commit callback.
+    record["state"] = "applying"
     try:
-        document.openTransaction("Phoenix：修改所选对象外观")
-        opened = True
-        for entry in entries:
-            view, after = entry["view"], entry["after"]
-            if after["kind"] == "shape":
-                view.ShapeAppearance = [_clone(app, values)[0] for values in after["ShapeAppearance"]]
-            else:
-                view.ShapeMaterial = _clone(app, after["ShapeMaterial"])[0]
-                view.OverrideMaterial = True
-        if app.ActiveDocument is not document or app.getDocument(plan["document"]) is not document:
-            raise ValueError()
-        for entry in entries:
-            if not _identical(document, entry) or _target_snapshot(document, entry["object"]) != entry["after"]:
-                raise ValueError()
-            source = entry.get("source")
-            if source is not None and (not _identical(document, source)
-                    or _link_source(document, entry["object"]) is not source["object"]
-                    or _ordinary_snapshot(source["object"]) != source["before"]):
-                raise ValueError()
-        document.commitTransaction()
-        opened = False
+        document, _ = _context(app, gui, plan["document"], undo=True)
+        if document is not record["document"]:
+            raise _error("VISUAL_SNAPSHOT_CHANGED", "外观快照在预览后变化，未执行修改。")
+        if not all(callable(getattr(app, name, None)) for name in ("setActiveTransaction", "closeActiveTransaction")):
+            raise _error("DOCUMENT_STATE_UNKNOWN", "无法确认文档事务或编辑状态，未执行视觉操作。")
+        entries = record["entries"]
+        _check_before(document, entries)
+    except PftVisualToolsError:
+        record["state"] = "failed"
+        raise
     except Exception:
         record["state"] = "failed"
-        if opened:
-            try:
-                document.abortTransaction()
-                _check_before(document, entries)
-            except Exception:
-                raise _error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。") from None
+        raise _error("DOCUMENT_STATE_UNKNOWN", "无法确认文档事务或编辑状态，未执行视觉操作。") from None
+    opened, commit_started, transaction_id = False, False, None
+    expected = [{**entry, "before": entry["after"]} for entry in entries]
+    try:
+        # FreeCAD 1.1 Document.openTransaction returns None. Bind ownership to
+        # the ID returned by the official application API, never whichever ID
+        # happens to be current after an opening callback has run.
+        transaction_id = app.setActiveTransaction("Phoenix：修改所选对象外观")
+        opened = True
+        _check_transaction_owner(app, document, transaction_id)
+        for entry in entries:
+            view, after = entry["view"], entry["after"]
+            _check_transaction_owner(app, document, transaction_id)
+            if after["kind"] == "shape":
+                materials = [_clone(app, values)[0] for values in after["ShapeAppearance"]]
+                _check_transaction_owner(app, document, transaction_id)
+                view.ShapeAppearance = materials
+                _check_transaction_owner(app, document, transaction_id)
+            else:
+                material = _clone(app, after["ShapeMaterial"])[0]
+                _check_transaction_owner(app, document, transaction_id)
+                view.ShapeMaterial = material
+                _check_transaction_owner(app, document, transaction_id)
+                view.OverrideMaterial = True
+                _check_transaction_owner(app, document, transaction_id)
+        if app.ActiveDocument is not document or app.getDocument(plan["document"]) is not document:
+            raise ValueError()
+        _check_before(document, expected)
+        _check_transaction_owner(app, document, transaction_id)
+        # Once native commit has been called its closure may be uncertain. No
+        # later failure authorizes another commit or abort, even for the old ID.
+        commit_started = True
+        app.closeActiveTransaction(False, transaction_id)
+        _check_transaction_closed(app, transaction_id, committing=True)
+        if app.getDocument(plan["document"]) is not document:
+            raise ValueError()
+        _check_before(document, expected)
+        _check_transaction_closed(app, transaction_id, committing=True)
+        opened = False
+    except Exception as error:
+        record["state"] = "failed"
+        if commit_started:
+            if isinstance(error, PftVisualToolsError) and error.code in ("VISUAL_TRANSACTION_CHANGED", "VISUAL_COMMIT_UNVERIFIED"):
+                raise error from None
+            raise _error("VISUAL_COMMIT_UNVERIFIED", "外观事务提交后未确认关闭，请检查当前外观与撤销记录。") from None
+        if not opened:
+            # An exception from setActiveTransaction does not prove no edit.
+            raise _error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。") from None
+        _check_transaction_owner(app, document, transaction_id)
+        try:
+            app.closeActiveTransaction(True, transaction_id)
+            _check_transaction_closed(app, transaction_id)
+            _check_before(document, entries)
+            _check_transaction_closed(app, transaction_id)
+        except PftVisualToolsError as rollback_error:
+            if rollback_error.code == "VISUAL_TRANSACTION_CHANGED":
+                raise rollback_error from None
+            raise _error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。") from None
+        except Exception:
+            raise _error("VISUAL_ROLLBACK_UNVERIFIED", "外观回滚无法确认，请检查当前外观与撤销记录。") from None
         raise _error("VISUAL_APPLY_FAILED", "外观修改失败，事务已取消。") from None
     record["state"] = "applied"
     record["summary"] = {"document": plan["document"], "action": plan["action"], "target_count": len(entries),

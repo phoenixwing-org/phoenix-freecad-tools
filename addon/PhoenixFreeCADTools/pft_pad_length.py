@@ -121,15 +121,16 @@ def _refs(values, registry):
     return tuple(_ref(v, registry) for v in _seq(values, 256))
 
 
-def _context(app, gui, document, controller, owned=None):
+def _context(app, gui, document, controller, owned=None, written=False):
     controller._ensure_main_thread()
     if owned is None:
         controller._ensure_idle(app, gui, document)
     else:
         owned()
+        pending = document.HasPendingTransaction
         if (app.ActiveDocument is not document or gui.getDocument(document.Name).getInEdit() is not None
-                or document.HasPendingTransaction is not True or type(document.UndoMode) is not int
-                or document.UndoMode <= 0):
+                or type(pending) is not bool or written and pending is not True
+                or type(document.UndoMode) is not int or document.UndoMode <= 0):
             _fail()
     opened = app.listDocuments()
     if (type(opened) is not dict or len(opened) != 1 or opened.get(document.Name) is not document
@@ -287,16 +288,19 @@ def _material(material):
 
 
 def _attachment(sketch):
-    # The standard engine enum/class relationship is defined by AttachExtension.
-    # BaseAttacher*/BaseAttachment/BaseMap* dynamic properties are rejected by
-    # the registry, before a getter could materialize base attachment state.
+    # FreeCAD 1.1's new Part2DObject installs the Plane engine but leaves
+    # AttachExtension's enum at its default Engine 3D until document restore.
+    # Keep that exact native pair, as well as the synchronized standard pairs;
+    # neither value is normalized or written. The unattached checks below and
+    # registry rejection of dynamic Base attachment properties still apply.
     engines = {'Attacher::AttachEngine3D': 'Engine 3D',
                'Attacher::AttachEnginePlane': 'Engine Plane',
                'Attacher::AttachEngineLine': 'Engine Line',
                'Attacher::AttachEnginePoint': 'Engine Point'}
     engine_type = _text(sketch.AttacherType)
     engine = _text(sketch.AttacherEngine)
-    if engines.get(engine_type) != engine:
+    if (engines.get(engine_type) != engine
+            and (engine_type, engine) != ('Attacher::AttachEnginePlane', 'Engine 3D')):
         _fail()
     if sketch.MapMode != 'Deactivated' or not _empty_link(sketch.AttachmentSupport):
         _fail()
@@ -310,7 +314,13 @@ def _configuration(registry):
     if any(v != _IDENTITY for v in placements) or _vector(pad.Direction) != (0.0, 0.0, 1.0):
         _fail()
     attachment = _attachment(sketch)
-    if any(_seq(getattr(sketch, k), 100) for k in ('ExternalGeometry', 'ExternalTypes', 'Exports')):
+    if any(_seq(getattr(sketch, k), 100) for k in ('ExternalGeometry', 'Exports')):
+        _fail()
+    # ExternalTypes is per-reference type metadata, not a list of references.
+    # FreeCAD 1.1's ({}) scalar initialization leaves a single integer zero
+    # even with no external geometry. Preserve that exact value in the snapshot.
+    external_types = _seq(sketch.ExternalTypes, 1)
+    if external_types and (type(external_types[0]) is not int or external_types[0] != 0):
         _fail()
     profile = pad.Profile
     if (type(profile) not in (tuple, list) or len(profile) != 2 or profile[0] is not sketch
@@ -335,7 +345,8 @@ def _configuration(registry):
     if materials[0][0][0] != materials[1][0][0] or pad.SuppressedShape.isNull() is not True:
         _fail()
     return (placements, strings, flags, zeros, _quantity(pad.Length2, _LENGTH),
-            materials, _geometry(sketch), _writable_length(pad), _bool(body.AllowCompound), attachment)
+            materials, _geometry(sketch), _writable_length(pad), _bool(body.AllowCompound),
+            tuple(external_types), attachment)
 
 
 def _completion(registry):
@@ -357,8 +368,8 @@ def _shape(shape):
     return (volume, bounds, dimensions)
 
 
-def _capture(app, gui, document, body_name, pad, controller, owned=None, complete=True):
-    _context(app, gui, document, controller, owned)
+def _capture(app, gui, document, body_name, pad, controller, owned=None, complete=True, written=False):
+    _context(app, gui, document, controller, owned, written)
     registry = _registry(document, body_name, pad)
     graph, configuration = _graph(registry), _configuration(registry)
     length = _quantity(pad.Length, _LENGTH)
@@ -368,7 +379,7 @@ def _capture(app, gui, document, body_name, pad, controller, owned=None, complet
         _completion(registry)
     shapes = tuple(v.Shape for v in (pad, registry['body']))
     geometry = tuple(_shape(v) for v in shapes)
-    _context(app, gui, document, controller, owned)
+    _context(app, gui, document, controller, owned, written)
     fresh = _registry(document, body_name, pad)
     if (len(registry['objects']) != len(fresh['objects'])
             or any(a is not b for a, b in zip(registry['objects'], fresh['objects'])) or graph != _graph(fresh)):
@@ -395,7 +406,7 @@ def prepare_plan(app, gui, document, body_name, pad, length_mm, controller):
                'status': 'unchanged' if requested == snapshot[2] else 'change', 'reason': '',
                'source': 'cached_native_typed_snapshot',
                'note': ('首个且最终 Pad；%d 个闭图原生对象；仅线段、圆和圆弧的 typed 草图；'
-                        '未附着草图、标准一致附着引擎（附着配置完整绑定），无动态 Base 附着；'
+                        '未附着草图、受支持原生附着引擎（附着字段原值完整绑定），无动态 Base 附着；'
                         'Body/Sketch/Pad 为 identity Placement，方向 +Z；'
                         '确认后一次长度 setter、一次局部重算，反验单实体与长度体积比例；'
                         '不隔离未知原生回调，不自动保存。') % len(registry['objects'])}
@@ -409,7 +420,8 @@ def prepare_plan(app, gui, document, body_name, pad, length_mm, controller):
 def _verify(app, gui, document, plan, controller, owned=None, expected_length=None, complete=True):
     if plan['document'] is not document:
         _fail('PAD_PLAN_STALE')
-    registry, current, shapes = _capture(app, gui, document, plan['body_name'], plan['pad'], controller, owned, complete)
+    registry, current, shapes = _capture(app, gui, document, plan['body_name'], plan['pad'], controller,
+                                         owned, complete, written=expected_length is not None)
     if (registry['body'] is not plan['body'] or len(registry['objects']) != len(plan['objects'])
             or any(a is not b for a, b in zip(registry['objects'], plan['objects']))):
         _fail('PAD_PLAN_STALE')
@@ -489,9 +501,9 @@ def _apply_plan(app, gui, document, plan, controller):
             _verify(app, gui, document, plan, controller, check_owner)
             check_owner()
             _writable_length(plan['pad'])
-            check_owner()
+            check_owner(before_write=True)
             plan['pad'].Length = plan['length_mm']
-            check_owner()
+            check_owner(require_pending=True)
             _verify(app, gui, document, plan, controller, check_owner, plan['length_mm'], False)
             check_owner()
             try:

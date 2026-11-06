@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import types
 import unittest
+from test_pft_workbench_tools import bind_transaction_api
 from unittest.mock import patch
 
 import test_pft_business as fixtures
@@ -233,6 +234,7 @@ class PadLengthTests(unittest.TestCase):
         self.app.getDocument = lambda name: self.app.documents.get(name)
         self.app.listDocuments = lambda: dict(self.app.documents)
         self.app.getActiveTransaction = lambda: self.doc.active_transaction
+        bind_transaction_api(self.app, self.doc, counter_name="next_transaction")
         self.edit = None
         self.gui = NS(getDocument=lambda name: NS(getInEdit=lambda: self.edit))
 
@@ -248,6 +250,99 @@ class PadLengthTests(unittest.TestCase):
         if code: self.assertEqual(caught.exception.code, code)
         self.assertNotIn('synthetic native details', str(caught.exception))
         return caught.exception.code
+
+    def install_lazy_transactions(self, materialize=True):
+        original = self.doc.openTransaction
+        def open_lazy(title):
+            original(title)
+            self.doc.HasPendingTransaction = False
+        self.doc.openTransaction = open_lazy
+        self.empty_closes = []
+        native_close = self.app.closeActiveTransaction
+        def close_empty(abort, transaction_id):
+            if self.doc.HasPendingTransaction:
+                return native_close(abort, transaction_id)
+            self.assertIs(abort, True)
+            self.assertEqual(transaction_id, self.doc.active_transaction[1])
+            self.empty_closes.append((abort, transaction_id))
+            self.doc.events.append('abort_empty')
+            self.doc.active_transaction = None
+        self.app.closeActiveTransaction = close_empty
+        if materialize:
+            self.doc.pad.setter_hook = lambda: setattr(self.doc, 'HasPendingTransaction', True)
+
+    def test_native_lazy_transaction_allows_first_setter_then_requires_materialization(self):
+        plan, _ = self.prepare()
+        self.install_lazy_transactions()
+        result = self.apply(plan)
+        self.assertEqual((self.doc.pad.Length.Value, result['length_mm']), (8., 8.))
+        self.assertEqual(self.doc.events, ['open', 'commit'])
+        self.assertEqual(self.empty_closes, [])
+        self.assertEqual(len(self.doc.recompute_calls), 1)
+        self.assertFalse(self.doc.HasPendingTransaction)
+
+    def test_lazy_prewrite_validation_failure_only_closes_empty_application_id(self):
+        plan, _ = self.prepare()
+        self.install_lazy_transactions()
+        original = pad_tools._writable_length
+        def unavailable(pad):
+            if self.doc.active_transaction is not None:
+                raise pad_tools.PftPadLengthError('PAD_UNSUPPORTED')
+            return original(pad)
+        with patch.object(pad_tools, '_writable_length', side_effect=unavailable):
+            self.assert_error(lambda: self.apply(plan), 'PAD_UNSUPPORTED')
+        self.assertEqual(self.doc.events, ['open', 'abort_empty'])
+        self.assertEqual(len(self.empty_closes), 1)
+        self.assertEqual(self.doc.pad.writes, [])
+        self.assertEqual(self.doc.recompute_calls, [])
+        self.assertEqual(self.doc.pad.Length.Value, 5.)
+
+    def test_lazy_setter_without_undo_materialization_never_continues_or_closes(self):
+        plan, _ = self.prepare()
+        self.install_lazy_transactions(materialize=False)
+        with self.assertRaises(controller.PftWriteError) as caught: self.apply(plan)
+        self.assertEqual(caught.exception.code, 'PART_TRANSACTION_CHANGED')
+        self.assertEqual(self.doc.events, ['open'])
+        self.assertEqual(self.empty_closes, [])
+        self.assertEqual(self.doc.recompute_calls, [])
+        self.assertEqual(self.doc.pad.Length.Value, 8.)  # Explicitly uncertain; no false rollback claim.
+        self.assertIsNotNone(self.doc.active_transaction)
+
+    def test_setter_internal_materialize_then_pending_loss_return_or_raise_never_closes(self):
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                self.setup_model(); plan, _ = self.prepare()
+                self.install_lazy_transactions(materialize=False)
+                def callback():
+                    self.doc.HasPendingTransaction = True
+                    self.doc.HasPendingTransaction = False
+                    if raises: raise RuntimeError('synthetic callback failure')
+                self.doc.pad.setter_hook = callback
+                with self.assertRaises(controller.PftWriteError) as caught: self.apply(plan)
+                self.assertEqual(caught.exception.code, 'PART_TRANSACTION_CHANGED')
+                self.assertEqual(self.doc.events, ['open'])
+                self.assertEqual(self.empty_closes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_materialized_pending_loss_during_recompute_is_not_empty_abort(self):
+        plan, _ = self.prepare()
+        self.install_lazy_transactions()
+        self.doc.recompute_hook = lambda: setattr(self.doc, 'HasPendingTransaction', False)
+        with self.assertRaises(controller.PftWriteError) as caught: self.apply(plan)
+        self.assertEqual(caught.exception.code, 'PART_TRANSACTION_CHANGED')
+        self.assertEqual(self.doc.events, ['open'])
+        self.assertEqual(self.empty_closes, [])
+        self.assertEqual(len(self.doc.recompute_calls), 1)
+
+    def test_unknown_pending_after_setter_stops_without_closing_either_scope(self):
+        plan, _ = self.prepare()
+        self.install_lazy_transactions(materialize=False)
+        self.doc.pad.setter_hook = lambda: setattr(self.doc, 'HasPendingTransaction', None)
+        with self.assertRaises(controller.PftWriteError) as caught: self.apply(plan)
+        self.assertEqual(caught.exception.code, 'PART_TRANSACTION_STATE_UNAVAILABLE')
+        self.assertEqual(self.doc.events, ['open'])
+        self.assertEqual(self.empty_closes, [])
+        self.assertEqual(self.doc.recompute_calls, [])
 
     def test_capability_exact_and_public_preview_has_no_native_refs(self):
         plan, rows = self.prepare()
@@ -616,7 +711,7 @@ class PadLengthTests(unittest.TestCase):
             self.doc.sketch.AttacherEngine = 'Engine ' + label
             self.prepare()
         for mutate in (lambda: setattr(self.doc.sketch, 'AttacherType', 'SyntheticUnknownEngine'),
-                       lambda: setattr(self.doc.sketch, 'AttacherEngine', 'Engine 3D'),
+                       lambda: setattr(self.doc.sketch, 'AttacherEngine', 'Engine Line'),
                        lambda: setattr(self.doc.sketch, 'MapReversed', 0),
                        lambda: setattr(self.doc.sketch, 'MapPathParameter', True),
                        lambda: setattr(self.doc.sketch, 'MapPathParameter', math.nan),
@@ -632,6 +727,200 @@ class PadLengthTests(unittest.TestCase):
             self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
             self.assertNotIn(key, self.doc.sketch.__dict__)
             self.assertEqual(self.doc.events, [])
+
+    def test_native_unattached_plane_default_enum_prepares_without_engine_rewrite(self):
+        self.doc.sketch.AttacherEngine = 'Engine 3D'
+        plan, rows = self.prepare()
+        self.assertEqual(plan['snapshot'][1][-1][:2],
+                         ('Attacher::AttachEnginePlane', 'Engine 3D'))
+        self.assertEqual((self.doc.sketch.AttacherType, self.doc.sketch.AttacherEngine),
+                         ('Attacher::AttachEnginePlane', 'Engine 3D'))
+        self.assertEqual(rows[0]['status'], 'change')
+        self.assertEqual(self.doc.events, [])
+        self.assertEqual(self.doc.pad.writes, [])
+        self.assertEqual(self.doc.recompute_calls, [])
+        result = self.apply(plan)
+        self.assertEqual(result['length_mm'], 8.)
+        self.assertEqual((self.doc.sketch.AttacherType, self.doc.sketch.AttacherEngine),
+                         ('Attacher::AttachEnginePlane', 'Engine 3D'))
+        self.assertEqual(self.doc.pad.writes, [8.])
+        self.assertEqual(len(self.doc.recompute_calls), 1)
+        self.assertEqual(self.doc.events, ['open', 'commit'])
+
+    def test_supported_engine_field_changes_make_the_exact_preview_stale(self):
+        changes = (('Engine 3D', 'AttacherType', 'Attacher::AttachEngine3D'),
+                   ('Engine 3D', 'AttacherEngine', 'Engine Plane'),
+                   ('Engine Plane', 'AttacherEngine', 'Engine 3D'))
+        for initial_engine, field, value in changes:
+            with self.subTest(initial_engine=initial_engine, field=field):
+                self.setup_model()
+                self.doc.sketch.AttacherEngine = initial_engine
+                plan, _ = self.prepare()
+                setattr(self.doc.sketch, field, value)
+                # Each new pair is independently supported; only the exact
+                # preview binding rejects this change, before any transaction.
+                self.prepare()
+                self.assert_error(lambda: self.apply(plan), 'PAD_PLAN_STALE')
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_only_native_default_and_standard_engine_pairs_are_supported(self):
+        engines = ('3D', 'Plane', 'Line', 'Point')
+        for kind in engines:
+            for label in engines:
+                with self.subTest(kind=kind, label=label):
+                    self.setup_model()
+                    self.doc.sketch.AttacherType = 'Attacher::AttachEngine' + kind
+                    self.doc.sketch.AttacherEngine = 'Engine ' + label
+                    if kind == label or (kind, label) == ('Plane', '3D'):
+                        self.prepare()
+                    else:
+                        self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
+                    self.assertEqual(self.doc.events, [])
+                    self.assertEqual(self.doc.pad.writes, [])
+                    self.assertEqual(self.doc.recompute_calls, [])
+        for field, value in (('AttacherType', 'Attacher::AttachEngineUnknown'),
+                             ('AttacherEngine', 'Engine Unknown'),
+                             ('AttacherType', None), ('AttacherEngine', False)):
+            with self.subTest(field=field, value=value):
+                self.setup_model()
+                self.doc.sketch.AttacherEngine = 'Engine 3D'
+                setattr(self.doc.sketch, field, value)
+                self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_native_plane_default_still_rejects_attachment_and_dynamic_base(self):
+        mutations = (lambda: setattr(self.doc.sketch, 'MapMode', 'FlatFace'),
+                     lambda: setattr(self.doc.sketch, 'AttachmentSupport', (self.doc.origin, [])))
+        for mutate in mutations:
+            self.setup_model()
+            self.doc.sketch.AttacherEngine = 'Engine 3D'
+            mutate()
+            self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
+            self.assertEqual(self.doc.events, [])
+            self.assertEqual(self.doc.pad.writes, [])
+            self.assertEqual(self.doc.recompute_calls, [])
+        for key in ('BaseAttacherType', 'BaseAttacherEngine', 'BaseAttachment',
+                    'BaseMapMode', 'BaseMapReversed', 'BaseMapPathParameter'):
+            with self.subTest(key=key):
+                self.setup_model()
+                self.doc.sketch.AttacherEngine = 'Engine 3D'
+                self.doc.sketch.PropertiesList.append(key)
+                self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
+                self.assertNotIn(key, self.doc.sketch.__dict__)
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_empty_and_single_zero_external_type_metadata_prepare_without_writes(self):
+        for value in ([], [0]):
+            with self.subTest(value=value):
+                self.setup_model()
+                self.doc.sketch.ExternalTypes = value[:]
+                plan, rows = self.prepare()
+                self.assertEqual(plan['snapshot'][1][-2], tuple(value))
+                self.assertEqual(self.doc.sketch.ExternalTypes, value)
+                self.assertEqual(rows[0]['status'], 'change')
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_native_plane_and_single_zero_defaults_apply_once_without_normalization(self):
+        self.doc.sketch.AttacherEngine = 'Engine 3D'
+        self.doc.sketch.ExternalTypes = [0]
+        plan, _ = self.prepare()
+        self.assertEqual(plan['snapshot'][1][-2], (0,))
+        self.assertEqual(self.doc.events, [])
+        result = self.apply(plan)
+        self.assertEqual(result['length_mm'], 8.)
+        self.assertEqual(self.doc.sketch.ExternalTypes, [0])
+        self.assertEqual(self.doc.sketch.AttacherEngine, 'Engine 3D')
+        self.assertEqual(self.doc.pad.writes, [8.])
+        self.assertEqual(len(self.doc.recompute_calls), 1)
+        self.assertEqual(self.doc.events, ['open', 'commit'])
+
+    def test_external_type_metadata_default_transitions_make_preview_stale(self):
+        for before, after in (([], [0]), ([0], [])):
+            with self.subTest(before=before, after=after):
+                self.setup_model()
+                self.doc.sketch.ExternalTypes = before[:]
+                plan, _ = self.prepare()
+                # Mutate the same native-list facade in place: the plan must
+                # own a typed value snapshot rather than an alias to this list.
+                self.doc.sketch.ExternalTypes[:] = after
+                self.prepare()  # The new state itself is supported.
+                self.assertEqual(plan['snapshot'][1][-2], tuple(before))
+                self.assert_error(lambda: self.apply(plan), 'PAD_PLAN_STALE')
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_external_type_metadata_unknown_types_values_and_lengths_reject(self):
+        invalid = ([False], [True], [0.], ['0'], [None], [-1], [1], [2],
+                   [0, 0], [0, 1], [0] * 101, 0, False, None, '0', {}, {0})
+        for value in invalid:
+            with self.subTest(value=value):
+                self.setup_model()
+                self.doc.sketch.ExternalTypes = value
+                self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_single_zero_metadata_does_not_allow_external_geometry_or_exports(self):
+        for field in ('ExternalGeometry', 'Exports'):
+            with self.subTest(field=field):
+                self.setup_model()
+                self.doc.sketch.ExternalTypes = [0]
+                # Bind a reference to this iteration's own object, not a
+                # foreign-document fixture retained from the prior iteration.
+                value = [(self.doc.pad, [])] if field == 'ExternalGeometry' else [self.doc.pad]
+                setattr(self.doc.sketch, field, value)
+                self.assert_error(self.prepare, 'PAD_UNSUPPORTED')
+                self.assertEqual(self.doc.events, [])
+                self.assertEqual(self.doc.pad.writes, [])
+                self.assertEqual(self.doc.recompute_calls, [])
+
+    def test_external_type_metadata_change_during_write_rolls_back_exact_original(self):
+        for phase in ('setter', 'recompute'):
+            for before, after in (([], [0]), ([0], [])):
+                with self.subTest(phase=phase, before=before, after=after):
+                    self.setup_model()
+                    self.doc.sketch.ExternalTypes = before[:]
+                    plan, _ = self.prepare()
+                    def change_metadata():
+                        self.doc.sketch.ExternalTypes[:] = after
+                    if phase == 'setter':
+                        self.doc.pad.setter_hook = change_metadata
+                    else:
+                        self.doc.recompute_hook = change_metadata
+                    self.assert_error(lambda: self.apply(plan), 'PAD_PARAMETER_VERIFY_FAILED')
+                    self.assertEqual(self.doc.events, ['open', 'abort'])
+                    self.assertEqual(self.doc.pad.Length.Value, 5.)
+                    self.assertEqual(self.doc.sketch.ExternalTypes, before)
+                    self.assertEqual(len(self.doc.recompute_calls), 0 if phase == 'setter' else 1)
+
+    def test_native_plane_default_enum_change_during_write_rolls_back(self):
+        for phase in ('setter', 'recompute'):
+            with self.subTest(phase=phase):
+                self.setup_model()
+                self.doc.sketch.AttacherEngine = 'Engine 3D'
+                plan, _ = self.prepare()
+                def synchronize_enum():
+                    self.doc.sketch.AttacherEngine = 'Engine Plane'
+                if phase == 'setter':
+                    self.doc.pad.setter_hook = synchronize_enum
+                else:
+                    self.doc.recompute_hook = synchronize_enum
+                self.assert_error(lambda: self.apply(plan), 'PAD_PARAMETER_VERIFY_FAILED')
+                self.assertEqual(self.doc.events, ['open', 'abort'])
+                self.assertEqual(self.doc.pad.Length.Value, 5.)
+                self.assertEqual(self.doc.sketch.AttacherType, 'Attacher::AttachEnginePlane')
+                self.assertEqual(self.doc.sketch.AttacherEngine, 'Engine 3D')
+                self.assertEqual(len(self.doc.recompute_calls), 0 if phase == 'setter' else 1)
 
     def test_attachment_field_pollution_after_setter_or_recompute_rolls_back(self):
         mutations = (lambda: setattr(self.doc.sketch, 'MapReversed', True),

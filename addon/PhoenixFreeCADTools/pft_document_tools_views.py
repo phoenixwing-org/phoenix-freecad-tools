@@ -300,6 +300,7 @@ def show_document_tools_dialog(app, gui):
     layout.addLayout(_wrapping_button_row(widgets, buttons["information"], buttons["dimensions"]))
     layout.addLayout(_wrapping_button_row(widgets, buttons["markdown"], buttons["export"]))
     state = {"loading": False, "checks": {}, "snapshot": None, "snapshot_instance": None,
+             "target_document": None, "target_instances": {},
              "section_initialized": False, "property_names": None}
 
     def set_target_expanded(expanded):
@@ -349,7 +350,11 @@ def show_document_tools_dialog(app, gui):
 
     def display(snapshot):
         document = snapshot.get("document")
-        state["snapshot_instance"] = app.getDocument(document["Name"]) if document else None
+        instance = app.getDocument(document["Name"]) if document else None
+        if state["snapshot_instance"] is not None and instance is not state["snapshot_instance"]:
+            # A reopened document can reuse its Name; its predecessor's PNG is stale.
+            thumbnail.set_document(None, active=False)
+        state["snapshot_instance"] = instance
         state["snapshot"] = snapshot
         editors["information"].setPlainText(tools.format_information(snapshot, tr=tr))
         editors["dimensions"].setPlainText(tools.format_dimensions(snapshot, tr=tr))
@@ -371,14 +376,28 @@ def show_document_tools_dialog(app, gui):
             report(error)
             return False
 
-    def load_targets(*_args):
+    def load_targets(*_args, retained_scope=None):
         if state["loading"]:
             return
         try:
+            target_names = None
+            if retained_scope is not None:
+                document, targets = retained_scope
+                # Retain an explicit empty scope as well as checked objects.
+                # A same-named replacement is a new object, not a continuation
+                # of the user's earlier choice. Metadata lookups never read Shape.
+                current = app.ActiveDocument if documents.currentData() is None else app.getDocument(documents.currentData())
+                if current is document:
+                    target_names = [name for name, obj in targets if document.getObject(name) is obj]
             snapshot = tools.read_document_tools(app, gui, document_name=documents.currentData(),
-                                                 property_names=state["property_names"])
+                                                 target_names=target_names, property_names=state["property_names"])
+            document_info = snapshot.get("document")
+            target_document = app.getDocument(document_info["Name"]) if document_info else None
             state["loading"] = True
             state["checks"] = {}
+            state["target_document"] = target_document
+            state["target_instances"] = {candidate["Name"]: target_document.getObject(candidate["Name"])
+                                         for candidate in snapshot["candidates"]} if target_document is not None else {}
             table.setRowCount(len(snapshot["candidates"]))
             for index, candidate in enumerate(snapshot["candidates"]):
                 name = candidate["Name"]
@@ -403,6 +422,7 @@ def show_document_tools_dialog(app, gui):
             display(snapshot)
         except Exception as error:
             state["checks"] = {}
+            state["target_document"], state["target_instances"] = None, {}
             table.setRowCount(0)
             report(error)
         finally:
@@ -445,6 +465,10 @@ def show_document_tools_dialog(app, gui):
 
     def reload_documents(*_args, keep_targets=False):
         previous = documents.currentData()
+        # Freeze choices before rebuilding the combo/table. Refresh updates the
+        # current data once, without silently returning to the recommended scope.
+        retained_scope = (state["target_document"], tuple(
+            (name, state["target_instances"].get(name)) for name in selected()))
         state["loading"] = True
         documents.clear()
         documents.addItem(tr("（跟随活动文档）"), None)
@@ -467,7 +491,9 @@ def show_document_tools_dialog(app, gui):
                 and state["snapshot_instance"] is app.getDocument(desired)):
             update_thumbnail_scope(snapshot)
         else:
-            load_targets()
+            same_instance = (retained_scope[0] is not None and isinstance(desired, str)
+                             and app.getDocument(desired) is retained_scope[0])
+            load_targets(retained_scope=retained_scope if same_instance else None)
 
     def follow_active_document():
         try:
@@ -506,14 +532,18 @@ def show_document_tools_dialog(app, gui):
         try:
             options = _enum(widgets.QFileDialog, "Option", "DontConfirmOverwrite")
             args = {} if options is None else {"options": options}
+            # Native file dialogs and confirmation dialogs run nested event
+            # loops. The follow timer may refresh the panel meanwhile: keep this
+            # export's document-derived filename and exact Markdown together.
             default_filename = _export_filename(state["snapshot"]["document"], ".md")
+            markdown = editors["markdown"].toPlainText()
             choice = widgets.QFileDialog.getSaveFileName(dock, tr("导出 Markdown"), default_filename, tr("Markdown 文件 (*.md *.markdown)"), **args)
             filename = choice[0] if isinstance(choice, (list, tuple)) else choice
             if not filename:
                 return
             if not Path(str(filename)).suffix:
                 filename = str(filename) + ".md"
-            plan = tools.prepare_markdown_export(str(filename), editors["markdown"].toPlainText())
+            plan = tools.prepare_markdown_export(str(filename), markdown)
             if plan is None or not _preview_export(core, widgets, dock, plan):
                 return
             tools.write_markdown_export(plan, overwrite=plan["exists"])

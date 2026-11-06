@@ -4,6 +4,7 @@
 import hashlib
 import os
 from pathlib import Path
+import secrets
 import stat
 import struct
 import tempfile
@@ -173,9 +174,10 @@ def _stat_values(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _fingerprint(target):
+def _fingerprint(target, directory=None):
     try:
-        before = target.lstat()
+        before = (target.lstat() if directory is None else
+                  os.stat(target.name, dir_fd=directory, follow_symlinks=False))
     except FileNotFoundError:
         return None
     except OSError:
@@ -185,7 +187,9 @@ def _fingerprint(target):
     if before.st_size > PFT_MAX_PNG_BYTES:
         raise PftThumbnailError("EXPORT_TARGET_TOO_LARGE", "现有 PNG 文件超过4 MiB，未读取或覆盖。")
     try:
-        descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        descriptor = os.open(target if directory is None else target.name,
+                             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                             dir_fd=directory)
         with os.fdopen(descriptor, "rb") as stream:
             opened = os.fstat(stream.fileno())
             if _stat_values(before) != _stat_values(opened):
@@ -193,7 +197,9 @@ def _fingerprint(target):
             contents = stream.read(PFT_MAX_PNG_BYTES + 1)
             after = os.fstat(stream.fileno())
         if (len(contents) > PFT_MAX_PNG_BYTES or _stat_values(before) != _stat_values(opened)
-                or _stat_values(opened) != _stat_values(after) or _stat_values(after) != _stat_values(target.lstat())):
+                or _stat_values(opened) != _stat_values(after)
+                or _stat_values(after) != _stat_values(target.lstat() if directory is None else
+                    os.stat(target.name, dir_fd=directory, follow_symlinks=False))):
             raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
     except OSError:
         raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。") from None
@@ -211,8 +217,22 @@ def prepare_png_export(filename, image_data):
             "exists": fingerprint is not None, "_fingerprint": fingerprint, "_directories": directories}
 
 
+def _png_directory_fd_supported():
+    supported = {function.__name__ for function in os.supports_dir_fd}
+    return {"open", "stat", "link", "rename", "unlink"} <= supported
+
+
+def _create_png_stage(target, directory):
+    if directory is None:
+        return tempfile.mkstemp(prefix=".pft-thumbnail-", suffix=".tmp", dir=str(target.parent))
+    name = ".pft-thumbnail-" + secrets.token_hex(16) + ".tmp"
+    descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=directory)
+    return descriptor, name
+
+
 def write_png_export(plan, overwrite=False):
-    """Publish exactly the prepared sanitized bytes; new-file publication never replaces."""
+    """Publish frozen PNG bytes; bind creation, publication and cleanup to our directory."""
     if plan is None:
         return None
     if not isinstance(plan, dict) or not isinstance(plan.get("data"), bytes):
@@ -227,30 +247,67 @@ def write_png_export(plan, overwrite=False):
         raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
     if fingerprint is not None and overwrite is not True:
         raise PftThumbnailError("OVERWRITE_REQUIRED", "目标文件已存在，请明确确认覆盖。")
-    temporary = None
+    temporary, parent_descriptor, stage_identity = None, None, None
     try:
-        descriptor, temporary = tempfile.mkstemp(prefix=".pft-thumbnail-", suffix=".tmp", dir=str(target.parent))
-        with os.fdopen(descriptor, "wb") as stream:
+        if _png_directory_fd_supported():
+            parent_descriptor = os.open(str(target.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+            parent_info = os.fstat(parent_descriptor)
+            if directories and directories[-1][1:] != (parent_info.st_dev, parent_info.st_ino, parent_info.st_mode):
+                raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
+        descriptor, temporary = _create_png_stage(target, parent_descriptor)
+        with os.fdopen(descriptor, "w+b") as stream:
+            stage_info = os.fstat(stream.fileno())
+            stage_identity = (stage_info.st_dev, stage_info.st_ino)
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+            # Read our own descriptor, never a replacement named stage. A changed
+            # buffer cannot be published merely because its inode stayed the same.
+            stream.seek(0)
+            if stream.read(PFT_MAX_PNG_BYTES + 1) != data:
+                raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
         _, current_directories = _export_target(str(target))
-        if current_directories != directories or _fingerprint(target) != fingerprint:
+        staged = os.stat(temporary, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (current_directories != directories or _fingerprint(target, parent_descriptor) != fingerprint
+                or (staged.st_dev, staged.st_ino) != stage_identity or not stat.S_ISREG(staged.st_mode)):
             raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
-        if fingerprint is not None:
+        if parent_descriptor is not None:
+            if fingerprint is not None:
+                os.replace(temporary, target.name, src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor)
+            else:
+                os.link(temporary, target.name, src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor,
+                        follow_symlinks=False)
+        elif fingerprint is not None:
             os.replace(temporary, str(target))
         else:
             os.link(temporary, str(target))
+        # A late namespace change may already have published in the original
+        # directory. Report it without retrying or claiming the chosen path worked.
+        _, current_directories = _export_target(str(target))
+        published = _fingerprint(target, parent_descriptor)
+        if (current_directories != directories or published is None
+                or published[:2] != stage_identity or published[-1] != plan["digest"]):
+            raise PftThumbnailError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
         return str(target)
     except PftThumbnailError:
         raise
     except OSError:
         raise PftThumbnailError("EXPORT_FAILED", "PNG 导出失败；未保存 CAD 文档。") from None
     finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                raise PftThumbnailError("EXPORT_FAILED", "PNG 导出失败；未保存 CAD 文档。") from None
+        try:
+            if temporary is not None and stage_identity is not None:
+                try:
+                    info = os.stat(temporary, dir_fd=parent_descriptor, follow_symlinks=False)
+                    if (info.st_dev, info.st_ino) == stage_identity:
+                        os.unlink(temporary, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    raise PftThumbnailError("EXPORT_FAILED", "PNG 导出失败；未保存 CAD 文档。") from None
+        finally:
+            if parent_descriptor is not None:
+                try:
+                    os.close(parent_descriptor)
+                except OSError:
+                    raise PftThumbnailError("EXPORT_FAILED", "PNG 导出失败；未保存 CAD 文档。") from None

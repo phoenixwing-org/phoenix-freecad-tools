@@ -141,6 +141,7 @@ class WorkbenchToggleTests(unittest.TestCase):
             "pft_bridge": self.bridge,
             "pft_workbench_tools": types.SimpleNamespace(show_rename_dialog=lambda: None, show_properties_dialog=lambda: None, show_link_labels_dialog=lambda: None, show_desk_dialog=lambda: None, show_document_tools_dialog=lambda: None,
             show_chat_connection_dialog=lambda: None,
+            show_help_dialog=lambda: self.visual_calls.append("help"),
             run_axonometric_fit=lambda: self.visual_calls.append("axonometric_fit"),
             show_appearance_dialog=lambda: self.visual_calls.append("appearance"),
                 show_mcp_status_dialog=lambda snapshot: self.status_dialogs.append(snapshot), confirm_mcp_stop=confirm),
@@ -188,7 +189,7 @@ class WorkbenchToggleTests(unittest.TestCase):
 
     def test_toolbar_orders_status_toggle_settings_before_unchanged_business_tools(self):
         workbench, command, action = self.initialize()
-        toolbar = ["PhoenixTools_MCPStatus", "PhoenixTools_ToggleMCP", "PhoenixTools_Settings", "PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance", "PhoenixTools_NormalizeNames", "PhoenixTools_SyncLinkLabels", "PhoenixTools_EditPartProperties", "PhoenixTools_DeskTools", "PhoenixTools_ChatConnection"]
+        toolbar = ["PhoenixTools_MCPStatus", "PhoenixTools_ToggleMCP", "PhoenixTools_Settings", "PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance", "PhoenixTools_NormalizeNames", "PhoenixTools_SyncLinkLabels", "PhoenixTools_EditPartProperties", "PhoenixTools_DeskTools", "PhoenixTools_ChatConnection", "PhoenixTools_Help"]
         expected = toolbar
         self.assertEqual(workbench.menu_commands, expected)
         self.assertEqual(workbench.toolbar_commands, toolbar)
@@ -368,6 +369,18 @@ class WorkbenchToggleTests(unittest.TestCase):
             self.assertFalse(self.commands[identifier].IsActive())
             self.assertFalse(self.actions[identifier].enabled)
         self.assertTrue(self.actions["PhoenixTools_DocumentTools"].enabled)
+
+    def test_help_is_always_available_and_does_not_start_services_without_a_document(self):
+        _, command, _ = self.initialize()
+        self.app.ActiveDocument = None
+        command._timer.callback()
+        help_command = self.commands["PhoenixTools_Help"]
+        self.assertTrue(help_command.IsActive())
+        self.assertTrue(self.actions["PhoenixTools_Help"].enabled)
+        self.assertTrue(help_command.GetResources()["Pixmap"].endswith("help.svg"))
+        help_command.Activated()
+        self.assertEqual(self.visual_calls, ["help"])
+        self.assertEqual(self.calls, [])
 
     def test_qt5_associated_toolbar_is_scoped_by_exact_default_action(self):
         _, command, action = self.initialize()

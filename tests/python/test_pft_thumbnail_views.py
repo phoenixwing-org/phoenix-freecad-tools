@@ -198,6 +198,59 @@ class PftThumbnailViewTests(unittest.TestCase):
         self.assertFalse(self.named("CaptureAction").enabled)
         self.assertEqual(self.native.capture_thumbnail.call_count, 1)
 
+    def panel_with_thumbnail(self):
+        from test_pft_document_tools_views import PftDocumentPanelTests
+        panel = PftDocumentPanelTests()
+        panel.setUp()
+        self.addCleanup(panel.doCleanups)
+        panel.doc.FileName = ""
+        self.capture_value["document"] = panel.doc.Name
+        def create_thumbnail(*args, **kwargs):
+            self.widget = views.create_thumbnail_widget(*args, **kwargs)
+            return self.widget
+        panel.thumbnail_factory.side_effect = create_thumbnail
+        panel.show()
+        return panel
+
+    def test_same_named_reopened_panel_document_clears_frozen_png_and_blocks_export(self):
+        from test_pft_document_tools_views import PftDoc, PftObject
+        panel = self.panel_with_thumbnail()
+        self.click("CaptureAction")
+        self.assertTrue(self.named("ExportAction").enabled)
+        replacement = PftDoc(panel.doc.Name)
+        replacement.FileName = ""
+        PftObject(replacement, "ReplacementBody", "PartDesign::Body")
+        panel.app.documents[replacement.Name] = replacement
+        panel.app.ActiveDocument = replacement
+        panel.widgets.named("PhoenixTools_DocumentFollowTimer").timeout.emit()
+        self.assertIn("ReplacementBody", panel.widgets.named("PhoenixTools_DocumentDimensions").toPlainText())
+        self.assertIsNone(self.named("Preview").pixmap)
+        self.assertFalse(self.named("ExportAction").enabled)
+        self.assertTrue(self.named("CaptureAction").enabled)
+        self.click("ExportAction")
+        self.assertEqual(self.widgets.save_calls, 0)
+        self.exporter.prepare_png_export.assert_not_called()
+        self.exporter.write_png_export.assert_not_called()
+        self.assertEqual(self.native.capture_thumbnail.call_count, 1)
+        self.assertEqual(panel.gui.Selection.records, [])
+
+    def test_same_panel_document_refresh_preserves_frozen_png_without_recapture(self):
+        panel = self.panel_with_thumbnail()
+        self.click("CaptureAction")
+        preview = self.named("Preview").pixmap
+        caption = self.named("Status").text
+        panel.doc.Label = "Updated synthetic label"
+        panel.widgets.click("PhoenixTools_DocumentRefresh")
+        self.assertIn(panel.doc.Label, panel.widgets.named("PhoenixTools_DocumentInformation").toPlainText())
+        self.assertIs(self.named("Preview").pixmap, preview)
+        self.assertEqual(self.named("Status").text, caption)
+        self.assertTrue(self.named("ExportAction").enabled)
+        self.assertEqual(self.native.capture_thumbnail.call_count, 1)
+        self.assertEqual(self.widgets.save_calls, 0)
+        self.exporter.write_png_export.assert_not_called()
+        self.assertIs(panel.app.ActiveDocument, panel.doc)
+        self.assertEqual(panel.gui.Selection.records, [])
+
     def test_stale_target_and_capture_result_cannot_produce_exportable_preview(self):
         self.widget.set_document(self.target, active=True)
         self.target = "AnotherFixture"

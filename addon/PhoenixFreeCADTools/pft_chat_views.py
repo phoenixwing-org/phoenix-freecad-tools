@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Native Qt chat client; all account/network actions require a user click."""
+"""Native Qt chat client; all account/network actions require explicit user action."""
 import importlib.util
 from pathlib import Path
+from datetime import datetime
 import sys
 
 from pft_workbench_i18n import tr
+from pft_chat_transcript import render_chat_transcript
 from pft_panel_host import mount_panel_dock, present_panel
 
 PFT_CHAT_PROMPT = (
@@ -18,7 +20,13 @@ _PHASES = {
     "disconnected": "尚未连接", "connecting": "正在连接 Codex…", "signed_out": "请使用 ChatGPT 登录",
     "ready": "可以聊天", "logging_in": "请在浏览器中完成登录…", "sending": "正在回复…",
     "interrupting": "正在停止回复…", "error": "聊天连接失败",
+    "restoring": "正在恢复聊天…", "history_read_only": "保存的聊天为只读",
 }
+
+
+def _qt_enum(namespace, group, name):
+    value = getattr(namespace, name, None)
+    return value if value is not None else getattr(getattr(namespace, group), name)
 
 
 def _shortcut_facade():
@@ -49,9 +57,12 @@ def show_chat_connection_dialog(app, gui, get_status):
     from PySide import QtCore, QtGui, QtWidgets
     from pft_chat_controller import PftChatController
     from pft_chat_qprocess import PftChatProcess
+    from pft_chat_process_lease import (acquire as acquire_process_lease, inspect_user_registration,
+                                        PftChatProcessLeaseError)
     from pft_chat_profile import detect_codex_executable, prepare_chat_profile, validate_executable, PftChatProfileError
+    from pft_chat_session_store import PftChatSessionStore, PftChatSessionStoreError, list_user_sessions
     from pft_chat_settings import (load_chat_options, save_chat_options, build_chat_mcp_config, PftChatSettingsError,
-                                   load_chat_preferences, save_chat_preferences, load_chat_desk_configuration)
+                                   load_chat_preferences, load_chat_history_preference, save_chat_preferences, load_chat_desk_configuration)
     parent = gui.getMainWindow()
     existing = parent.findChild(QtWidgets.QDockWidget, "PhoenixTools_ChatConnectionDialog")
     if existing is not None:
@@ -68,6 +79,7 @@ def show_chat_connection_dialog(app, gui, get_status):
                     event.ignore()
                     return
             self._closed = True
+            self._status_timer.stop()
             self._controller.disconnect()
             super().closeEvent(event)
 
@@ -148,10 +160,18 @@ def show_chat_connection_dialog(app, gui, get_status):
     connection_row.setContentsMargins(0, 0, 0, 0)
     connect = QtWidgets.QPushButton(tr("连接 Codex")); connect.setObjectName("PhoenixTools_ChatConnect")
     login = QtWidgets.QPushButton(tr("使用 ChatGPT 登录")); login.setObjectName("PhoenixTools_ChatLogin")
-    for button in (connect, login): connection_row.addWidget(button)
+    reopen_login = QtWidgets.QPushButton(tr("重新打开登录页面"))
+    reopen_login.setObjectName("PhoenixTools_ChatReopenLogin")
+    copy_login = QtWidgets.QPushButton(tr("复制登录链接"))
+    copy_login.setObjectName("PhoenixTools_ChatCopyLoginLink")
+    for button in (connect, login, reopen_login, copy_login): connection_row.addWidget(button)
     layout.addWidget(connection_actions)
     status = label(tr("尚未连接")); status.setObjectName("PhoenixTools_ChatStatus")
     layout.addWidget(status)
+    history_status = label()
+    history_status.setObjectName("PhoenixTools_ChatHistoryStatus")
+    history_status.hide()
+    layout.addWidget(history_status)
 
     options = load_chat_options(app)
     preferences = load_chat_preferences(app)
@@ -170,6 +190,12 @@ def show_chat_connection_dialog(app, gui, get_status):
     settings_layout.addLayout(path_row)
     disconnect = QtWidgets.QPushButton(tr("断开")); disconnect.setObjectName("PhoenixTools_ChatDisconnect")
     settings_layout.addWidget(disconnect)
+    check_registration = QtWidgets.QPushButton(tr("检查聊天进程登记"))
+    check_registration.setObjectName("PhoenixTools_ChatCheckProcessRegistration")
+    settings_layout.addWidget(check_registration)
+    registration_status = label(tr("尚未检查聊天进程登记。"))
+    registration_status.setObjectName("PhoenixTools_ChatProcessRegistrationStatus")
+    settings_layout.addWidget(registration_status)
     enable_tools = QtWidgets.QCheckBox(tr("启用 FreeCAD 工具"))
     enable_tools.setObjectName("PhoenixTools_ChatEnableTools")
     enable_tools.setChecked(options["enabled"])
@@ -217,6 +243,23 @@ def show_chat_connection_dialog(app, gui, get_status):
     save_preferences = QtWidgets.QPushButton(tr("保存聊天设置"))
     save_preferences.setObjectName("PhoenixTools_ChatSavePreferences")
     settings_layout.addWidget(save_preferences)
+    retain_history = shrink_horizontal(QtWidgets.QCheckBox(tr("保留新聊天")))
+    retain_history.setObjectName("PhoenixTools_ChatRetainHistory")
+    retain_history.setChecked(load_chat_history_preference(app))
+    settings_layout.addWidget(retain_history)
+    settings_layout.addWidget(label(tr("默认新建临时聊天。开启保留后，官方客户端可能保存消息及 CAD 工具返回的数据；关闭选项不会删除已有会话。")))
+    saved_sessions = shrink_horizontal(QtWidgets.QComboBox())
+    saved_sessions.setObjectName("PhoenixTools_ChatSavedSessions")
+    saved_sessions.setMinimumContentsLength(1)
+    saved_sessions.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    saved_sessions.addItem(tr("新聊天"), None)
+    settings_layout.addWidget(saved_sessions)
+    list_sessions = QtWidgets.QPushButton(tr("读取本插件保存的聊天"))
+    list_sessions.setObjectName("PhoenixTools_ChatListSessions")
+    settings_layout.addWidget(list_sessions)
+    session_status = label(tr("尚未读取保存的会话。仅列出本插件登记的会话，选择后点击连接。"))
+    session_status.setObjectName("PhoenixTools_ChatSavedSessionsStatus")
+    settings_layout.addWidget(session_status)
     path_fields = []
     for title, key, object_name in (("Node 执行文件", "node_executable", "PhoenixTools_ChatNode"),
                                     ("MCP CLI 文件", "cli_entry", "PhoenixTools_ChatMCPCLI")):
@@ -254,13 +297,47 @@ def show_chat_connection_dialog(app, gui, get_status):
     settings_box.hide(); settings_toggle.toggled.connect(settings_box.setVisible)
     layout.addWidget(settings_box)
 
-    transcript = shrink_horizontal(QtWidgets.QPlainTextEdit()); transcript.setReadOnly(True)
+    class PftChatTranscript(QtWidgets.QTextBrowser):
+        def loadResource(self, _kind, _url):
+            return None
+
+    transcript = shrink_horizontal(PftChatTranscript()); transcript.setReadOnly(True)
+    transcript.setOpenExternalLinks(False)
+    transcript.setOpenLinks(False)
+    transcript.setTextInteractionFlags(
+        _qt_enum(QtCore.Qt, "TextInteractionFlag", "TextSelectableByMouse") |
+        _qt_enum(QtCore.Qt, "TextInteractionFlag", "TextSelectableByKeyboard"))
+    transcript.setWordWrapMode(_qt_enum(QtGui.QTextOption, "WrapMode", "WrapAtWordBoundaryOrAnywhere"))
     transcript.setObjectName("PhoenixTools_ChatTranscript")
     transcript.setPlaceholderText(tr("点击“连接 Codex”，登录后即可发送消息。"))
     layout.addWidget(transcript, 1)
-    entry = shrink_horizontal(QtWidgets.QPlainTextEdit()); entry.setMaximumHeight(110)
+    class PftChatInput(QtWidgets.QPlainTextEdit):
+        def __init__(self):
+            super().__init__()
+            self._ime_composing = False
+
+        def inputMethodEvent(self, event):
+            self._ime_composing = bool(event.preeditString())
+            super().inputMethodEvent(event)
+
+        def keyPressEvent(self, event):
+            keys = tuple(_qt_enum(QtCore.Qt, "Key", name) for name in ("Key_Return", "Key_Enter"))
+            modifiers = tuple(_qt_enum(QtCore.Qt, "KeyboardModifier", name)
+                              for name in ("NoModifier", "KeypadModifier"))
+            if event.key() in keys and event.modifiers() in modifiers:
+                if self._ime_composing:
+                    super().keyPressEvent(event)
+                else:
+                    if not event.isAutoRepeat():
+                        send_message()
+                    event.accept()
+                return
+            super().keyPressEvent(event)
+
+    entry = shrink_horizontal(PftChatInput()); entry.setMaximumHeight(110)
     entry.setObjectName("PhoenixTools_ChatInput")
-    entry.setPlaceholderText(tr("输入消息，点击发送。文档内容不会自动附加。"))
+    entry.setPlaceholderText(tr("Enter 发送 · Shift+Enter 换行"))
+    entry.setToolTip(tr("输入消息，点击发送。文档内容不会自动附加。"))
     layout.addWidget(entry)
     action_row = QtWidgets.QHBoxLayout()
     send = QtWidgets.QPushButton(tr("发送")); send.setObjectName("PhoenixTools_ChatSend")
@@ -268,7 +345,111 @@ def show_chat_connection_dialog(app, gui, get_status):
     for button in (send, stop): action_row.addWidget(button)
     layout.addLayout(action_row)
 
-    rendered_models = [None]
+    rendered_models, rendered_html = [None], [None]
+    pending_submission = [None]
+    registration_pending, registration_activity = [False], [0]
+
+    def registration_context():
+        """Memory-only gate; opening settings never inspects the profile."""
+        if dialog._closed:
+            return None
+        try:
+            snapshot = controller.snapshot
+            generation = snapshot.get("connection_generation")
+            if (snapshot.get("phase") not in ("disconnected", "error")
+                    or snapshot.get("is_busy") is not False
+                    or type(generation) is not int or generation < 0
+                    or process.has_active_session is not False):
+                return None
+            return (generation, snapshot["phase"], registration_activity[0])
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+
+    def update_registration_availability():
+        if not dialog._closed:
+            available = not registration_pending[0] and registration_context() is not None
+            check_registration.setEnabled(available)
+            list_sessions.setEnabled(available)
+
+    def set_registration_status(message):
+        if not dialog._closed:
+            registration_status.setText(tr(message))
+
+    def check_process_registration():
+        context = registration_context()
+        if context is None or registration_pending[0]:
+            set_registration_status("请先断开聊天，并等待本窗口的进程退出后再检查登记。")
+            return
+        registration_pending[0] = True
+        update_registration_availability()
+        try:
+            inspection = inspect_user_registration(app.getUserAppDataDir())
+            if registration_context() != context:
+                set_registration_status("聊天连接状态已变化，未清理登记；请重新检查。")
+                return
+            state, pid, can_clear = inspection.status, inspection.child_pid, inspection.can_clear
+            if (state not in ("absent", "present", "unknown", "exited")
+                    or type(can_clear) is not bool
+                    or pid is not None and (type(pid) is not int or not 1 <= pid <= 2 ** 31 - 1)
+                    or can_clear is not (state == "exited")
+                    or state == "exited" and pid is None
+                    or state == "absent" and pid is not None):
+                raise ValueError("incompatible registration inspection")
+            messages = {"absent": "没有聊天进程登记；未启动连接。",
+                        "present": "登记中的 PID 仍存在；未清理，不代表它仍属于原聊天进程。",
+                        "unknown": "聊天进程状态无法确认；保留登记。"}
+            if state != "exited":
+                set_registration_status(messages[state])
+                return
+            answer = QtWidgets.QMessageBox.question(dialog, tr("清除已退出的聊天进程登记"),
+                tr("已确认登记中的 PID %s 当前不存在。只清除这一笔进程登记，不删除登录或聊天数据，也不启动服务。是否继续？") % pid,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Cancel)
+            if registration_context() != context:
+                set_registration_status("聊天连接状态已变化，未清理登记；请重新检查。")
+                return
+            if answer != QtWidgets.QMessageBox.Yes:
+                set_registration_status("已取消，未清理登记。")
+                return
+            if inspection.clear_exited() is not True:
+                raise ValueError("registration cleanup was not confirmed")
+            set_registration_status("已清除这一笔进程登记；可手动连接。未启动服务。")
+        except PftChatProcessLeaseError as error:
+            set_registration_status(error.message)
+        except Exception:
+            set_registration_status("聊天进程登记操作未确认；请重新检查，不要重复操作。")
+        finally:
+            registration_pending[0] = False
+            update_registration_availability()
+
+    def list_saved_sessions():
+        context = registration_context()
+        if context is None:
+            session_status.setText(tr("请先断开当前聊天，再选择保存的会话。"))
+            return
+        try:
+            rows = list_user_sessions(app.getUserAppDataDir())
+            if registration_context() != context:
+                session_status.setText(tr("聊天连接已变化；未切换会话。"))
+                return
+            if type(rows) is not list or len(rows) > 100:
+                raise ValueError("invalid session registry projection")
+            labels = []
+            for row in rows:
+                if (type(row) is not dict or type(row.get("model")) is not str
+                        or type(row.get("created_at")) is not int):
+                    raise ValueError("invalid session registry metadata")
+                stamp = datetime.fromtimestamp(row["created_at"]).strftime("%Y-%m-%d %H:%M")
+                labels.append((stamp + " · " + row["model"], dict(row)))
+            saved_sessions.clear()
+            saved_sessions.addItem(tr("新聊天"), None)
+            for text, record in labels:
+                saved_sessions.addItem(text, record)
+            saved_sessions.setCurrentIndex(0)
+            session_status.setText(tr("已读取 %s 个登记会话；选择后点击连接，不会自动发送消息。") % len(rows))
+        except PftChatSessionStoreError as error:
+            session_status.setText(tr(error.message))
+        except Exception:
+            session_status.setText(tr("无法读取本插件会话登记；未连接或切换会话。"))
 
     def render_models(snapshot):
         phase = snapshot["phase"]
@@ -311,20 +492,70 @@ def show_chat_connection_dialog(app, gui, get_status):
                 font.setPointSize(point_size)
             widget.setFont(font)
 
-    def changed(snapshot):
+    def refresh_status(snapshot):
         if dialog._closed:
             return
         phase = snapshot["phase"]
-        render_models(snapshot)
+        history = snapshot.get("history_status", "inactive")
+        notice = snapshot.get("history_notice")
+        history_status.setText(tr(notice) if isinstance(notice, str) and notice else
+                               tr("正在读取保存的聊天…") if history == "loading" else "")
+        history_status.setVisible(bool(history_status.text()))
+        error = snapshot.get("error")
+        recovering = bool(error and error.get("code") == "CHAT_SERVICE_RECONNECTING")
         message = tr(_PHASES.get(phase, "聊天连接失败"))
-        if snapshot.get("error"):
-            message += "\n" + tr(snapshot["error"]["message"])
+        if phase == "logging_in":
+            message = tr({"requesting_link": "正在获取登录链接…",
+                          "browser_open_failed": "登录页面尚未打开"}.get(
+                              snapshot.get("login_stage"), "请在浏览器中完成登录…"))
+        if (phase == "sending" and not recovering
+                and any(call["status"] == "in_progress" for call in snapshot.get("tool_calls", []))):
+            message = tr("正在执行工具…")
+        if error:
+            message += "\n" + tr(error["message"])
+        timing = snapshot.get("turn_timing")
+        tooltip = ""
+        if isinstance(timing, dict):
+            elapsed = "%g" % round(timing["elapsed_seconds"], 1)
+            first = timing.get("first_response_seconds")
+            pattern = ("耗时 %s 秒" if timing.get("finished") else
+                       "已等待 %s 秒" if first is None else "已用 %s 秒")
+            message += " · " + tr(pattern) % elapsed
+            if first is not None:
+                tooltip = tr("首条回复耗时：%s 秒") % ("%g" % round(first, 1))
         if snapshot.get("mcp_enabled"):
             message += " · " + tr("FreeCAD 工具模式")
         if snapshot.get("desk_enabled"):
             message += " · " + tr("Desk 数据工具")
         status.setText(message)
+        status.setToolTip(tooltip)
+
+    def changed(snapshot):
+        if dialog._closed:
+            return
+        phase = snapshot["phase"]
+        submission = pending_submission[0]
+        if submission is not None:
+            submitted_text, previous_count = submission
+            if any(row["role"] == "user" and row["text"] == submitted_text
+                   for row in snapshot["transcript"][previous_count:]):
+                if entry.toPlainText() == submitted_text:
+                    entry.clear()
+                pending_submission[0] = None
+            elif phase in ("error", "disconnected", "signed_out"):
+                pending_submission[0] = None
+        render_models(snapshot)
+        refresh_status(snapshot)
+        if snapshot.get("is_busy") or getattr(process, "has_active_session", False) is True:
+            if not status_timer.isActive():
+                status_timer.start()
+        else:
+            status_timer.stop()
+        update_registration_availability()
         configurable = phase in ("disconnected", "error")
+        retain_history.setEnabled(configurable)
+        saved_sessions.setEnabled(configurable)
+        list_sessions.setEnabled(registration_context() is not None)
         enable_tools.setEnabled(configurable)
         update_desk_option()
         save_tools.setEnabled(configurable)
@@ -337,7 +568,10 @@ def show_chat_connection_dialog(app, gui, get_status):
         connect.setEnabled(phase in ("disconnected", "error"))
         connect.setVisible(phase in ("disconnected", "error"))
         login.setVisible(phase == "signed_out")
-        connection_actions.setVisible(phase in ("disconnected", "error", "signed_out"))
+        for button in (reopen_login, copy_login):
+            button.setVisible(phase == "logging_in")
+            button.setEnabled(phase == "logging_in" and bool(snapshot.get("can_use_login_link")))
+        connection_actions.setVisible(phase in ("disconnected", "error", "signed_out", "logging_in"))
         program.setEnabled(phase in ("disconnected", "error"))
         browse.setEnabled(program.isEnabled())
         login.setEnabled(phase == "signed_out")
@@ -345,24 +579,43 @@ def show_chat_connection_dialog(app, gui, get_status):
         send.setEnabled(bool(snapshot.get("can_send")))
         stop.setEnabled(phase == "sending")
         entry.setEnabled(phase in ("ready", "signed_out", "disconnected", "error"))
-        text = "\n\n".join((tr("你") if item["role"] == "user" else "AI") + "\n" + item["text"]
-                            for item in snapshot["transcript"])
-        if text != transcript.toPlainText():
+        try:
+            base = transcript.palette().color(_qt_enum(QtGui.QPalette, "ColorRole", "Base"))
+            dark = base.lightness() < 128
+        except (AttributeError, RuntimeError, TypeError):
+            dark = False
+        html = render_chat_transcript(snapshot["transcript"], tr("你"),
+                                      snapshot.get("message_times", ()), dark=dark,
+                                      interrupted_label=tr("已停止"), error_label=tr("未完成"))
+        if html != rendered_html[0]:
             bar = transcript.verticalScrollBar()
             follow = bar.value() >= bar.maximum() - 4
             old = bar.value()
-            transcript.setPlainText(text)
+            transcript.setHtml(html)
+            rendered_html[0] = html
             bar.setValue(bar.maximum() if follow else min(old, bar.maximum()))
 
     def open_url(url):
         return QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
-    process = PftChatProcess(QtCore, dialog)
+    process = PftChatProcess(QtCore, dialog, lease_factory=acquire_process_lease)
     controller = PftChatController(process, changed, open_url)
     dialog._controller = controller
     dialog._process = process
+    status_timer = QtCore.QTimer(dialog)
+    status_timer.setInterval(1000)
+    def refresh_memory_status():
+        if dialog._closed:
+            return
+        refresh_status(controller.snapshot)
+        update_registration_availability()
+        if not controller.snapshot.get("is_busy") and getattr(process, "has_active_session", False) is not True:
+            status_timer.stop()
+    status_timer.timeout.connect(refresh_memory_status)
+    dialog._status_timer = status_timer
 
     def connect_client():
+        registration_activity[0] += 1
         try:
             executable = validate_executable(program.text())
             selected = {"enabled": enable_tools.isChecked(), "desk_enabled": enable_desk.isChecked(),
@@ -371,8 +624,17 @@ def show_chat_connection_dialog(app, gui, get_status):
             mcp = (build_chat_mcp_config(selected, get_status(), desk_configuration=desk)
                    if selected["enabled"] else None)
             profile = prepare_chat_profile(app.getUserAppDataDir())
-            controller.connect(executable, profile["home"], profile["cwd"], mcp=mcp, model_id=model_choice.currentData() or None)
-        except (PftChatProfileError, PftChatSettingsError) as error:
+            history_options = {}
+            selected_session = saved_sessions.currentData()
+            if selected_session is not None or retain_history.isChecked():
+                if selected_session is not None and type(selected_session) is not dict:
+                    raise ValueError("invalid selected registered session")
+                store = PftChatSessionStore(profile["home"], profile["cwd"])
+                history_options = {"session_store": store, "retain_history": True,
+                                   "resume_session": selected_session}
+            controller.connect(executable, profile["home"], profile["cwd"], mcp=mcp,
+                               model_id=model_choice.currentData() or None, **history_options)
+        except (PftChatProfileError, PftChatSettingsError, PftChatSessionStoreError) as error:
             status.setText(tr(str(error)))
         except Exception:
             status.setText(tr("无法连接聊天，请核对 Codex 与专属目录。"))
@@ -390,7 +652,8 @@ def show_chat_connection_dialog(app, gui, get_status):
 
     def save_chat_settings():
         try:
-            save_chat_preferences(app, model_choice.currentData() or "", font_choice.currentData())
+            save_chat_preferences(app, model_choice.currentData() or "", font_choice.currentData(),
+                                  retain_history=retain_history.isChecked())
             apply_chat_font()
             status.setText(tr("聊天设置已保存；字号立即生效，模型在开始聊天前或新连接使用。"))
         except PftChatSettingsError as error:
@@ -402,6 +665,7 @@ def show_chat_connection_dialog(app, gui, get_status):
 
     save_tools.clicked.connect(save_tool_settings)
     save_preferences.clicked.connect(save_chat_settings)
+    list_sessions.clicked.connect(list_saved_sessions)
     model_choice.currentIndexChanged.connect(lambda index: choose_model())
     refresh_models.clicked.connect(controller.refresh_models)
     font_choice.currentIndexChanged.connect(lambda index: apply_chat_font())
@@ -413,18 +677,32 @@ def show_chat_connection_dialog(app, gui, get_status):
             program.setText(filename)
 
     def send_message():
+        snapshot = controller.snapshot
+        if (not entry.isEnabled() or not send.isEnabled() or snapshot["phase"] != "ready"
+                or not snapshot.get("can_send")):
+            return
         text = entry.toPlainText()
+        pending_submission[0] = (text, len(controller.snapshot["transcript"]))
         try:
             controller.send(text)
-            if controller.snapshot["phase"] in ("sending", "interrupting"):
-                entry.clear()
+            if controller.snapshot["phase"] not in ("sending", "interrupting"):
+                pending_submission[0] = None
         except Exception:
+            pending_submission[0] = None
             status.setText(tr("消息未发送，请检查连接和输入。"))
+
+    def copy_pending_login_link():
+        if controller.copy_login_link(lambda url: QtWidgets.QApplication.clipboard().setText(url)):
+            status.setText(tr("登录链接已复制，请在浏览器中打开。"))
 
     browse.clicked.connect(choose_program)
     connect.clicked.connect(connect_client)
     login.clicked.connect(controller.login)
+    reopen_login.clicked.connect(controller.reopen_login)
+    copy_login.clicked.connect(copy_pending_login_link)
     disconnect.clicked.connect(controller.disconnect)
+    check_registration.clicked.connect(check_process_registration)
+    settings_toggle.toggled.connect(lambda _checked: update_registration_availability())
     send.clicked.connect(send_message)
     stop.clicked.connect(controller.interrupt)
     copy.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(tr(PFT_CHAT_PROMPT)))

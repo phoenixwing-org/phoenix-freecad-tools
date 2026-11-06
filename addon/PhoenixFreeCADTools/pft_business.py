@@ -19,7 +19,7 @@ import time
 import unicodedata
 
 METHODS = frozenset({"prepare_part_changes", "apply_part_changes", "request_part_change_approval", "get_part_change_status"})
-OPERATIONS = frozenset({"normalize_names", "sync_link_labels", "initialize_properties", "recommend_properties", "set_properties", "set_pad_length"})
+OPERATIONS = frozenset({"normalize_names", "sync_link_labels", "initialize_properties", "recommend_properties", "set_properties", "set_pad_length", "create_drawing", "add_drawing_dimensions"})
 FIELDS = ("PartNumber", "PartVersion", "TypeCode", "ModelSeries", "PartName")
 MAX_PLANS = 32
 TTL_SECONDS = 300
@@ -30,6 +30,17 @@ PAD_LENGTH_CAPABILITIES = {"version": 1, "operation": "set_pad_length", "confirm
     "preview_method": "prepare_part_changes", "request_method": "request_part_change_approval",
     "status_method": "get_part_change_status", "length_unit": "mm", "minimum_mm": 0.01, "maximum_mm": 10000,
     "model_scope": "single_document_first_pad", "max_open_documents": 1, "saves_document": False}
+DRAWING_CREATE_CAPABILITIES = {"version": 1, "operation": "create_drawing", "confirmation": "native_gui_only",
+    "preview_method": "prepare_part_changes", "request_method": "request_part_change_approval",
+    "status_method": "get_part_change_status", "paper": "A4_landscape", "projection": "first_angle",
+    "views": ["front", "top", "axonometric"], "source_scope": "single_native_solid", "saves_document": False,
+    "projection_verification": "not_checked"}
+DRAWING_DIMENSIONS_CAPABILITIES = {"version": 1, "operation": "add_drawing_dimensions", "confirmation": "native_gui_only",
+    "preview_method": "prepare_part_changes", "request_method": "request_part_change_approval",
+    "status_method": "get_part_change_status", "kinds": ["Distance", "DistanceX", "DistanceY", "Diameter", "Radius"],
+    "max_dimensions": 8, "edge_index_base": 0, "maximum_edge_index": 2047,
+    "position_scope": "view_relative_paper_mm", "measurement_unit": "mm", "saves_document": False,
+    "projection_verification": "not_checked"}
 APPROVAL_CAPABILITIES = {"version": 1, "request_method": "request_part_change_approval",
     "status_method": "get_part_change_status", "confirmation": "native_gui_only", "max_pending": 1,
     "storage": "memory_only", "ttl_seconds": TTL_SECONDS, "max_status_bytes": MAX_STATUS_BYTES}
@@ -38,7 +49,11 @@ _FIXED_ERRORS = frozenset({"PART_CHANGE_FAILED", "PART_APPROVAL_UI_UNAVAILABLE",
     "PART_TRANSACTION_STATE_UNAVAILABLE", "PART_TRANSACTION_OPEN_UNVERIFIED", "PART_TRANSACTION_CHANGED",
     "PART_COMMIT_UNVERIFIED", "PART_ROLLBACK_UNVERIFIED", "PART_PROPERTY_VERIFY_FAILED",
     "PART_PREFERENCE_RESTORE_UNVERIFIED", "PART_ROLLBACK_AND_PREFERENCE_UNVERIFIED", "PAD_UNSUPPORTED", "PAD_PLAN_STALE",
-    "PAD_PARAMETER_VERIFY_FAILED", "PAD_GEOMETRY_VERIFY_FAILED", "PAD_RECOMPUTE_UNVERIFIED", "PAD_NATIVE_CONFIRMATION_REQUIRED"})
+    "PAD_PARAMETER_VERIFY_FAILED", "PAD_GEOMETRY_VERIFY_FAILED", "PAD_RECOMPUTE_UNVERIFIED", "PAD_NATIVE_CONFIRMATION_REQUIRED",
+    "DRAWING_UNSUPPORTED", "DRAWING_PLAN_STALE", "DRAWING_TEMPLATE_UNAVAILABLE", "DRAWING_CREATE_FAILED",
+    "DRAWING_RECOMPUTE_UNVERIFIED", "DRAWING_PROJECTION_UNAVAILABLE", "DRAWING_NATIVE_CONFIRMATION_REQUIRED", "DRAWING_RESULT_INVALID",
+    "DIMENSION_UNSUPPORTED", "DIMENSION_PLAN_STALE", "DIMENSION_CREATE_FAILED", "DIMENSION_RECOMPUTE_UNVERIFIED",
+    "DIMENSION_VALUE_UNVERIFIED", "DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "DIMENSION_RESULT_INVALID"})
 _approval_epoch = 0
 _approvals_enabled = False
 _plans = OrderedDict()
@@ -69,7 +84,7 @@ def validate(method, params, Error):
         if set(params) != {"token"} or not isinstance(params["token"], str) or not _TOKEN.fullmatch(params["token"]):
             raise Error("INVALID_PARAMS", "该操作仅接受预览返回的 token。")
         return True
-    if set(params) - {"docName", "objectNames", "operation", "values", "bodyName", "lengthMm"}:
+    if set(params) - {"docName", "objectNames", "operation", "values", "bodyName", "lengthMm", "viewName", "dimensions"}:
         raise Error("INVALID_PARAMS", "预览参数包含未开放字段。")
     if not _valid_name(params.get("docName")):
         raise Error("INVALID_PARAMS", "docName 必须是已打开文档的内部名称。")
@@ -81,6 +96,27 @@ def validate(method, params, Error):
     operation = params.get("operation")
     if not isinstance(operation, str) or operation not in OPERATIONS:
         raise Error("INVALID_PARAMS", "operation 不是已开放的零件操作。")
+    if operation == "add_drawing_dimensions":
+        if (set(params) != {"docName", "objectNames", "operation", "viewName", "dimensions"} or len(names) != 1
+                or any(unicodedata.category(char) == "Cf" for char in params["docName"])):
+            raise Error("INVALID_PARAMS", "尺寸预览只接受明确文档、一张图页、视图及1至8项投影引用。")
+        try:
+            _load_sibling("pft_drawing_dimensions_contract").validate_request({"page": names[0],
+                "view": params["viewName"], "dimensions": params["dimensions"]})
+        except ValueError:
+            raise Error("INVALID_PARAMS", "尺寸引用、类型或纸面偏移格式无效，未创建预览。") from None
+        return True
+    if "viewName" in params or "dimensions" in params:
+        raise Error("INVALID_PARAMS", "只有 add_drawing_dimensions 可以指定尺寸视图和引用。")
+    if operation == "create_drawing":
+        if (set(params) != {"docName", "objectNames", "operation"} or len(names) != 1
+                or any(unicodedata.category(char) == "Cf" for char in params["docName"])):
+            raise Error("INVALID_PARAMS", "图纸草稿预览只接受文档、一个明确来源对象和 create_drawing 操作。")
+        try:
+            _load_sibling("pft_drawing_contract").validate_design_request({"source": names[0], "page": None}, allow_blocked=True)
+        except ValueError:
+            raise Error("INVALID_PARAMS", "图纸来源必须是安全且至多64字的原生对象内部名称。") from None
+        return True
     if operation == "set_pad_length":
         length = params.get("lengthMm")
         if (len(names) != 1 or not _valid_name(params.get("bodyName")) or "values" in params
@@ -140,6 +176,20 @@ def _pad():
     module = _load_sibling("pft_pad_length")
     if getattr(module, "CAPABILITIES", None) != PAD_LENGTH_CAPABILITIES:
         raise RuntimeError("Pad design module belongs to an incompatible contract")
+    return module
+
+
+def _drawing():
+    module = _load_sibling("pft_drawing")
+    if getattr(module, "CAPABILITIES", None) != DRAWING_CREATE_CAPABILITIES:
+        raise RuntimeError("Drawing module belongs to an incompatible contract")
+    return module
+
+
+def _dimensions():
+    module = _load_sibling("pft_drawing_dimensions")
+    if getattr(module, "CAPABILITIES", None) != DRAWING_DIMENSIONS_CAPABILITIES:
+        raise RuntimeError("Drawing dimensions module belongs to an incompatible contract")
     return module
 
 
@@ -277,7 +327,7 @@ def _fail(record, code):
 def _status_dto(record, token):
     state = record["state"]
     result = {"changed_count": record["result"]["changed_count"], "saves_document": False} if state == "applied" else None
-    if result is not None and record["operation"] == "set_pad_length":
+    if result is not None and record["operation"] in {"set_pad_length", "create_drawing", "add_drawing_dimensions"}:
         result["design_result"] = deepcopy(record["result"]["design_result"])
     return {"document": record["document"], "operation": record["operation"], "token": token,
             "state": state, "changed_count": record["changed_count"], "requires_confirmation": True,
@@ -480,6 +530,66 @@ def _store(record, Error):
         return token
 
 
+def _drawing_status_budget(document_name, request, rows, Error):
+    # The result's only variable-size numeric field is scale. Reserve 309
+    # decimal digits: every finite positive Python int/float accepted by the
+    # contract fits. This is a private size bound, never a reported CAD result.
+    names = [row["object"] for row in rows]
+    result = _load_sibling("pft_drawing_contract").validate_design_result({
+        "kind": "drawing_draft", "page": names[0], "template": names[1], "source": request["source"],
+        "views": [{"name": name, "kind": kind} for name, kind in zip(names[2:], ("front", "top", "axonometric"))],
+        "scale": 10 ** 308, "projection": "first_angle", "paper": "A4_landscape",
+        "projection_verification": "not_checked", "manual_review_required": True}, request)
+    record = {"state": "applied", "document": document_name, "operation": "create_drawing",
+              "changed_count": 5, "native_confirmation": True,
+              "result": {"changed_count": 5, "design_result": result}}
+    # token_urlsafe(24) produces exactly 32 ASCII characters.
+    status = _status_dto(record, "x" * 32)
+    if len(json.dumps(status, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")) > MAX_STATUS_BYTES:
+        raise Error("PART_STATUS_TOO_LARGE", "图纸草稿的预计状态超过响应大小限制；未创建 token，也未修改对象。")
+
+
+def _dimension_preview_result(request, rows):
+    contract = _load_sibling("pft_drawing_dimensions_contract")
+    request = contract.validate_request(request)
+    keys = {"object", "field", "old", "new", "status", "edge", "kind", "value_mm", "x_mm", "y_mm", "source", "note"}
+    if type(rows) is not list or len(rows) != len(request["dimensions"]):
+        raise ValueError()
+    dimensions = []
+    for row in rows:
+        if (type(row) is not dict or set(row) != keys or row["field"] != "TechDraw dimension"
+                or row["old"] is not None or row["status"] != "change" or row["new"] != row["value_mm"]
+                or type(row["new"]) not in (int, float) or row["source"] != "native_cached_projected_geometry"
+                or type(row["note"]) is not str or not 1 <= len(row["note"]) <= MAX_TEXT
+                or _private_text(row["note"])):
+            raise ValueError()
+        dimensions.append({"name": row["object"], **{key: row[key] for key in ("edge", "kind", "value_mm", "x_mm", "y_mm")}})
+    return contract.validate_result({"kind": "drawing_dimensions", "page": request["page"], "view": request["view"],
+        "dimensions": dimensions, "measurement_verification": "native_reference_and_value_checked",
+        "projection_verification": "not_checked", "manual_review_required": True}, request)
+
+
+def _dimension_status_budget(document_name, request, rows, Error):
+    # A legal private placeholder plus a 24-byte reservation for each bounded
+    # native float; this is never reported as a CAD measurement. Coordinates
+    # remain numerically bound, including integer-to-float native readback.
+    result = _dimension_preview_result(request, rows)
+    for item in result["dimensions"]:
+        item["value_mm"] = 1.2345678901234567e-123
+        item["x_mm"], item["y_mm"] = float(item["x_mm"]), float(item["y_mm"])
+    result = _load_sibling("pft_drawing_dimensions_contract").validate_result(result, request)
+    reservation = sum(max(0, 24 - len(json.dumps(item[key])))
+                      for item in result["dimensions"] for key in ("value_mm", "x_mm", "y_mm"))
+    record = {"state": "applied", "document": document_name, "operation": "add_drawing_dimensions",
+              "changed_count": len(rows), "native_confirmation": True,
+              "result": {"changed_count": len(rows), "design_result": result}}
+    encoded = json.dumps(_status_dto(record, "x" * 32), ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    budget = len(encoded) + reservation
+    if budget > MAX_STATUS_BYTES:
+        raise Error("PART_STATUS_TOO_LARGE", "尺寸结果的预计状态超过响应大小限制；未创建 token，也未修改对象。")
+    return budget
+
+
 def _prepare(params, app, gui, Error):
     model, controller = _mvc()
     try:
@@ -493,9 +603,45 @@ def _prepare(params, app, gui, Error):
         raise Error("PART_PREVIEW_UNAVAILABLE", _reason(error))
     objects = _objects(document, params["objectNames"], Error)
     operation = params["operation"]
-    snapshots = [] if operation == "set_pad_length" else [model._snapshot(obj) for obj in objects]
+    snapshots = [] if operation in {"set_pad_length", "create_drawing", "add_drawing_dimensions"} else [model._snapshot(obj) for obj in objects]
     plan, link_states = {}, []
-    if operation == "set_pad_length":
+    drawing_request = None
+    if operation == "add_drawing_dimensions":
+        dimensions = _dimensions()
+        dimension_request = _load_sibling("pft_drawing_dimensions_contract").validate_request({
+            "page": objects[0].Name, "view": params["viewName"], "dimensions": params["dimensions"]})
+        try:
+            design_plan, rows = dimensions.prepare_plan(app, gui, document, objects[0],
+                _objects(document, [params["viewName"]], Error)[0], deepcopy(dimension_request["dimensions"]), controller)
+            try:
+                actual = _load_sibling("pft_drawing_dimensions_contract").validate_request(design_plan["request"])
+                if actual != dimension_request:
+                    raise ValueError()
+                _dimension_status_budget(document.Name, dimension_request, rows, Error)
+            except (KeyError, TypeError, ValueError):
+                raise Error("DIMENSION_RESULT_INVALID", "尺寸预览格式未通过核对，未创建 token。") from None
+            plan = {"dimensions_plan": design_plan, "dimensions_input": dimension_request}
+        except dimensions.PftDrawingDimensionsError as error:
+            rows = [{"object": objects[0].Name, "field": "TechDraw dimension", "old": None, "new": None,
+                     "status": "blocked", "reason": "尺寸预览不可用（%s），请在 FreeCAD 中检查后重新预览。" % _fixed_error(error)}]
+    elif operation == "create_drawing":
+        drawing = _drawing()
+        drawing_request = {"source": objects[0].Name, "page": None}
+        try:
+            design_plan, rows = drawing.prepare_plan(app, gui, document, objects[0], controller)
+            try:
+                drawing_request = _load_sibling("pft_drawing_contract").validate_design_request(design_plan["request"])
+                if (drawing_request["source"] != objects[0].Name or type(rows) is not list or len(rows) != 5
+                        or any(type(row) is not dict or row.get("status") != "change" for row in rows)):
+                    raise ValueError()
+                _drawing_status_budget(document.Name, drawing_request, rows, Error)
+            except (KeyError, TypeError, ValueError):
+                raise Error("DRAWING_RESULT_INVALID", "图纸草稿预览格式未通过核对，未创建 token。") from None
+            plan = {"drawing_plan": design_plan, "drawing_input": drawing_request}
+        except drawing.PftDrawingError as error:
+            rows = [{"object": objects[0].Name, "field": "TechDraw draft node", "old": None, "new": None,
+                     "status": "blocked", "reason": "图纸草稿预览不可用（%s），请在 FreeCAD 中检查后重新预览。" % _fixed_error(error)}]
+    elif operation == "set_pad_length":
         pad = _pad()
         try:
             design_plan, rows = pad.prepare_plan(app, gui, document, params["bodyName"], objects[0], params["lengthMm"], controller)
@@ -521,7 +667,11 @@ def _prepare(params, app, gui, Error):
     response = {"document": document.Name, "operation": operation, "token": "x" * 32, "state": "prepared", "can_apply": can_apply,
             "expires_at": expires_at, "ttl_seconds": TTL_SECONDS, "changed_count": changed, "rows": rows,
             "requires_confirmation": True, "saves_document": False, "storage": "memory_only"}
-    if operation == "set_pad_length":
+    if operation == "add_drawing_dimensions":
+        response["design_request"] = deepcopy(dimension_request)
+    elif operation == "create_drawing":
+        response["design_request"] = dict(drawing_request)
+    elif operation == "set_pad_length":
         response["design_request"] = {"body": params["bodyName"], "pad": objects[0].Name, "length_mm": params["lengthMm"]}
         for row in rows:
             row.update(body=params["bodyName"], unit="mm", recompute_roots=[params["bodyName"]])
@@ -537,6 +687,20 @@ def _binding(record, model, controller, app, gui, Error):
     document = _document(app, record["document"], Error)
     if document is not record["document_ref"]:
         raise Error("PART_PLAN_STALE", "文档已关闭或重开，请重新预览。")
+    if record["operation"] == "add_drawing_dimensions":
+        dimensions = _dimensions()
+        try:
+            dimensions.verify_plan(app, gui, document, record["plan"]["dimensions_plan"], controller)
+        except dimensions.PftDrawingDimensionsError as error:
+            raise Error(error.code, str(error)) from None
+        return document
+    if record["operation"] == "create_drawing":
+        drawing = _drawing()
+        try:
+            drawing.verify_plan(app, gui, document, record["plan"]["drawing_plan"], controller)
+        except drawing.PftDrawingError as error:
+            raise Error(error.code, str(error)) from None
+        return document
     if record["operation"] == "set_pad_length":
         pad = _pad()
         try:
@@ -567,6 +731,10 @@ def _apply(params, app, gui, Error, _native_grant=None):
         _expire(record, time.monotonic())
         if record["state"] == "expired":
             raise Error("PART_TOKEN_EXPIRED", "预览已超过五分钟，请重新预览。")
+        if record["operation"] == "add_drawing_dimensions" and _native_grant is None:
+            raise Error("DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "图纸尺寸只能由原生窗口的人工确认回调添加，未消费预览。")
+        if record["operation"] == "create_drawing" and _native_grant is None:
+            raise Error("DRAWING_NATIVE_CONFIRMATION_REQUIRED", "图纸草稿只能由原生确认窗口的人工确认回调创建，未消费预览。")
         if record["operation"] == "set_pad_length" and _native_grant is None:
             raise Error("PAD_NATIVE_CONFIRMATION_REQUIRED", "Pad 长度只能由原生确认窗口的人工确认回调执行，未消费预览。")
         if record["state"] == "applied":
@@ -591,7 +759,29 @@ def _apply(params, app, gui, Error, _native_grant=None):
         objects, snapshots, plan = record["objects"], record["snapshots"], record["plan"]
         operation = record["operation"]
         design_result = None
-        if operation == "set_pad_length":
+        if operation == "add_drawing_dimensions":
+            dimensions = _dimensions()
+            try:
+                design_result = dimensions.apply_plan(app, gui, document, plan["dimensions_plan"], controller)
+            except dimensions.PftDrawingDimensionsError as error:
+                raise Error(error.code, str(error)) from None
+            try:
+                design_result = _load_sibling("pft_drawing_dimensions_contract").validate_result(design_result, plan["dimensions_input"])
+            except ValueError:
+                raise Error("DIMENSION_RESULT_INVALID", "尺寸结果格式未通过核对；不会重试，请检查文档和撤销记录。") from None
+            changed = len(design_result["dimensions"])
+        elif operation == "create_drawing":
+            drawing = _drawing()
+            try:
+                design_result = drawing.apply_plan(app, gui, document, plan["drawing_plan"], controller)
+            except drawing.PftDrawingError as error:
+                raise Error(error.code, str(error)) from None
+            try:
+                design_result = _load_sibling("pft_drawing_contract").validate_design_result(design_result, plan["drawing_input"])
+            except ValueError:
+                raise Error("DRAWING_RESULT_INVALID", "图纸草稿结果格式未通过核对；不会重试，请检查文档和撤销记录。") from None
+            changed = 5
+        elif operation == "set_pad_length":
             pad = _pad()
             try:
                 design_result = pad.apply_plan(app, gui, document, plan["pad_plan"], controller)

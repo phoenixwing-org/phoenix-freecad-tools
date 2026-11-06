@@ -176,6 +176,7 @@ test('Python实际bridge/business与TS合同贯通，纯fake原生窗口回调�
   const fixturePath = fileURLToPath(new URL('./python/test_pft_business.py', import.meta.url));
   const python = `import importlib.util
 import json
+from pathlib import Path
 import sys
 import types
 
@@ -186,6 +187,10 @@ def load(name, path):
     return module
 
 bridge = load("pft_approval_contract_bridge", sys.argv[1])
+# Load the neutral native-ID adapter explicitly; isolated mode keeps cwd and
+# unrelated test directories outside Python's module search path.
+sys.modules["test_pft_workbench_tools"] = load("test_pft_workbench_tools",
+    Path(sys.argv[2]).with_name("test_pft_workbench_tools.py"))
 fixtures = load("pft_approval_contract_fixtures", sys.argv[2])
 case = fixtures.BusinessTests()
 case.setUp()

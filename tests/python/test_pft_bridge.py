@@ -18,6 +18,15 @@ spec.loader.exec_module(bridge)
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_development_port_is_isolated_and_bad_development_configuration_is_rejected(self):
+        self.assertEqual(bridge._default_port({}), 9876)
+        self.assertEqual(bridge._default_port({"PFT_DEVELOPMENT_PORT": "9877"}), 9876)
+        self.assertEqual(bridge._default_port({"PFT_DEVELOPMENT": "1"}), 9877)
+        self.assertEqual(bridge._default_port({"PFT_DEVELOPMENT": "1", "PFT_DEVELOPMENT_PORT": "9878"}), 9878)
+        for value in ("", "-1", "0", "65536", "9877;other", "９８７７"):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                bridge._default_port({"PFT_DEVELOPMENT": "1", "PFT_DEVELOPMENT_PORT": value})
+
     def test_ping_and_status_without_freecad_or_qt(self):
         self.assertEqual(bridge.process_request({"method": "ping"}), {"ok": True, "data": {"pong": True}})
         status = bridge.process_request({"method": "get_status", "params": {}})
@@ -25,6 +34,27 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(status["data"]["protocol_version"], 1)
         self.assertEqual(status["data"]["addon_version"], "0.3.2")
         self.assertFalse(status["data"]["running"])
+
+    def test_drawing_capability_is_exact_detached_and_input_dispatch_remains_strict(self):
+        expected = {"version": 1, "operation": "create_drawing", "confirmation": "native_gui_only",
+            "preview_method": "prepare_part_changes", "request_method": "request_part_change_approval",
+            "status_method": "get_part_change_status", "paper": "A4_landscape", "projection": "first_angle",
+            "views": ["front", "top", "axonometric"], "source_scope": "single_native_solid",
+            "saves_document": False, "projection_verification": "not_checked"}
+        status = bridge.get_status()
+        self.assertEqual(status["drawing_create"], expected)
+        status["drawing_create"]["views"].clear()
+        self.assertEqual(bridge.get_status()["drawing_create"], expected)
+        with patch.object(bridge, "_dispatch_gui", return_value={"synthetic": True}) as dispatch:
+            params = {"docName": "ExampleDoc", "objectNames": ["Source"], "operation": "create_drawing"}
+            self.assertTrue(bridge.process_request({"method": "prepare_part_changes", "params": params})["ok"])
+            dispatch.assert_called_once_with("prepare_part_changes", params)
+            dispatch.reset_mock()
+            for fields in ({"values": {}}, {"bodyName": "Body"}, {"lengthMm": 10}, {"confirmed": True},
+                           {"objectNames": ["Source", "Other"]}):
+                bad = dict(params); bad.update(fields)
+                self.assertFalse(bridge.process_request({"method": "prepare_part_changes", "params": bad})["ok"])
+            dispatch.assert_not_called()
 
     def test_design_capability_and_strict_dispatch_preserve_read_only_route(self):
         status = bridge.get_status()
@@ -93,6 +123,327 @@ class ProtocolTests(unittest.TestCase):
         for body in [b'{"method":"ping","method":"view_fit"}', b'{"x":NaN}', b'{"x":Infinity}', b'\xff']:
             with self.assertRaises((ValueError, UnicodeError)):
                 bridge._decode_json(body)
+
+
+
+
+class InstanceAdmissionTests(unittest.TestCase):
+    """Synthetic identity checks never read CAD, registries or configuration."""
+    def setUp(self):
+        self.identity = {"version": 1, "instance_id": "1"*32, "service_id": "2"*32,
+                         "pid": 1234, "guard_required": True}
+        self.dispatcher = object()
+        for name, value in (("_service_identity", self.identity), ("_dispatcher", self.dispatcher),
+                            ("_server", object()), ("_request_origins", {}), ("_token_origins", {})):
+            context = patch.object(bridge, name, value); context.start(); self.addCleanup(context.stop)
+        self.target = {key: self.identity[key] for key in ("instance_id", "service_id")}
+        self.admission = (self.identity, self.dispatcher)
+
+    def request(self, method, params=None, target=True, listener=None):
+        payload = {"method": method, "params": params or {}}
+        if target is not False: payload["target"] = self.target if target is True else target
+        return bridge.process_request(payload, _listener=listener)
+
+    def test_discovery_guards_every_fixed_operation_before_dispatch_or_claim(self):
+        with patch.object(bridge, "_dispatch_gui") as dispatch, patch.object(bridge._runtime, "claim") as claim:
+            for method, params in (("list_documents", {}), ("execute_script", {"requestId":"guard-script", "code":"result = 1"}),
+                                   ("get_script_status", {"requestId":"guard-script"}),
+                                   ("get_part_change_status", {"token":"a"*32})):
+                reply = self.request(method, params, target=False)
+                self.assertEqual(reply["error"]["code"], "INSTANCE_TARGET_REQUIRED")
+            dispatch.assert_not_called(); claim.assert_not_called()
+
+    def test_unguarded_initial_handshake_allowed_but_wrong_target_ping_rejected(self):
+        self.assertTrue(self.request("ping", target=False)["ok"])
+        for method in ("get_status", "ping"):
+            self.assertEqual(self.request(method, target={**self.target,"service_id":"3"*32})["error"]["code"], "INSTANCE_TARGET_MISMATCH")
+
+    def test_malformed_targets_rejected_before_any_work(self):
+        for target in (None, {}, [], {**self.target,"pid":1234}, {**self.target,"service_id":"A"*32},
+                       {**self.target,"instance_id":True}):
+            with self.subTest(target=target):
+                self.assertEqual(self.request("ping",target=target)["error"]["code"], "INVALID_TARGET")
+
+    def test_status_is_detached_and_has_no_registry_or_cad_reads(self):
+        with patch.object(bridge, "_server", types.SimpleNamespace(server_address=("127.0.0.1",12345))), \
+             patch.object(bridge, "_server_thread", types.SimpleNamespace(is_alive=lambda:True)), \
+             patch.object(bridge._instance_registry, "resolve_instance_directory", side_effect=AssertionError("registry access")):
+            result = self.request("get_status")["data"]
+            self.assertEqual(result["instance_routing"], self.identity)
+            result["instance_routing"]["service_id"] = "4"*32
+            self.assertEqual(bridge.get_status()["instance_routing"], self.identity)
+
+    def test_frozen_dispatcher_and_service_rechecked_before_gui_dispatch(self):
+        with patch.object(bridge, "_dispatch_gui", return_value=[]) as dispatch:
+            self.assertTrue(self.request("list_documents")["ok"])
+            dispatch.assert_called_once_with("list_documents", {}, self.admission)
+        for name, replacement in (("_service_identity", dict(self.identity)), ("_dispatcher", object()), ("_server", None)):
+            with self.subTest(name=name), patch.object(bridge,name,replacement), patch.object(bridge, "_dispatch_gui") as dispatch:
+                result = self.request("list_documents", listener=self.admission)
+                self.assertEqual(result["error"]["code"], "INSTANCE_TARGET_MISMATCH")
+                dispatch.assert_not_called()
+
+    def test_script_origin_cannot_cross_service_even_new_guard_matches(self):
+        params={"requestId":"routed-script", "code":"result = 1"}
+        with patch.object(bridge._runtime,"claim", return_value=(False,{"state":"completed"})) as claim:
+            self.assertTrue(self.request("execute_script",params)["ok"])
+            bridge._service_identity = {**self.identity,"service_id":"3"*32}
+            self.target["service_id"] = "3"*32
+            for method in ("execute_script", "get_script_status"):
+                result = self.request(method,params if method == "execute_script" else {"requestId":params["requestId"]})
+                self.assertEqual(result["error"]["code"], "INSTANCE_AFFINITY_MISMATCH")
+            self.assertEqual(claim.call_count,1)
+
+    def test_unknown_guarded_token_rejected_before_business_query(self):
+        with patch.object(bridge._business,"perform") as perform, patch.object(bridge,"_dispatch_gui") as dispatch:
+            for method in ("get_part_change_status","request_part_change_approval","apply_part_changes"):
+                self.assertEqual(self.request(method,{"token":"a"*32})["error"]["code"],"INSTANCE_AFFINITY_UNKNOWN")
+            perform.assert_not_called(); dispatch.assert_not_called()
+
+    def test_preview_token_stays_with_producer_and_cannot_move_after_restart(self):
+        params={"docName":"Example", "objectNames":["Source"], "operation":"create_drawing"}
+        with patch.object(bridge,"_dispatch_gui",return_value={"token":"b"*32}):
+            self.assertTrue(self.request("prepare_part_changes",params)["ok"])
+        with patch.object(bridge._business,"perform",return_value={"state":"prepared"}) as perform:
+            self.assertTrue(self.request("get_part_change_status",{"token":"b"*32})["ok"])
+            bridge._service_identity = {**self.identity,"service_id":"3"*32}; self.target["service_id"]="3"*32
+            self.assertEqual(self.request("get_part_change_status",{"token":"b"*32})["error"]["code"],"INSTANCE_AFFINITY_MISMATCH")
+            self.assertEqual(perform.call_count,1)
+
+    def test_target_change_before_gui_marks_script_cancelled_not_unknown_running(self):
+        params={"requestId":"stale-before-gui", "code":"result = 1"}
+        with patch.object(bridge,"_dispatch_gui",side_effect=bridge.PftBridgeError("INSTANCE_TARGET_MISMATCH","changed")):
+            reply=self.request("execute_script",params)
+        self.assertEqual(reply["error"]["code"],"INSTANCE_TARGET_MISMATCH")
+        self.assertEqual(bridge._runtime.status(params["requestId"],bridge.PftBridgeError)["state"],"cancelled")
+
+    def test_affinity_bound_is_retained_on_unknown_dispatch_and_no_eviction(self):
+        params={"requestId":"unknown-dispatch", "code":"result = 1"}
+        with patch.object(bridge._runtime,"claim",return_value=(True,{})), \
+             patch.object(bridge._runtime,"dispatch_error"), \
+             patch.object(bridge,"_dispatch_gui",side_effect=bridge.PftBridgeError("GUI_TIMEOUT","unknown")):
+            self.assertEqual(self.request("execute_script",params)["error"]["code"],"GUI_TIMEOUT")
+        self.assertEqual(bridge._request_origins[params["requestId"]],("1"*32,"2"*32))
+        with patch.object(bridge,"_MAX_ORIGINS",1), patch.object(bridge._runtime,"claim") as claim:
+            self.assertEqual(self.request("execute_script",{**params,"requestId":"another"})["error"]["code"],"INSTANCE_AFFINITY_LIMIT")
+            claim.assert_not_called()
+            self.assertIn(params["requestId"],bridge._request_origins)
+
+    def test_legacy_no_target_still_dispatches_on_fixed_listener(self):
+        bridge._service_identity = {**self.identity,"guard_required":False}
+        with patch.object(bridge,"_dispatch_gui",return_value=[]) as dispatch:
+            self.assertTrue(self.request("list_documents",target=False)["ok"])
+            self.assertEqual(dispatch.call_args.args[2],(bridge._service_identity,self.dispatcher))
+
+
+class SharedConfigurationIntegrationTests(unittest.TestCase):
+    """Every startup dependency is synthetic; no listener/thread/config file."""
+    def setUp(self):
+        self.events = []
+        self.servers, self.dispatchers, self.threads = [], [], []
+        self.record = {"source": "user_config", "settings": {"schema_version": 1,
+                       "bridge": {"preferred_port": 12345}},
+                       "config_path": "/synthetic/PhoenixTools/mcp/config.json", "etag": "a"*64}
+        owner = self
+        class Dispatcher:
+            def __init__(self):
+                self.approval_epoch = None
+                owner.dispatchers.append(self)
+                owner.events.append("dispatcher")
+            def close(self): owner.events.append("dispatcher-close")
+        class Server:
+            def __init__(self, address, handler):
+                self.server_address = address[0], address[1] or 12349
+                owner.servers.append(self)
+                owner.events.append(("listen", address))
+            def serve_forever(self, **kwargs): raise AssertionError("No real server")
+            def server_close(self): owner.events.append("server-close")
+        class Thread:
+            def __init__(self, **kwargs):
+                self.alive = False
+                owner.threads.append(self)
+            def start(self): self.alive = True; owner.events.append("thread-start")
+            def is_alive(self): return self.alive
+        self.patches = [
+            patch.dict(bridge.os.environ, {}, clear=True),
+            patch.object(bridge, "_server", None),
+            patch.object(bridge, "_server_thread", None),
+            patch.object(bridge, "_dispatcher", None),
+            patch.object(bridge, "_stop_thread", None),
+            patch.object(bridge, "_service_identity", None),
+            patch.object(bridge, "_registration", None),
+            patch.object(bridge, "_registration_error", None),
+            patch.object(bridge, "_listener_configuration", {"source": "default", "config_path": None,
+                                                           "preferred_port": 9876, "effective_port": 9876}),
+            patch.object(bridge, "_create_gui_dispatcher", Dispatcher),
+            patch.object(bridge, "_PftBridgeHttpServer", Server),
+            patch.object(bridge.threading, "Thread", Thread),
+            patch.object(bridge._business, "cancel_pending_approvals",
+                         side_effect=lambda: self.events.append("cancel-approval")),
+            patch.object(bridge._business, "begin_approval_lifecycle", return_value=42),
+        ]
+        for context in self.patches:
+            context.start()
+            self.addCleanup(context.stop)
+        self.read_patch = patch.object(bridge._mcp_settings, "read_config",
+                                       side_effect=AssertionError("Unit test read real configuration"))
+        self.read = self.read_patch.start()
+        self.addCleanup(self.read_patch.stop)
+
+    def test_discovery_uses_dynamic_port_publishes_only_after_bind_and_cleans_exact_handle(self):
+        self.record["settings"]={"schema_version":2,"bridge":{"preferred_port":12345},"discovery":{"enabled":True}}
+        self.read.side_effect=None; self.read.return_value=self.record
+        registration=types.SimpleNamespace(remove=lambda:self.events.append("registration-remove"))
+        def publish(record, **kwargs):
+            self.assertEqual(record["url"],"http://127.0.0.1:12349/")
+            self.assertEqual(record["instance_id"],bridge._INSTANCE_ID)
+            self.assertIn(("listen",("127.0.0.1",0)),self.events)
+            self.assertNotIn("thread-start",self.events)
+            self.events.append("publish")
+            return registration
+        with patch.object(bridge._instance_registry,"resolve_instance_directory",return_value=Path("/synthetic/instances")), \
+             patch.object(bridge._instance_registry,"publish_instance",side_effect=publish) as writer:
+            first=bridge.start_server()
+        self.assertTrue(first["instance_routing"]["guard_required"])
+        self.assertEqual(first["listener_configuration"]["preferred_port"],12345)
+        self.assertEqual(writer.call_count,1)
+        before=first["instance_routing"]
+        bridge.stop_server()
+        self.assertIsNone(bridge.get_status()["instance_routing"])
+        self.assertIn("registration-remove",self.events)
+        self.assertIsNone(bridge._registration)
+        self.assertEqual(before["instance_id"],bridge._INSTANCE_ID)
+
+    def test_uncertain_registration_cleanup_is_reported_and_never_retried_by_stop(self):
+        remove=unittest.mock.Mock(side_effect=bridge._instance_registry.PftInstanceRegistryError("REMOVE_UNVERIFIED",uncertain=True))
+        bridge._registration=types.SimpleNamespace(remove=remove)
+        first=bridge.stop_server()
+        self.assertEqual(first["instance_registration_error"],{"code":"INSTANCE_REGISTRY_REMOVE_UNVERIFIED","uncertain":True})
+        self.assertFalse(first["running"])
+        self.assertEqual(bridge.stop_server()["instance_registration_error"],first["instance_registration_error"])
+        self.assertEqual(remove.call_count,1)
+        with self.assertRaises(bridge.PftBridgeError) as raised:bridge.start_server(12340)
+        self.assertEqual(raised.exception.code,"INSTANCE_REGISTRY_CLEANUP_REQUIRED")
+
+    def test_registry_publish_failure_closes_only_own_unstarted_listener(self):
+        with patch.object(bridge._instance_registry,"publish_instance",side_effect=bridge._instance_registry.PftInstanceRegistryError("INSTANCE_REGISTRY_INVALID_RECORD")):
+            with self.assertRaises(bridge.PftBridgeError) as raised:
+                bridge.start_server(0,discovery_registration_directory=Path("/synthetic/instances"))
+        self.assertEqual(raised.exception.code,"INSTANCE_REGISTRY_INVALID_RECORD")
+        self.assertIn("server-close",self.events); self.assertIn("dispatcher-close",self.events)
+        self.assertNotIn("thread-start",self.events)
+        self.assertFalse(bridge.get_status()["running"])
+        self.assertIsNone(bridge.get_status()["instance_routing"])
+        self.read.assert_not_called()
+
+    def test_old_http_handler_never_adopts_a_new_service_or_unregistered_dispatcher(self):
+        bridge.start_server(12340)
+        handler=self.servers[-1].pft_process_payload
+        first=dict(bridge._service_identity)
+        self.assertTrue(handler({"method":"ping"})["ok"])
+        bridge._server=bridge._server_thread=bridge._dispatcher=None
+        bridge.start_server(12340)
+        self.assertEqual(first["instance_id"],bridge._service_identity["instance_id"])
+        self.assertNotEqual(first["service_id"],bridge._service_identity["service_id"])
+        self.assertEqual(handler({"method":"ping"})["error"]["code"],"INSTANCE_TARGET_MISMATCH")
+
+    def test_import_and_status_are_disk_free(self):
+        fresh_spec = importlib.util.spec_from_file_location("pft_bridge_disk_free_test", BRIDGE_PATH)
+        fresh = importlib.util.module_from_spec(fresh_spec)
+        with patch.object(bridge.os, "open", side_effect=AssertionError("Configuration disk I/O")), \
+             patch.object(Path, "home", side_effect=AssertionError("User home resolution")):
+            fresh_spec.loader.exec_module(fresh)
+            status = fresh.get_status()
+            reply = fresh.process_request({"method": "get_status", "params": {}})
+        self.assertFalse(status["running"])
+        self.assertTrue(reply["ok"])
+        self.assertEqual(status["listener_configuration"]["source"], "default")
+        self.read.assert_not_called()
+        self.assertEqual(self.events, [])
+
+    def test_explicit_port_and_development_configuration_skip_shared_file(self):
+        for explicit, environ, expected, source in (
+            (12340, {}, 12340, "explicit"),
+            (0, {}, 12349, "explicit"),
+            (None, {"PFT_DEVELOPMENT": "1"}, 9877, "development"),
+            (None, {"PFT_DEVELOPMENT": "1", "PFT_DEVELOPMENT_PORT": "12341"}, 12341, "development"),
+            (12342, {"PFT_DEVELOPMENT": "1", "PFT_DEVELOPMENT_PORT": "invalid"}, 12342, "explicit"),
+        ):
+            with self.subTest(explicit=explicit, source=source), patch.dict(bridge.os.environ, environ, clear=True):
+                bridge._server = bridge._server_thread = bridge._dispatcher = None
+                status = bridge.start_server(explicit)
+                self.assertTrue(status["running"])
+                self.assertEqual(status["port"], expected)
+                self.assertEqual(status["listener_configuration"]["source"], source)
+        self.read.assert_not_called()
+
+    def test_regular_start_reads_selected_record_before_lifecycle_changes(self):
+        for source, port in (("default", 9876), ("user_config", 12345)):
+            with self.subTest(source=source):
+                bridge._server = bridge._server_thread = bridge._dispatcher = None
+                self.events.clear()
+                record = {**self.record, "source": source,
+                          "settings": {"schema_version": 1, "bridge": {"preferred_port": port}}}
+                def observe_read():
+                    self.assertEqual(self.events, [])
+                    return record
+                self.read.side_effect = observe_read
+                status = bridge.start_server()
+                self.assertEqual(status["port"], port)
+                self.assertEqual(status["listener_configuration"], {"source": source,
+                    "config_path": record["config_path"], "preferred_port": port, "effective_port": port})
+                self.assertEqual(self.events[0], "cancel-approval")
+                self.assertEqual(self.dispatchers[-1].approval_epoch, 42)
+        self.assertEqual(self.read.call_count, 2)
+
+    def test_invalid_shared_configuration_does_not_cancel_approval_or_build_dispatcher(self):
+        self.read.side_effect = bridge._mcp_settings.PftMcpSettingsError("MCP_SETTINGS_INVALID")
+        before = bridge.get_status()
+        with self.assertRaises(bridge.PftBridgeError) as raised:
+            bridge.start_server()
+        self.assertEqual(raised.exception.code, "MCP_SETTINGS_INVALID")
+        self.assertEqual(bridge.get_status(), before)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.servers, [])
+        self.assertEqual(self.dispatchers, [])
+        self.assertEqual(self.threads, [])
+
+    def test_existing_running_server_does_not_re_read_or_switch_ports(self):
+        self.read.side_effect = None
+        self.read.return_value = self.record
+        first = bridge.start_server()
+        self.assertEqual(self.read.call_count, 1)
+        events = list(self.events)
+        self.read.side_effect = AssertionError("Running service re-read configuration")
+        for requested in (None, 12347):
+            again = bridge.start_server(requested)
+            self.assertEqual(again, first)
+        self.assertEqual(self.events, events)
+        self.assertEqual(self.read.call_count, 1)
+        self.assertEqual(len(self.servers), 1)
+
+    def test_stopping_or_invalid_explicit_start_never_reads_configuration(self):
+        with patch.object(bridge, "_stop_thread", types.SimpleNamespace(is_alive=lambda: True)):
+            with self.assertRaises(bridge.PftBridgeError) as raised:
+                bridge.start_server()
+        self.assertEqual(raised.exception.code, "SERVER_STOPPING")
+        for port in (True, False, -1, 65536, 9876.0, "9876"):
+            with self.subTest(port=port), self.assertRaises(bridge.PftBridgeError) as raised:
+                bridge.start_server(port)
+            self.assertEqual(raised.exception.code, "INVALID_PORT")
+        self.read.assert_not_called()
+        self.assertEqual(self.events, [])
+
+    def test_failed_config_source_remains_read_only_in_stopped_status(self):
+        self.read.side_effect = bridge._mcp_settings.PftMcpSettingsError("MCP_SETTINGS_UNSAFE")
+        with self.assertRaises(bridge.PftBridgeError):
+            bridge.start_server()
+        self.read.side_effect = AssertionError("Status must not repeat disk access")
+        detached = bridge.get_status()
+        detached["listener_configuration"]["effective_port"] = 12348
+        self.assertEqual(bridge.get_status()["port"], 9876)
+        self.assertEqual(self.read.call_count, 1)
+
 
 
 class WorkbenchLoaderTests(unittest.TestCase):
@@ -297,6 +648,18 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(direct, {"state": "awaiting_confirmation"})
         self.assertEqual(job.result, direct)
         self.assertEqual(calls, [("request_part_change_approval", {"token": "synthetic-token"}, {"_approval_epoch": 41})] * 2)
+
+    def test_guarded_queued_job_is_rechecked_before_touching_gui(self):
+        identity={"version":1,"instance_id":"1"*32,"service_id":"2"*32,"pid":1234,"guard_required":True}
+        admission=(identity,self.dispatcher)
+        job=bridge._PftGuiJob("view_fit",{},admission)
+        with patch.object(bridge,"_service_identity",{**identity,"service_id":"3"*32}), \
+             patch.object(bridge,"_dispatcher",self.dispatcher), patch.object(bridge,"_server",object()), \
+             patch.object(bridge,"_perform_gui") as perform:
+            self.dispatcher.run(job)
+        perform.assert_not_called()
+        self.assertEqual(job.error.code,"INSTANCE_TARGET_MISMATCH")
+        self.assertTrue(job.event.is_set())
 
     def test_worker_executes_on_gui_thread(self):
         with patch.object(bridge, "_perform_gui", side_effect=lambda method, params: threading.get_ident()):

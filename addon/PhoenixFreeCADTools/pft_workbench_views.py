@@ -336,12 +336,22 @@ def show_mcp_status_dialog(gui, snapshot):
     unknown = tr("未知")
     host, port = snapshot.get("host"), snapshot.get("port")
     address = "%s:%s" % (host, port) if host and port is not None else unknown
+    identity_lines = []
+    routing = snapshot.get("instance_routing")
+    if (isinstance(routing, dict) and routing.get("version") == 1
+            and all(isinstance(routing.get(key), str) and len(routing[key]) == 32
+                    and all(c in "0123456789abcdef" for c in routing[key])
+                    for key in ("instance_id", "service_id"))
+            and type(routing.get("pid")) is int and routing["pid"] > 0):
+        identity_lines = [tr("FreeCAD 实例：%s · PID %s") % (routing["instance_id"][:8], routing["pid"]),
+                          tr("服务标识：%s") % routing["service_id"][:8]]
     message = "\n".join((
         tr("FreeCAD 桥接状态：%s") % state,
         tr("这是打开面板时读取的状态快照。"),
         tr("桥接地址：%s") % address,
         tr("插件版本：%s") % (snapshot.get("addon_version") or unknown),
         tr("协议版本：%s") % (snapshot.get("protocol_version") or unknown),
+        *identity_lines,
         "",
         tr("这里仅表示 FreeCAD 内的本机桥接状态。Node MCP 服务和聊天客户端连接需另行验证。"),
     ))
@@ -413,9 +423,16 @@ def show_settings_dialog(app, gui, on_applied=None, bridge_snapshot=None):
         address = "%s:%s" % (host, port) if host and port is not None else tr("未知")
         layout.addWidget(_plain_label(widgets, core, tr("桥接地址：%s") % address))
         layout.addWidget(_plain_label(widgets, core, tr("已加载插件版本：%s") % (snapshot.get("addon_version") or tr("未知"))))
-        bridge_note = _plain_label(widgets, core, tr("以上只读信息来自当前 FreeCAD 桥接；服务地址和端口不在此处修改。"))
+        bridge_note = _plain_label(widgets, core, tr("以上只读信息来自当前 FreeCAD 桥接；共享端口在独立的连接设置中修改。"))
         bridge_note.setWordWrap(True)
         layout.addWidget(bridge_note)
+        connection_settings = widgets.QPushButton(tr("MCP 连接设置…"))
+        connection_settings.setObjectName("PhoenixTools_OpenMcpSettings")
+        def open_connection_settings():
+            from pft_mcp_settings_views import show_mcp_settings_dialog
+            show_mcp_settings_dialog(gui, bridge_snapshot=snapshot)
+        connection_settings.clicked.connect(open_connection_settings)
+        layout.addWidget(connection_settings)
         layout.addStretch(1)
         buttons = widgets.QDialogButtonBox(widgets.QDialogButtonBox.Ok | widgets.QDialogButtonBox.Cancel)
         buttons.button(widgets.QDialogButtonBox.Ok).setText(tr("应用设置"))

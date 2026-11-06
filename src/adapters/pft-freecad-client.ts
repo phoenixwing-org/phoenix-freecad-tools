@@ -5,6 +5,11 @@ import { pftInspectDesign, type PftDesignInspectionInput, type PftDesignInspecti
 import { pftRecomputeDocument, PftRecomputeCapabilitySchema, type PftRecomputeData } from '../pft-recompute.js';
 import { pftPartApproval, PftPartApprovalCapabilitySchema, type PftPartApprovalData } from '../pft-part-approval.js';
 import { pftPreparePadLength, PftPadLengthCapabilitySchema, type PftPadLengthInput } from '../pft-pad-length.js';
+import { pftPrepareDrawing, PftDrawingCapabilitySchema, type PftDrawingInput } from '../pft-drawing.js';
+import { pftPrepareDrawingDimensions, PftDrawingDimensionsCapabilitySchema, type PftDrawingDimensionsInput } from '../pft-drawing-dimensions.js';
+import { pftInspectDrawingReferences, PftDrawingReferencesCapabilitySchema } from '../pft-drawing-references.js';
+import { PFT_THUMBNAIL_WORKER_RESPONSE_BYTES, PftThumbnailWorkerValidationError, pftDecodeThumbnailJob, pftDecodeThumbnailWorkerStatus,
+  pftThumbnailJobInput, pftThumbnailRenderInput, type PftThumbnailJob, type PftThumbnailJobInput, type PftThumbnailRenderInput, type PftThumbnailWorkerStatus } from '../pft-thumbnail-worker.js';
 
 export class PftBridgeError extends Error {
   constructor(public readonly code: string, message: string) { super(message); this.name = 'PftBridgeError'; }
@@ -16,14 +21,14 @@ export type PftDocumentInfoInput = DocumentInput & PftReadGuards;
 export type ListObjectsInput = PftDocumentInfoInput & { offset?: number | undefined; limit?: number | undefined; typeId?: string | undefined };
 export type ObjectInfoInput = PftDocumentInfoInput & { object: string; properties?: string[] | undefined };
 export type GeometryInput = DocumentInput & { object: string; subelement?: string | undefined };
-export type DrawingPageInput = DocumentInput & { page: string };
+export type DrawingPageInput = DocumentInput & { page: string; view?: string | undefined; offset?: number | undefined; limit?: number | undefined };
 export type ViewInput = DocumentInput & { view: StandardView; fit?: boolean | undefined };
 export type CaptureInput = DocumentInput & { width?: number | undefined; height?: number | undefined };
 export type ObjectsInput = { document: string; objects: string[] };
 export type VisibilityInput = ObjectsInput & { visible: boolean };
-export type PartOperation = 'normalize_names' | 'sync_link_labels' | 'initialize_properties' | 'recommend_properties' | 'set_properties' | 'set_pad_length';
+export type PartOperation = 'normalize_names' | 'sync_link_labels' | 'initialize_properties' | 'recommend_properties' | 'set_properties' | 'set_pad_length' | 'create_drawing' | 'add_drawing_dimensions';
 export type BomField = 'PartNumber' | 'PartVersion' | 'TypeCode' | 'ModelSeries' | 'PartName';
-export type PartChangesInput = PftPadLengthInput | (ObjectsInput & { operation: Exclude<PartOperation, 'set_pad_length'>;
+export type PartChangesInput = PftPadLengthInput | PftDrawingInput | PftDrawingDimensionsInput | (ObjectsInput & { operation: Exclude<PartOperation, 'set_pad_length' | 'create_drawing' | 'add_drawing_dimensions'>;
   values?: Record<string, Partial<Record<BomField, string | undefined>>> | undefined; body?: never; lengthMm?: never });
 export type CapturedView = { document: string; mime_type: 'image/png'; data: string; width: number; height: number };
 
@@ -49,11 +54,25 @@ function captureResult(value: unknown, width: number, height: number): CapturedV
   return { document: value.document, mime_type: 'image/png', data: value.data, width, height };
 }
 
+export type PftInstanceTarget = Readonly<{ instance_id: string; service_id: string; pid?: number }>;
 export class PftFreeCadClient {
-  constructor(private readonly options: { url: string; timeoutMs: number }) {}
+  private readonly options: Readonly<{ url: string; timeoutMs: number }>;
+  private target: PftInstanceTarget | undefined;
+  constructor(options: { url: string; timeoutMs: number; target?: PftInstanceTarget }) {
+    this.options = Object.freeze({ url: options.url, timeoutMs: options.timeoutMs });
+    if (options.target !== undefined) {
+      if (!/^[0-9a-f]{32}(?![\s\S])/u.test(options.target.instance_id) || !/^[0-9a-f]{32}(?![\s\S])/u.test(options.target.service_id)
+          || (options.target.pid !== undefined && (!Number.isSafeInteger(options.target.pid) || options.target.pid <= 0))) {
+        throw new PftBridgeError('INSTANCE_IDENTITY_MISMATCH', 'FreeCAD instance identity is invalid; no action was sent.');
+      }
+      this.target = Object.freeze({ ...options.target });
+    }
+  }
+  get targetIdentity(): PftInstanceTarget | undefined { return this.target; }
 
-  private async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-    const body = JSON.stringify({ method, params });
+  private async call(method: string, params: Record<string, unknown> = {}, responseBytes = 1024 * 1024): Promise<unknown> {
+    const body = JSON.stringify({ method, params, ...(this.target === undefined ? {} : {
+      target: { instance_id: this.target.instance_id, service_id: this.target.service_id } }) });
     const text = await new Promise<string>((resolve, reject) => {
       const req = request(new URL('/rpc', this.options.url), {
         method: 'POST', family: 4, headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
@@ -67,8 +86,8 @@ export class PftFreeCadClient {
         const chunks: Buffer[] = []; let size = 0;
         response.on('data', (chunk: Buffer) => {
           size += chunk.length;
-          if (size > 1024 * 1024) {
-            const error = new PftBridgeError('RESPONSE_TOO_LARGE', '响应超过 1 MiB 上限');
+          if (size > responseBytes) {
+            const error = new PftBridgeError('RESPONSE_TOO_LARGE', responseBytes === 1024 * 1024 ? '响应超过 1 MiB 上限' : 'worker 响应超过 6 MiB 上限');
             reject(error); req.destroy(error); response.destroy(); return;
           }
           chunks.push(chunk);
@@ -99,6 +118,23 @@ export class PftFreeCadClient {
     const status = await this.call('get_status');
     if (!isRecord(status)) throw new PftBridgeError('INVALID_RESPONSE', '状态格式无效');
     if (status.protocol_version !== 1) throw new PftBridgeError('UNSUPPORTED_PROTOCOL', 'FreeCAD 插件协议版本不受支持');
+    const routing = status.instance_routing;
+    if (routing !== undefined || this.target !== undefined) {
+      if (!isRecord(routing) || Object.keys(routing).sort().join(',') !== 'guard_required,instance_id,pid,service_id,version'
+          || routing.version !== 1 || typeof routing.guard_required !== 'boolean'
+          || typeof routing.instance_id !== 'string' || !/^[0-9a-f]{32}(?![\s\S])/u.test(routing.instance_id)
+          || typeof routing.service_id !== 'string' || !/^[0-9a-f]{32}(?![\s\S])/u.test(routing.service_id)
+          || !Number.isSafeInteger(routing.pid) || (routing.pid as number) <= 0) {
+        throw new PftBridgeError('INSTANCE_IDENTITY_MISMATCH', 'FreeCAD instance identity could not be verified; no action was sent.');
+      }
+      if (this.target !== undefined && (routing.instance_id !== this.target.instance_id || routing.service_id !== this.target.service_id
+          || this.target.pid !== undefined && routing.pid !== this.target.pid)) {
+        throw new PftBridgeError('INSTANCE_IDENTITY_MISMATCH', 'FreeCAD instance changed; reconnect or select explicitly. No action was sent.');
+      }
+      if (this.target === undefined) this.target = Object.freeze({ instance_id: routing.instance_id,
+        service_id: routing.service_id, pid: routing.pid as number });
+    }
+
     if ('supported_methods' in status && (!Array.isArray(status.supported_methods) || status.supported_methods.length > 128
       || !status.supported_methods.every(item => typeof item === 'string' && /^[a-z][a-z0-9_]{0,99}$/u.test(item)))) {
       throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件能力清单格式无效');
@@ -116,15 +152,54 @@ export class PftFreeCadClient {
     if ('pad_length_write' in status && !PftPadLengthCapabilitySchema.safeParse(status.pad_length_write).success) {
       throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件Pad Length能力声明格式无效；未派发预览。');
     }
+    if ('drawing_create' in status && !PftDrawingCapabilitySchema.safeParse(status.drawing_create).success) {
+      throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件出图能力声明格式无效；未派发预览。');
+    }
+    if ('drawing_dimensions' in status && !PftDrawingDimensionsCapabilitySchema.safeParse(status.drawing_dimensions).success)
+      throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件尺寸能力声明格式无效；未派发预览。');
+    if ('drawing_references' in status && !PftDrawingReferencesCapabilitySchema.safeParse(status.drawing_references).success)
+      throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件投影引用能力声明格式无效；未读取。');
     return status;
   }
 
-  private async feature(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  private async feature(method: string, params: Record<string, unknown> = {}, responseBytes = 1024 * 1024): Promise<unknown> {
     const status = await this.status();
     if (!Array.isArray(status.supported_methods) || !status.supported_methods.includes(method)) {
       throw new PftBridgeError('UNSUPPORTED_CAPABILITY', '当前 FreeCAD 插件未声明此能力，请更新并重新加载插件后检查连接。');
     }
-    return this.call(method, params);
+    return this.call(method, params, responseBytes);
+  }
+
+  private async thumbnail<T>(operation: () => Promise<T>): Promise<T> {
+    try { return await operation(); }
+    catch (error) {
+      if (error instanceof PftThumbnailWorkerValidationError) throw new PftBridgeError(error.code, error.message);
+      if (error instanceof PftBridgeError && ['BRIDGE_TIMEOUT', 'CONNECTION_FAILED'].includes(error.code)) {
+        throw new PftBridgeError(error.code, '缩略图 worker 连接未完成；使用原 worker/session/jobId 查询，不自动重新提交或切换实例。');
+      }
+      throw error;
+    }
+  }
+  getThumbnailWorkerStatus(): Promise<PftThumbnailWorkerStatus> {
+    return this.thumbnail(async () => pftDecodeThumbnailWorkerStatus(await this.feature('get_thumbnail_worker_status', {}, PFT_THUMBNAIL_WORKER_RESPONSE_BYTES)));
+  }
+  renderDocumentThumbnail(input: PftThumbnailRenderInput): Promise<PftThumbnailJob> {
+    return this.thumbnail(async () => {
+      const params = pftThumbnailRenderInput(input);
+      return pftDecodeThumbnailJob(await this.feature('render_document_thumbnail', params, PFT_THUMBNAIL_WORKER_RESPONSE_BYTES), params);
+    });
+  }
+  getThumbnailJob(input: PftThumbnailJobInput): Promise<PftThumbnailJob> {
+    return this.thumbnail(async () => {
+      const params = pftThumbnailJobInput(input);
+      return pftDecodeThumbnailJob(await this.feature('get_thumbnail_job', params, PFT_THUMBNAIL_WORKER_RESPONSE_BYTES), params);
+    });
+  }
+  cancelThumbnailJob(input: PftThumbnailJobInput): Promise<PftThumbnailJob> {
+    return this.thumbnail(async () => {
+      const params = pftThumbnailJobInput(input);
+      return pftDecodeThumbnailJob(await this.feature('cancel_thumbnail_job', params, PFT_THUMBNAIL_WORKER_RESPONSE_BYTES), params);
+    });
   }
 
   async listDocuments(): Promise<string[]> {
@@ -182,8 +257,12 @@ export class PftFreeCadClient {
   listDrawingPages(document?: string): Promise<unknown> {
     return this.feature('list_drawing_pages', documentParams(document));
   }
-  inspectDrawingPage({ document, page }: DrawingPageInput): Promise<unknown> {
-    return this.feature('inspect_drawing_page', { ...documentParams(document), pageName: page });
+  inspectDrawingPage(input: DrawingPageInput): Promise<unknown> {
+    if (input.view !== undefined) return pftInspectDrawingReferences(input, { status: () => this.status(),
+      read: params => this.call('inspect_drawing_page', params) }, PftBridgeError);
+    if (input.offset !== undefined || input.limit !== undefined)
+      throw new PftBridgeError('INVALID_ARGUMENT', '投影边分页需要明确view；未读取。');
+    return this.feature('inspect_drawing_page', { ...documentParams(input.document), pageName: input.page });
   }
   setView({ document, view, fit = false }: ViewInput): Promise<unknown> {
     return this.feature('view_standard', { ...documentParams(document), view, fit });
@@ -203,6 +282,14 @@ export class PftFreeCadClient {
       recompute: params => this.call('recompute_document', params) }, PftBridgeError);
   }
   async preparePartChanges(input: PartChangesInput): Promise<unknown> {
+    if (input.operation === 'add_drawing_dimensions') return pftPrepareDrawingDimensions(input,
+      { status: () => this.status(), prepare: params => this.call('prepare_part_changes', params) }, PftBridgeError);
+    if (['page', 'view', 'dimensions'].some(key => Object.hasOwn(input, key)))
+      throw new PftBridgeError('INVALID_ARGUMENT', '只有add_drawing_dimensions接受页、视图和尺寸引用；未派发预览。');
+    if (input.operation === 'create_drawing') {
+      return pftPrepareDrawing(input, { status: () => this.status(),
+        prepare: params => this.call('prepare_part_changes', params) }, PftBridgeError);
+    }
     if (input.operation === 'set_pad_length') {
       return pftPreparePadLength(input, { status: () => this.status(),
         prepare: params => this.call('prepare_part_changes', params) }, PftBridgeError);

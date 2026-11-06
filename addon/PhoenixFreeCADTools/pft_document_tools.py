@@ -33,11 +33,24 @@ def _load_unit_helper():
 _units = _load_unit_helper()
 
 
+def _load_file_publish_helper():
+    # Bind the pure publisher to this installation, not another cached addon.
+    filename = Path(__file__).resolve().with_name("pft_file_publish.py")
+    spec = importlib.util.spec_from_file_location("_pft_document_file_publish", filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_file_publish = _load_file_publish_helper()
+
+
 PFT_MAX_TARGETS = 200
 PFT_MAX_SCAN_OBJECTS = 2000
 PFT_MAX_MARKDOWN_BYTES = 1024 * 1024
 PFT_MAX_PROPERTY_NAMES = 20
 PFT_MAX_PROPERTY_BYTES = 2048
+PFT_MAX_PROPERTY_LIST_ITEMS = 100
 PFT_MAX_PROPERTIES_BYTES = 128 * 1024
 TRANSLATABLE_STRINGS = (
     "当前文档对象超过2000项，未自动扫描；请使用较小文档或专用查询。", "当前没有打开的文档。", "对象候选超过上限，仅显示前200项。", "缓存尺寸未重算或验证；不是精确间隙或制造尺寸。",
@@ -50,6 +63,8 @@ TRANSLATABLE_STRINGS = (
     "Markdown 文件名必须使用绝对路径和 .md 或 .markdown 扩展名。", "导出目录必须已存在，且路径不能经过符号链接。",
     "Markdown 内容无效或超过1 MiB。", "目标不是可覆盖的普通 Markdown 文件。", "目标文件在确认后变化，请重新选择并确认。",
     "目标文件已存在，请明确确认覆盖。", "Markdown 导出失败；未保存 CAD 文档。",
+    "Markdown 已发布，但清理结果未确认；请检查目标文件，不要重复导出。",
+    "Markdown 可能已写出，但结果未确认；请检查目标文件，不要重复导出。",
     "所选对象属性（BOM）", "字段", "值", "空值", "缺失", "类型不支持", "已截断", "已净化控制字符",
     "原生对象报告；未验证本地或继承来源。", "未选择属性对象。",
     "所选对象属性汇总超过128 KiB，请减少勾选对象。",
@@ -200,9 +215,22 @@ def _property_text(value):
             len(value) > len(prefix) or len(encoded) > PFT_MAX_PROPERTY_BYTES, clean != prefix)
 
 
+_PROPERTY_LIST_KINDS = {"App::PropertyStringList": "string_list", "App::PropertyIntegerList": "integer_list",
+                        "App::PropertyFloatList": "float_list", "App::PropertyBoolList": "boolean_list"}
+_VECTOR_PROPERTY_TYPES = frozenset(("App::PropertyVector", "App::PropertyVectorDistance", "App::PropertyPosition"))
+_VECTOR_LENGTH_TYPES = frozenset(("App::PropertyVectorDistance", "App::PropertyPosition"))
+_VECTOR_LIST_TYPE = "App::PropertyVectorList"
+_TRANSFORM_PROPERTY_KINDS = {"App::PropertyRotation": "rotation", "App::PropertyPlacement": "placement"}
+# Fixed 1.1 native types inherit scalar getters, not their setter tuples.
+# Constraints are editable metadata, not a unit or a reader-side range rule.
+_CONSTRAINED_SCALAR_KINDS = {"App::PropertyIntegerConstraint": "integer", "App::PropertyPercent": "integer",
+                             "App::PropertyFloatConstraint": "float", "App::PropertyPrecision": "float"}
+_CONSTRAINED_FLOAT_TYPES = frozenset(name for name, kind in _CONSTRAINED_SCALAR_KINDS.items() if kind == "float")
 _PROPERTY_KINDS = {"App::PropertyString": "string", "App::PropertyInteger": "integer",
                    "App::PropertyFloat": "float", "App::PropertyBool": "boolean",
-                   "App::PropertyEnumeration": "enumeration"}
+                   "App::PropertyEnumeration": "enumeration", **_CONSTRAINED_SCALAR_KINDS, **_PROPERTY_LIST_KINDS,
+                   **{name: "vector" for name in _VECTOR_PROPERTY_TYPES}, _VECTOR_LIST_TYPE: "vector_list",
+                   **_TRANSFORM_PROPERTY_KINDS}
 # These fixed property types use native Quantity.Value and the internal basis.
 # A contradictory native signature is unknown, never a guessed conversion.
 _QUANTITY_SIGNATURES = {
@@ -221,7 +249,7 @@ _QUANTITY_SIGNATURES = {
     "App::PropertyPower": (2, 1, -3, 0, 0, 0, 0, 0),
     "App::PropertyTemperature": (0, 0, 0, 0, 1, 0, 0, 0),
 }
-_QUANTITY_TYPES = frozenset(("App::PropertyQuantity", *_QUANTITY_SIGNATURES))
+_QUANTITY_TYPES = frozenset(("App::PropertyQuantity", "App::PropertyQuantityConstraint", *_QUANTITY_SIGNATURES))
 
 
 def validate_property_names(names):
@@ -241,6 +269,162 @@ def _finite_property_number(value):
     if type(value) is float and math.isfinite(value):
         return value
     return None
+
+
+def _property_list(value, kind):
+    # Native BoolList returns a tuple; other primitive list getters return lists.
+    # Reject custom containers and nested values rather than iterating or
+    # stringifying arbitrary Python/native objects. Copy only a complete,
+    # bounded list; an exceeded budget never publishes a misleading prefix.
+    if type(value) not in (list, tuple):
+        return {"value": None, "status": "unsupported"}
+    count = len(value)
+    metadata = {"item_count": count}
+    if count > PFT_MAX_PROPERTY_LIST_ITEMS:
+        return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "item_limit"}
+    items, byte_count, sanitized = [], 2, False
+    for item in value:
+        if kind == "string_list":
+            if type(item) is not str:
+                return {**metadata, "value": None, "status": "unsupported"}
+            item, truncated, cleaned = _property_text(item)
+            sanitized = sanitized or cleaned
+            if truncated:
+                return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "utf8_budget"}
+        elif kind == "boolean_list":
+            if type(item) is not bool:
+                return {**metadata, "value": None, "status": "unsupported"}
+        elif kind in ("integer_list", "float_list"):
+            if type(item) is not (int if kind == "integer_list" else float):
+                return {**metadata, "value": None, "status": "unsupported"}
+            if _finite_property_number(item) is None:
+                return {**metadata, "value": None, "status": "unknown"}
+        else:
+            return {**metadata, "value": None, "status": "unsupported"}
+        byte_count += bool(items) + len(json.dumps(item, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if byte_count > PFT_MAX_PROPERTY_BYTES:
+            return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "utf8_budget"}
+        items.append(item)
+    return {**metadata, "value": items, "status": "empty" if count == 0 else "available", "sanitized": sanitized}
+
+
+def _vector_metadata(native_type):
+    # PropertyGeo.h declares Length for VectorDistance/Position. A bare Vector
+    # or VectorList has no fixed length unit or coordinate-frame contract.
+    # These are raw property components, never a transformed/world position.
+    description = (_units.pft_internal_unit((1, 0, 0, 0, 0, 0, 0, 0))
+                   if native_type in _VECTOR_LENGTH_TYPES else
+                   {"unit": None, "unit_signature": None, "unit_system": "not_declared"})
+    return {**description, "unit_source": "native_property_type",
+            "coordinate_scope": "reported_property_value", "coordinate_frame": "not_declared_by_property_type",
+            "placement_applied_by_tool": False, "link_source_resolved": False}
+
+
+def _vector_components(value):
+    # PropertyGeo.cpp returns Base.Vector for scalar vectors and every list
+    # member. VectorPyImp.cpp exposes exactly float x/y/z. Do not iterate,
+    # coerce, stringify, calculate Length or inspect arbitrary native members.
+    if type(value).__name__ != "Vector" or type(value).__module__ != "Base":
+        return None, "unsupported"
+    components = {}
+    for axis in ("x", "y", "z"):
+        number, status = _read(value, axis)
+        if status != "available":
+            return None, "read_failed" if status == "read_failed" else "unknown"
+        if type(number) is not float:
+            return None, "unsupported"
+        if not math.isfinite(number):
+            return None, "unknown"
+        components[axis] = number
+    return components, "available"
+
+
+def _transform_metadata(kind):
+    # Fixed 1.1 native APIs report Base xyz and quaternion xyzw separately.
+    # A Placement has mixed units: never label its rotation components as mm.
+    rotation_unit = _units.pft_internal_unit((0, 0, 0, 0, 0, 0, 0, 0))
+    description = rotation_unit if kind == "rotation" else {
+        "unit": None, "unit_signature": None, "unit_system": "mixed_components",
+        "component_units": {
+            "base": _units.pft_internal_unit((1, 0, 0, 0, 0, 0, 0, 0)),
+            "rotation": rotation_unit,
+        },
+    }
+    return {**description, "unit_source": "native_property_type",
+            "representation": "quaternion_xyzw" if kind == "rotation" else "base_xyz_rotation_quaternion_xyzw",
+            "coordinate_scope": "reported_property_value", "coordinate_frame": "not_declared_by_property_type",
+            "placement_applied_by_tool": False, "link_source_resolved": False,
+            "quaternion_normalization": "not_checked", "quaternion_normalized_by_tool": False}
+
+
+def _rotation_components(value):
+    # RotationPyImp.cpp::getQ returns an ordinary tuple of four Python floats;
+    # Rotation.pyi fixes x,y,z,w with w real. Copy exactly; no axis/angle,
+    # matrix, norm calculation, sign canonicalization or native method calls.
+    if type(value).__name__ != "Rotation" or type(value).__module__ != "Base":
+        return None, "unknown"
+    quaternion, status = _read(value, "Q")
+    if status != "available":
+        return None, "read_failed" if status == "read_failed" else "unknown"
+    if (type(quaternion) is not tuple or len(quaternion) != 4
+            or any(type(number) is not float or not math.isfinite(number) for number in quaternion)
+            or not any(quaternion)):
+        return None, "unknown"
+    return dict(zip(("x", "y", "z", "w"), quaternion)), "available"
+
+
+def _placement_components(value):
+    # PropertyGeo.cpp copies a Base.Placement; its Base and Rotation getters
+    # expose copied native values. Do not resolve parents, Links or world axes.
+    if type(value).__name__ != "Placement" or type(value).__module__ != "Base":
+        return None, "unknown"
+    base, status = _read(value, "Base")
+    if status != "available":
+        return None, "read_failed" if status == "read_failed" else "unknown"
+    base, status = _vector_components(base)
+    if status != "available":
+        return None, "read_failed" if status == "read_failed" else "unknown"
+    rotation, status = _read(value, "Rotation")
+    if status != "available":
+        return None, "read_failed" if status == "read_failed" else "unknown"
+    rotation, status = _rotation_components(rotation)
+    if status != "available":
+        return None, status
+    return {"base": base, "rotation": rotation}, "available"
+
+
+def _property_transform(value, kind):
+    components, status = (_rotation_components(value) if kind == "rotation" else _placement_components(value))
+    if status != "available":
+        return {"value": None, "status": status}
+    # The complete fixed-size value shares the existing 2 KiB JSON contract;
+    # metadata also counts toward the separate 128 KiB aggregate budget.
+    encoded = json.dumps(components, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > PFT_MAX_PROPERTY_BYTES:
+        return {"value": None, "status": "unknown", "truncated": True, "limit_reason": "utf8_budget"}
+    return {"value": components, "status": "available"}
+
+
+def _property_vector_list(value):
+    # The native getter has already allocated its complete Python list; these
+    # bounds constrain our processing/DTO, not that getter's memory or duration.
+    # A bad member or exceeded budget never publishes a misleading prefix.
+    if type(value) is not list:
+        return {"value": None, "status": "unsupported"}
+    count = len(value)
+    metadata = {"item_count": count}
+    if count > PFT_MAX_PROPERTY_LIST_ITEMS:
+        return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "item_limit"}
+    vectors, byte_count = [], 2
+    for item in value:
+        vector, status = _vector_components(item)
+        if status != "available":
+            return {**metadata, "value": None, "status": status}
+        byte_count += bool(vectors) + len(json.dumps(vector, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        if byte_count > PFT_MAX_PROPERTY_BYTES:
+            return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "utf8_budget"}
+        vectors.append(vector)
+    return {**metadata, "value": vectors, "status": "empty" if count == 0 else "available"}
 
 
 def _property_quantity(value):
@@ -289,6 +473,10 @@ def _property_field(obj, name, properties, valid_list, explicit):
             return field  # Do not even get unsupported properties (Links, Shape, Python objects).
         if explicit:
             field["kind"] = kind
+            if kind in ("vector", "vector_list"):
+                field.update(_vector_metadata(native_type))
+            elif kind in _TRANSFORM_PROPERTY_KINDS.values():
+                field.update(_transform_metadata(kind))
         value = getattr(obj, name)
         if value is None:
             field["status"] = "unknown" if explicit else "unsupported"
@@ -298,11 +486,20 @@ def _property_field(obj, name, properties, valid_list, explicit):
             else:
                 field["value"], field["truncated"], field["sanitized"] = _property_text(value)
                 field["status"] = "empty" if value == "" else "available"
+        elif kind in _PROPERTY_LIST_KINDS.values():
+            field.update(_property_list(value, kind))
+        elif kind == "vector":
+            field["value"], field["status"] = _vector_components(value)
+        elif kind == "vector_list":
+            field.update(_property_vector_list(value))
+        elif kind in _TRANSFORM_PROPERTY_KINDS.values():
+            field.update(_property_transform(value, kind))
         elif kind == "boolean":
             field["value"], field["status"] = (value, "available") if type(value) is bool else (None, "unsupported")
         elif kind in ("integer", "float"):
             number = _finite_property_number(value)
-            if kind == "integer" and type(value) is not int:
+            if (kind == "integer" and type(value) is not int
+                    or native_type in _CONSTRAINED_FLOAT_TYPES and type(value) is not float):
                 field["status"] = "unsupported"
             elif number is None or kind == "float" and type(number) is int and abs(number) > 2 ** 53:
                 field["status"] = "unknown" if type(value) in (int, float) else "unsupported"
@@ -500,6 +697,21 @@ def _property_display(field, tr):
         return format(value, "d")
     if type(value) is float and math.isfinite(value):
         return format(value, ".12g")
+    if (type(value) is list and field.get("kind") in _PROPERTY_LIST_KINDS.values()
+            and all(type(item) in (str, int, float, bool) for item in value)):
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    if field.get("kind") in ("vector", "vector_list", "rotation", "placement") and type(value) in (dict, list):
+        # Format the frozen primitive DTO only. Unit and coordinate provenance
+        # remain visible; these values are not cached Shape.BoundBox extents.
+        description = {key: field.get(key) for key in (
+            "unit", "unit_signature", "unit_system", "unit_source", "coordinate_scope", "coordinate_frame",
+            "placement_applied_by_tool", "link_source_resolved")}
+        if field.get("kind") in _TRANSFORM_PROPERTY_KINDS.values():
+            description.update({key: field.get(key) for key in (
+                "representation", "quaternion_normalization", "quaternion_normalized_by_tool")})
+            if field["kind"] == "placement":
+                description["component_units"] = field["component_units"]
+        return json.dumps({"value": value, **description}, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     if (isinstance(value, dict) and value.get("kind") == "quantity" and value.get("unit_system") == "freecad_internal"
             and _finite_property_number(value.get("value")) is not None and isinstance(value.get("unit"), str)):
         return format(value["value"], ".12g") + " " + _text(value["unit"], 128)
@@ -564,26 +776,40 @@ def format_markdown(snapshot, tr=lambda value: value):
     return "\n".join(lines) + "\n"
 
 
+def _markdown_publish_error(error):
+    messages = {
+        "INVALID_EXPORT_PATH": "Markdown 文件名必须使用绝对路径和 .md 或 .markdown 扩展名。",
+        "INVALID_EXPORT_DIRECTORY": "导出目录必须已存在，且路径不能经过符号链接。",
+        "INVALID_EXPORT_TARGET": "目标不是可覆盖的普通 Markdown 文件。",
+        "INVALID_EXPORT_DATA": "Markdown 内容无效或超过1 MiB。",
+        "EXPORT_PLAN_INVALID": "Markdown 内容无效或超过1 MiB。",
+        "EXPORT_TARGET_CHANGED": "目标文件在确认后变化，请重新选择并确认。",
+        "OVERWRITE_REQUIRED": "目标文件已存在，请明确确认覆盖。",
+    }
+    code = error.code if error.code in messages else "EXPORT_FAILED"
+    if code in ("INVALID_EXPORT_DATA", "EXPORT_PLAN_INVALID"):
+        code = "INVALID_MARKDOWN"
+    message = messages.get(error.code, "Markdown 导出失败；未保存 CAD 文档。")
+    if error.publication_state == "published":
+        message = "Markdown 已发布，但清理结果未确认；请检查目标文件，不要重复导出。"
+    elif error.publication_state == "unknown":
+        message = "Markdown 可能已写出，但结果未确认；请检查目标文件，不要重复导出。"
+    result = PftDocumentToolsError(code, message)
+    result.publication_state, result.cleanup_state = error.publication_state, error.cleanup_state
+    return result
+
+
 def _export_target(filename):
-    if (not isinstance(filename, str) or not os.path.isabs(filename) or Path(filename).suffix.lower() not in (".md", ".markdown")
-            or any(unicodedata.category(char) in ("Cc", "Cf", "Cs") for char in filename)):
-        raise PftDocumentToolsError("INVALID_EXPORT_PATH", "Markdown 文件名必须使用绝对路径和 .md 或 .markdown 扩展名。")
-    target = Path(os.path.abspath(filename))
-    current = Path(target.anchor)
-    for part in target.parts[1:-1]:
-        current /= part
-        try:
-            info = current.lstat()
-        except OSError:
-            raise PftDocumentToolsError("INVALID_EXPORT_DIRECTORY", "导出目录必须已存在，且路径不能经过符号链接。") from None
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise PftDocumentToolsError("INVALID_EXPORT_DIRECTORY", "导出目录必须已存在，且路径不能经过符号链接。")
-    return target
-
-
-def _stamp(target):
     try:
-        info = target.lstat()
+        return _file_publish.export_target(filename, extensions=(".md", ".markdown"))
+    except _file_publish.PftFilePublishError as error:
+        raise _markdown_publish_error(error) from None
+
+
+def _stamp(target, directory=None):
+    try:
+        info = (target.lstat() if directory is None else
+                os.stat(target.name, dir_fd=directory, follow_symlinks=False))
     except FileNotFoundError:
         return None
     except OSError:
@@ -593,51 +819,59 @@ def _stamp(target):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def prepare_markdown_export(filename, text):
-    if filename is None or filename == "":
-        return None
-    target = _export_target(filename)
+def _markdown_bytes(text):
     try:
         data = text.encode("utf-8") if isinstance(text, str) else None
     except UnicodeError:
         data = None
     if data is None or len(data) > PFT_MAX_MARKDOWN_BYTES or "\x00" in text:
         raise PftDocumentToolsError("INVALID_MARKDOWN", "Markdown 内容无效或超过1 MiB。")
-    stamp = _stamp(target)
-    return {"path": str(target), "text": text, "exists": stamp is not None, "_stamp": stamp}
+    return data
+
+
+def _legacy_markdown_stamp(fingerprint):
+    return None if fingerprint is None else (fingerprint[0], fingerprint[1], *fingerprint[3:6])
+
+
+def prepare_markdown_export(filename, text):
+    if filename is None or filename == "":
+        return None
+    data = _markdown_bytes(text)
+    try:
+        plan = _file_publish.prepare_file_export(filename, data, extensions=(".md", ".markdown"),
+                                                 max_bytes=PFT_MAX_MARKDOWN_BYTES)
+    except _file_publish.PftFilePublishError as error:
+        raise _markdown_publish_error(error) from None
+    plan.update(text=text, _stamp=_legacy_markdown_stamp(plan["_fingerprint"]))
+    return plan
+
+
+def _markdown_directory_fd_supported():
+    return _file_publish.directory_fd_supported()
+
+
+def _create_markdown_stage(target, directory):
+    return _file_publish.create_stage(target, directory, prefix=".pft-markdown-")
 
 
 def write_markdown_export(plan, overwrite=False):
     if plan is None:
         return None
-    checked = prepare_markdown_export(plan.get("path"), plan.get("text"))
-    if checked is None or checked["_stamp"] != plan.get("_stamp"):
+    if type(plan) is not dict or "_stamp" not in plan or "_fingerprint" not in plan:
         raise PftDocumentToolsError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
-    if checked["exists"] and overwrite is not True:
-        raise PftDocumentToolsError("OVERWRITE_REQUIRED", "目标文件已存在，请明确确认覆盖。")
-    target, temporary = Path(checked["path"]), None
     try:
-        descriptor, temporary = tempfile.mkstemp(prefix=".pft-markdown-", suffix=".tmp", dir=str(target.parent))
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(checked["text"].encode("utf-8"))
-            stream.flush()
-            os.fsync(stream.fileno())
-        _export_target(str(target))
-        if _stamp(target) != checked["_stamp"]:
-            raise PftDocumentToolsError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
-        if checked["exists"]:
-            os.replace(temporary, str(target))
-        else:
-            # Publish without overwriting a concurrently created file.
-            os.link(temporary, str(target))
-        return str(target)
-    except PftDocumentToolsError:
-        raise
-    except OSError:
-        raise PftDocumentToolsError("EXPORT_FAILED", "Markdown 导出失败；未保存 CAD 文档。") from None
-    finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+        expected_stamp = _legacy_markdown_stamp(plan["_fingerprint"])
+    except (IndexError, TypeError):
+        raise PftDocumentToolsError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。") from None
+    if plan["_stamp"] != expected_stamp:
+        raise PftDocumentToolsError("EXPORT_TARGET_CHANGED", "目标文件在确认后变化，请重新选择并确认。")
+    if _markdown_bytes(plan.get("text")) != plan.get("data"):
+        raise PftDocumentToolsError("INVALID_MARKDOWN", "Markdown 内容无效或超过1 MiB。")
+    try:
+        receipt = _file_publish.write_file_export(
+            plan, extensions=(".md", ".markdown"), max_bytes=PFT_MAX_MARKDOWN_BYTES, overwrite=overwrite,
+            stage_prefix=".pft-markdown-", _stage_factory=_create_markdown_stage,
+            _directory_fd_supported=_markdown_directory_fd_supported)
+    except _file_publish.PftFilePublishError as error:
+        raise _markdown_publish_error(error) from None
+    return receipt["path"]

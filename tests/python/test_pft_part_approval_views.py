@@ -207,6 +207,167 @@ class PartApprovalViewTests(unittest.TestCase):
         self.assertTrue(handle._closed)
         self.confirm.assert_called_once_with(); self.cancel.assert_not_called()
 
+    def drawing_preview(self):
+        from test_pft_drawing_contract import drawing_result
+        value = drawing_result()
+        names = [value["page"], value["template"]] + [item["name"] for item in value["views"]]
+        self.preview.update(operation="create_drawing", changed_count=5,
+            design_request={"source": value["source"], "page": value["page"]},
+            rows=[{"object": name, "field": "TechDraw draft node", "old": None, "new": "Synthetic draft node",
+                   "status": "change", "source": "cached_native_typed_snapshot", "note": "Manual review required"}
+                  for name in names])
+        self.status = self.dto()
+
+    def drawing_applied(self):
+        from test_pft_drawing_contract import drawing_result
+        value = self.dto("applied")
+        value["result"]["design_result"] = drawing_result()
+        return value
+
+    def test_drawing_title_complete_rows_and_cancel_default_do_not_grant_approval(self):
+        self.drawing_preview(); handle = self.open()
+        self.assertEqual(handle.dialog.title, "确认图纸创建")
+        self.assertEqual(handle.table.rows, 5)
+        self.assertEqual([handle.table.cells[index, 0].text for index in range(5)],
+                         ["PageDraft", "TemplateDraft", "FrontDraft", "TopDraft", "AxonometricDraft"])
+        self.assertFalse(handle.confirm_button.default)
+        self.assertTrue(handle.cancel_button.default)
+        handle.dialog.accepted.emit()
+        self.confirm.assert_not_called()
+        handle.dialog.accept()
+        self.confirm.assert_not_called()
+        self.cancel.assert_called_once_with()
+
+    def test_drawing_preview_requires_five_bound_change_rows_and_a_nonnull_page(self):
+        self.drawing_preview()
+        for change in ("page", "source", "count", "row", "blocked", "duplicate"):
+            bad = deepcopy(self.preview)
+            if change == "page": bad["design_request"]["page"] = None
+            elif change == "source": bad["design_request"]["source"] = "PageDraft"
+            elif change == "count": bad["changed_count"] = 4
+            elif change == "row": bad["rows"].pop()
+            elif change == "blocked": bad["can_apply"] = False
+            else: bad["rows"][1]["object"] = bad["rows"][0]["object"]
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(ValueError, "PART_APPROVAL_PREVIEW_INVALID"):
+                    views.open_part_approval(self.qt.gui, bad, self.confirm, self.cancel, self.read)
+        self.confirm.assert_not_called()
+
+    def test_drawing_status_requires_native_confirmation_and_bound_unverified_result(self):
+        self.drawing_preview(); handle = self.open()
+        applying = self.dto("applying")
+        with self.assertRaises(ValueError): handle._status(applying)
+        applying["native_confirmation"] = True
+        self.assertEqual(handle._status(applying), applying)
+        for change in ("missing", "source", "page", "verified", "manual", "count", "confirmation", "extra"):
+            result = self.drawing_applied()
+            design = result["result"]["design_result"]
+            if change == "missing": result["result"].pop("design_result")
+            elif change == "source": design["source"] = "OtherSource"
+            elif change == "page": design["page"] = "OtherPage"
+            elif change == "verified": design["projection_verification"] = "checked"
+            elif change == "manual": design["manual_review_required"] = False
+            elif change == "count": result["changed_count"] = result["result"]["changed_count"] = 4
+            elif change == "confirmation": result["native_confirmation"] = False
+            else: result["result"]["extra"] = "synthetic untrusted field"
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError): handle._status(result)
+        self.assertEqual(handle._status(self.drawing_applied()), self.drawing_applied())
+        self.confirm.assert_not_called()
+
+    def test_drawing_confirm_closes_only_after_exact_draft_result(self):
+        self.drawing_preview(); self.confirm.side_effect = self.drawing_applied
+        handle = self.open(); handle.confirm_button.clicked.emit(False)
+        self.assertTrue(handle._closed)
+        self.confirm.assert_called_once_with(); self.cancel.assert_not_called()
+
+    def test_drawing_fixed_failure_remains_visible_and_does_not_retry(self):
+        self.drawing_preview()
+        self.confirm.side_effect = lambda: self.dto("failed", "DRAWING_CREATE_FAILED")
+        handle = self.open(); handle.confirm_button.clicked.emit(False)
+        self.assertIn("DRAWING_CREATE_FAILED", handle.status_label.text)
+        self.assertFalse(handle.confirm_button.enabled)
+        handle.confirm_button.clicked.emit(False)
+        self.confirm.assert_called_once_with()
+
+    def dimension_preview(self):
+        request = {"page": "Page", "view": "Front", "dimensions": [
+            {"edge": "Edge0", "kind": "Distance", "x_mm": 0., "y_mm": 10.},
+            {"edge": "Edge4", "kind": "Radius", "x_mm": 10., "y_mm": 20.}]}
+        rows = [{"object": "Dimension%d" % i, "field": "TechDraw dimension", "old": None,
+                 "new": 600. if i == 0 else 40., "status": "change", **item,
+                 "value_mm": 600. if i == 0 else 40., "source": "native_cached_projected_geometry",
+                 "note": "Native cached mm; view relative paper mm offsets; manual review."}
+                for i, item in enumerate(request["dimensions"])]
+        self.preview.update(operation="add_drawing_dimensions", changed_count=2, design_request=request, rows=rows)
+        self.status = self.dto()
+
+    def dimension_applied(self):
+        from test_pft_drawing_dimensions_approval import dimension_result
+        result = self.dto("applied")
+        result["result"]["design_result"] = dimension_result(self.preview["design_request"], self.preview["rows"])
+        return result
+
+    def test_dimension_preview_shows_all_values_references_offsets_without_approval(self):
+        self.dimension_preview(); handle = self.open()
+        self.assertEqual(handle.dialog.title, "确认图纸尺寸")
+        self.assertEqual(handle.table.rows, 2)
+        self.assertEqual(handle.table.cells[0, 3].text, "600.0")
+        self.assertIn('"edge": "Edge0"', handle.table.cells[0, 5].text)
+        self.assertIn('"x_mm": 0.0', handle.table.cells[0, 5].text)
+        self.assertIn('"kind": "Radius"', handle.table.cells[1, 5].text)
+        handle.dialog.accepted.emit()
+        self.confirm.assert_not_called()
+        handle.dialog.accept()
+        self.confirm.assert_not_called()
+        self.cancel.assert_called_once_with()
+
+    def test_dimension_preview_rejects_swapped_reference_value_count_and_extra_fields(self):
+        self.dimension_preview()
+        for mode in ("view", "edge", "position", "value", "count", "extra", "name"):
+            bad = deepcopy(self.preview)
+            if mode == "view": bad["design_request"]["view"] = "Page"
+            elif mode == "edge": bad["rows"][0]["edge"] = "Edge1"
+            elif mode == "position": bad["rows"][0]["x_mm"] = 1.
+            elif mode == "value": bad["rows"][0]["new"] = True
+            elif mode == "count": bad["changed_count"] = 1
+            elif mode == "extra": bad["rows"][0]["Arbitrary"] = True
+            else: bad["rows"][0]["object"] = "Page"
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "PART_APPROVAL_PREVIEW_INVALID"):
+                    views.open_part_approval(self.qt.gui, bad, self.confirm, self.cancel, self.read)
+        self.confirm.assert_not_called()
+
+    def test_dimension_status_and_confirm_require_bound_native_measured_result(self):
+        self.dimension_preview(); handle = self.open()
+        for mode in ("native", "kind", "count", "edge", "position", "value", "verification", "projection"):
+            bad = self.dimension_applied()
+            result = bad["result"]["design_result"]
+            if mode == "native": bad["native_confirmation"] = False
+            elif mode == "kind": result["kind"] = "drawing_draft"
+            elif mode == "count": bad["changed_count"] = bad["result"]["changed_count"] = 1
+            elif mode == "edge": result["dimensions"][0]["edge"] = "Edge1"
+            elif mode == "position": result["dimensions"][0]["y_mm"] = 11.
+            elif mode == "value": result["dimensions"][0]["value_mm"] = 1e9 + 1
+            elif mode == "verification": result["measurement_verification"] = "not_checked"
+            else: result["projection_verification"] = "checked"
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError): handle._status(bad)
+        self.confirm.side_effect = self.dimension_applied
+        handle.confirm_button.clicked.emit(False)
+        self.assertTrue(handle._closed)
+        self.confirm.assert_called_once_with()
+        self.cancel.assert_not_called()
+
+    def test_dimension_fixed_measurement_failure_stays_visible_without_retry(self):
+        self.dimension_preview()
+        self.confirm.side_effect = lambda: self.dto("failed", "DIMENSION_VALUE_UNVERIFIED")
+        handle = self.open(); handle.confirm_button.clicked.emit(False)
+        self.assertIn("DIMENSION_VALUE_UNVERIFIED", handle.status_label.text)
+        self.assertFalse(handle.confirm_button.enabled)
+        handle.confirm_button.clicked.emit(False)
+        self.confirm.assert_called_once_with()
+
     def test_nonmodal_compact_parented_default_cancel_and_plain_labels(self):
         handle = self.open()
         self.assertIs(handle.dialog.parent, self.qt.window)

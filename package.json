@@ -22,7 +22,8 @@
     "scripts/*.mjs",
     "addon/PhoenixFreeCADTools/Resources/icons/*.svg",
     "examples/*.py",
-    "scripts/package-addon.py"
+    "scripts/package-addon.py",
+    "addon/PhoenixFreeCADTools/HELP.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -34,11 +35,13 @@
     "prepack": "npm run build",
     "demo": "node dist/cli.js --demo",
     "addon:install": "node scripts/install-addon.mjs",
+    "addon:dev": "node scripts/dev-freecad.mjs",
     "addon:uninstall": "node scripts/uninstall-addon.mjs",
     "test:python": "python3 -m unittest discover -s tests/python -v",
     "verify:mcp": "node scripts/verify-mcp.mjs",
     "call": "node scripts/call-tool.mjs",
-    "addon:pack": "python3 scripts/package-addon.py"
+    "addon:pack": "python3 scripts/package-addon.py",
+    "desk:pack": "node scripts/package-desk-resource.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",
@@ -47,6 +50,7 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
   }

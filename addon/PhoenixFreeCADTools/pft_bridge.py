@@ -9,6 +9,9 @@ import itertools
 import importlib.util
 from pathlib import Path
 import json
+import os
+import re
+import uuid
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,13 +28,25 @@ _operations = _load_helper("pft_operations")
 _runtime = _load_helper("pft_runtime")
 _business = _load_helper("pft_business")
 _design = _load_helper("pft_design_inspection")
+_drawing_references = _load_helper("pft_drawing_references")
+_mcp_settings = _load_helper("pft_mcp_settings")
+_instance_registry = _load_helper("pft_instance_registry")
 _OPERATION_METHODS = set(_operations.METHODS)
 _BUSINESS_METHODS = set(_business.METHODS)
 _DESIGN_METHODS = set(_design.METHODS)
 SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS | _BUSINESS_METHODS | _DESIGN_METHODS)
 ADDON_VERSION = "0.3.2"
 PROTOCOL_VERSION = 1
-DEFAULT_PORT = 9876
+def _default_port(environ):
+    if environ.get("PFT_DEVELOPMENT") != "1":
+        return 9876
+    value = environ.get("PFT_DEVELOPMENT_PORT", "9877")
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal() or not 1024 <= int(value) <= 65535:
+        raise RuntimeError("Invalid Phoenix Tools development port")
+    return int(value)
+
+
+DEFAULT_PORT = _default_port(os.environ)
 MAX_PAYLOAD_BYTES = 262144
 GUI_TIMEOUT_SECONDS = 15.0
 
@@ -40,6 +55,17 @@ _server = None
 _server_thread = None
 _stop_thread = None
 _dispatcher = None
+_listener_configuration = {"source": "default", "config_path": None,
+                           "preferred_port": DEFAULT_PORT, "effective_port": DEFAULT_PORT}
+# Process-local identities are intentionally independent of document/session names.
+_INSTANCE_ID = uuid.uuid4().hex
+_service_identity = None
+_registration = None
+_registration_error = None
+_request_origins = {}
+_token_origins = {}
+_MAX_ORIGINS = 4096
+_ID = re.compile(r"[0-9a-f]{32}\Z")
 _job_ids = itertools.count(1)
 _health = {"state": "idle", "job_id": 0, "operation": "", "started": 0.0}
 
@@ -73,30 +99,41 @@ def get_status():
     """Read server and dispatch state without accessing FreeCAD or Qt."""
     with _state_lock:
         running = _server is not None and _server_thread is not None and _server_thread.is_alive()
-        port = _server.server_address[1] if _server is not None else DEFAULT_PORT
+        port = _server.server_address[1] if _server is not None else _listener_configuration["effective_port"]
         return {
             "protocol_version": PROTOCOL_VERSION,
             "addon_name": "PhoenixFreeCADTools",
             "addon_version": ADDON_VERSION,
             "supported_methods": SUPPORTED_METHODS,
-            "read_provenance": {"version": 1, "methods": ["get_document_info", "list_objects", "get_object_info", "inspect_design"], "revision_coverage": "partial", "write_guard": False},
+            "read_provenance": {"version": 1, "methods": ["get_document_info", "list_objects", "get_object_info", "inspect_design", "inspect_drawing_page"], "revision_coverage": "partial", "write_guard": False},
             "design_inspection": dict(_design.CAPABILITIES),
             "recompute_result": dict(_operations.RECOMPUTE_CAPABILITIES),
             "script_session_id": _runtime.SESSION_ID,
             "part_previews": {"ttl_seconds": _business.TTL_SECONDS, "max_plans": _business.MAX_PLANS, "max_preview_bytes": _business.MAX_PREVIEW_BYTES, "storage": "memory_only"},
             "part_approvals": dict(_business.APPROVAL_CAPABILITIES),
             "pad_length_write": dict(_business.PAD_LENGTH_CAPABILITIES),
+            "drawing_create": {**_business.DRAWING_CREATE_CAPABILITIES, "views": list(_business.DRAWING_CREATE_CAPABILITIES["views"])},
+            "drawing_references": dict(_drawing_references.CAPABILITIES),
+            "drawing_dimensions": {**_business.DRAWING_DIMENSIONS_CAPABILITIES, "kinds": list(_business.DRAWING_DIMENSIONS_CAPABILITIES["kinds"])},
+            "instance_routing": dict(_service_identity) if running and _service_identity is not None else None,
+            "instance_registration_error": dict(_registration_error) if _registration_error else None,
             "running": bool(running),
             "stopping": bool(_stop_thread is not None and _stop_thread.is_alive()),
             "host": "127.0.0.1",
             "port": port,
+            "listener_configuration": dict(_listener_configuration),
             "gui_dispatch": _health_snapshot(),
         }
 
 
 def _validate_request(payload):
-    if not isinstance(payload, dict) or set(payload) - {"method", "params"}:
-        raise PftBridgeError("INVALID_REQUEST", "请求必须是仅包含 method 和 params 的 JSON 对象。")
+    if not isinstance(payload, dict) or set(payload) - {"method", "params", "target"}:
+        raise PftBridgeError("INVALID_REQUEST", "请求必须是包含 method、params 和可选 target 的 JSON 对象。")
+    if "target" in payload:
+        target = payload["target"]
+        if (not isinstance(target, dict) or set(target) != {"instance_id", "service_id"}
+                or any(not isinstance(value, str) or not _ID.fullmatch(value) for value in target.values())):
+            raise PftBridgeError("INVALID_TARGET", "FreeCAD instance target is invalid.")
     method = payload.get("method")
     allowed = set(SUPPORTED_METHODS)
     if not isinstance(method, str) or method not in allowed:
@@ -117,6 +154,68 @@ def _validate_request(payload):
     if "fit" in params and not isinstance(params["fit"], bool):
         raise PftBridgeError("INVALID_PARAMS", "fit 必须为布尔值。")
     return method, params
+
+
+
+def _check_admission(admission):
+    """A queued job keeps the exact service and dispatcher that admitted it."""
+    if admission is None:
+        return
+    with _state_lock:
+        identity, dispatcher = admission
+        if _service_identity is not identity or _dispatcher is not dispatcher or _server is None:
+            raise PftBridgeError("INSTANCE_TARGET_MISMATCH", "The selected FreeCAD service changed or stopped.")
+
+
+def _admit(method, payload, listener):
+    with _state_lock:
+        if listener is not None:
+            _check_admission(listener)
+        identity = _service_identity
+        target = payload.get("target")
+        if target is not None and (identity is None or any(target[key] != identity[key] for key in target)):
+            raise PftBridgeError("INSTANCE_TARGET_MISMATCH", "The selected FreeCAD service does not match.")
+        if identity is not None and identity["guard_required"] and method not in {"ping", "get_status"} and target is None:
+            raise PftBridgeError("INSTANCE_TARGET_REQUIRED", "Select a FreeCAD instance before using this service.")
+        return (identity, _dispatcher) if identity is not None else None
+
+
+def _origin(admission):
+    return (admission[0]["instance_id"], admission[0]["service_id"])
+
+
+def _bind_origin(table, key, admission, *, require_known=False):
+    if admission is None:
+        return
+    with _state_lock:
+        _check_admission(admission)
+        origin = _origin(admission)
+        previous = table.get(key)
+        if previous is not None and previous != origin:
+            raise PftBridgeError("INSTANCE_AFFINITY_MISMATCH", "This request or preview belongs to a different FreeCAD service.")
+        if require_known and previous is None:
+            raise PftBridgeError("INSTANCE_AFFINITY_UNKNOWN", "Prepare a new preview through the selected FreeCAD service.")
+        if previous is None:
+            if len(table) >= _MAX_ORIGINS:
+                raise PftBridgeError("INSTANCE_AFFINITY_LIMIT", "The service request identity limit has been reached.")
+            table[key] = origin
+
+
+def _remember_preview(result, admission):
+    if admission is None or not isinstance(result, dict) or not isinstance(result.get("token"), str):
+        return result
+    # Even if a callback stopped the listener, the token stays with its original
+    # service. A later service must never adopt it.
+    with _state_lock:
+        token = result["token"]
+        previous = _token_origins.get(token)
+        origin = _origin(admission)
+        if previous is not None and previous != origin:
+            raise PftBridgeError("INSTANCE_AFFINITY_MISMATCH", "The preview identity conflicts with another service.")
+        if previous is None and len(_token_origins) >= _MAX_ORIGINS:
+            raise PftBridgeError("INSTANCE_AFFINITY_LIMIT", "The service preview identity limit has been reached.")
+        _token_origins[token] = origin
+    return result
 
 
 def _perform_gui(method, params, _approval_epoch=None):
@@ -170,7 +269,8 @@ def _perform_gui(method, params, _approval_epoch=None):
 
 
 class _PftGuiJob:
-    def __init__(self, method, params):
+    def __init__(self, method, params, admission=None):
+        self.admission = admission
         self.id = next(_job_ids)
         self.method = method
         self.params = params
@@ -224,6 +324,7 @@ def _create_gui_dispatcher():
                 with _state_lock:
                     _health.update(state="running", job_id=job.id, operation=job.method, started=time.monotonic())
             try:
+                _check_admission(job.admission)
                 if job.method == "request_part_change_approval":
                     job.result = _perform_gui(job.method, job.params, _approval_epoch=self.approval_epoch)
                 else:
@@ -240,16 +341,17 @@ def _create_gui_dispatcher():
                     self.jobs.pop(job.id, None)
                 job.event.set()
 
-        def dispatch(self, method, params, timeout):
+        def dispatch(self, method, params, timeout, admission=None):
             # Console/menu calls already run on Qt's main thread.
             if QtCore.QThread.currentThread() == application.thread():
                 with self.lock:
                     if self.closed:
                         raise PftBridgeError("SERVER_STOPPING", "服务正在停止。")
+                _check_admission(admission)
                 if method == "request_part_change_approval":
                     return _perform_gui(method, params, _approval_epoch=self.approval_epoch)
                 return _perform_gui(method, params)
-            job = _PftGuiJob(method, params)
+            job = _PftGuiJob(method, params, admission)
             with self.lock:
                 if self.closed:
                     raise PftBridgeError("SERVER_STOPPING", "服务正在停止。")
@@ -286,18 +388,34 @@ def _create_gui_dispatcher():
     return _PftGuiDispatcher()
 
 
-def _dispatch_gui(method, params):
+def _dispatch_gui(method, params, admission=None):
     with _state_lock:
+        _check_admission(admission)
         dispatcher = _dispatcher
     if dispatcher is None:
         raise PftBridgeError("SERVER_NOT_RUNNING", "Phoenix FreeCAD MCP 服务尚未启动。")
-    return dispatcher.dispatch(method, params, GUI_TIMEOUT_SECONDS)
+    if admission is None:
+        return dispatcher.dispatch(method, params, GUI_TIMEOUT_SECONDS)
+    return dispatcher.dispatch(method, params, GUI_TIMEOUT_SECONDS, admission)
 
 
-def process_request(payload):
+def process_request(payload, *, _listener=None):
     """Validate the fixed protocol and return a JSON-serializable envelope."""
     try:
         method, params = _validate_request(payload)
+        admission = _admit(method, payload, _listener)
+        guarded = payload.get("target") is not None
+        if method in {"execute_script", "get_script_status"}:
+            _bind_origin(_request_origins, params["requestId"], admission)
+        if method in {"request_part_change_approval", "get_part_change_status", "apply_part_changes"}:
+            _bind_origin(_token_origins, params["token"], admission, require_known=guarded)
+        if method == "prepare_part_changes" and admission is not None:
+            with _state_lock:
+                if len(_token_origins) >= _MAX_ORIGINS:
+                    raise PftBridgeError("INSTANCE_AFFINITY_LIMIT", "The service preview identity limit has been reached.")
+        def dispatch():
+            # Keep the old two-argument test/console path when no listener exists.
+            return _dispatch_gui(method, params) if admission is None else _dispatch_gui(method, params, admission)
         if method == "ping":
             return _success({"pong": True})
         if method == "get_status":
@@ -314,11 +432,14 @@ def process_request(payload):
                     raise PftBridgeError(error["code"], error["message"])
                 return _success(snapshot)
             try:
-                return _success(_dispatch_gui(method, params))
+                return _success(dispatch())
             except PftBridgeError as error:
                 _runtime.dispatch_error(params["requestId"], error)
                 raise
-        return _success(_dispatch_gui(method, params))
+        result = dispatch()
+        if method == "prepare_part_changes":
+            result = _remember_preview(result, admission)
+        return _success(result)
     except PftBridgeError as error:
         return _failure(error.code, error.message)
     except Exception as error:
@@ -404,7 +525,7 @@ class _PftRequestHandler(BaseHTTPRequestHandler):
             payload = _decode_json(body)
         except (ValueError, UnicodeError, TimeoutError, OSError, RecursionError):
             return self._reject(400, "INVALID_JSON", "请求不是有效的 UTF-8 JSON。")
-        result = process_request(payload)
+        result = getattr(self.server, "pft_process_payload", process_request)(payload)
         return self._reply(200, result)
 
     def do_GET(self):
@@ -414,49 +535,110 @@ class _PftRequestHandler(BaseHTTPRequestHandler):
         self._reject(403, "BROWSER_REQUEST_REJECTED", "不开放浏览器跨域请求。")
 
 
-def start_server(port=DEFAULT_PORT):
+def _start_configuration(port):
+    """Resolve only for an explicit startup; import/status never touch configuration."""
+    if port is not None:
+        return port, {"source": "explicit", "config_path": None, "preferred_port": port}
+    if os.environ.get("PFT_DEVELOPMENT") == "1":
+        value = _default_port(os.environ)
+        return value, {"source": "development", "config_path": None, "preferred_port": value}
+    try:
+        record = _mcp_settings.read_config()
+    except _mcp_settings.PftMcpSettingsError as error:
+        raise PftBridgeError(error.code, str(error)) from None
+    value = record["settings"]["bridge"]["preferred_port"]
+    configuration = {"source": record["source"], "config_path": str(record["config_path"]), "preferred_port": value}
+    if record["settings"].get("discovery", {}).get("enabled", False):
+        configuration["discovery_enabled"] = True
+        return 0, configuration
+    return value, configuration
+
+
+def start_server(port=None, *, discovery_registration_directory=None):
     """Start on the GUI thread; never close, save, reload or edit a document."""
-    global _server, _server_thread, _dispatcher
-    if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+    global _server, _server_thread, _dispatcher, _listener_configuration, _service_identity, _registration, _registration_error
+    if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535):
         raise PftBridgeError("INVALID_PORT", "端口必须是 0 到 65535 的整数。")
     with _state_lock:
         if _server is not None:
             return get_status()
         if _stop_thread is not None and _stop_thread.is_alive():
             raise PftBridgeError("SERVER_STOPPING", "服务仍在停止，请稍后重新启动。")
+        # Resolve before changing any approval/dispatcher lifecycle. Invalid
+        # shared settings cannot cancel a pending approval or fall back to a
+        # different address. Explicit/development ports never read that file.
+        selected_port, selected_configuration = _start_configuration(port)
+        discovery = selected_configuration.get("discovery_enabled", False) or discovery_registration_directory is not None
+        if _registration is not None:
+            raise PftBridgeError("INSTANCE_REGISTRY_CLEANUP_REQUIRED", "An earlier instance registration could not be removed safely.")
+        # The directory override is a trusted embedding/test API, never an RPC
+        # parameter; it must pass the same private-directory checks as production.
+        registration_directory = None
+        if discovery:
+            try:
+                registration_directory = (discovery_registration_directory if discovery_registration_directory is not None
+                                          else _instance_registry.resolve_instance_directory())
+            except _instance_registry.PftInstanceRegistryError as error:
+                raise PftBridgeError(error.code, error.message) from None
         # Gate transitions share this state lock with stop_server.  A failed
         # startup must never leave the previous native approval lifecycle open.
         _business.cancel_pending_approvals()
         dispatcher = _create_gui_dispatcher()
         try:
-            server = _PftBridgeHttpServer(("127.0.0.1", port), _PftRequestHandler)
+            server = _PftBridgeHttpServer(("127.0.0.1", selected_port), _PftRequestHandler)
         except OSError:
             dispatcher.close()
             raise PftBridgeError("PORT_UNAVAILABLE", "端口不可用；没有停止或替换其他服务。")
         except Exception:
             dispatcher.close()
             raise PftBridgeError("START_FAILED", "服务初始化失败。") from None
+        registration = None
         try:
+            identity = {"version": 1, "instance_id": _INSTANCE_ID, "service_id": uuid.uuid4().hex,
+                        "pid": os.getpid(), "guard_required": bool(discovery)}
+            if discovery:
+                record = {"schema_version": 1, "owner": "phoenix-freecad-tools", "instance_id": identity["instance_id"],
+                          "service_id": identity["service_id"], "pid": identity["pid"],
+                          "url": "http://127.0.0.1:%s/" % server.server_address[1],
+                          "protocol_version": PROTOCOL_VERSION, "addon_version": ADDON_VERSION}
+                # Only the fixed default resolver may create its suffix. Explicit
+                # directory overrides must already exist and remain private.
+                registration = (_instance_registry.publish_instance(record) if discovery_registration_directory is None
+                                else _instance_registry.publish_instance(record, directory=registration_directory))
             server_thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, name="PhoenixFreeCADTools-HTTP", daemon=True)
             _dispatcher, _server, _server_thread = dispatcher, server, server_thread
+            _service_identity, _registration, _registration_error = identity, registration, None
+            admission = (identity, dispatcher)
+            server.pft_process_payload = lambda payload: process_request(payload, _listener=admission)
             # Finish every fallible lifecycle initialization before starting a
             # serving thread; dispatch cannot acquire _state_lock yet.
             dispatcher.approval_epoch = _business.begin_approval_lifecycle()
             server_thread.start()
-        except Exception:
+            _listener_configuration = {**selected_configuration, "effective_port": server.server_address[1]}
+        except Exception as error:
             _business.cancel_pending_approvals()
+            _service_identity = None
+            _registration = registration
+            if registration is not None:
+                try:
+                    registration.remove()
+                    _registration = None
+                except _instance_registry.PftInstanceRegistryError as cleanup:
+                    _registration_error = {"code": cleanup.code, "uncertain": cleanup.uncertain}
             _server = None
             _server_thread = None
             _dispatcher = None
             server.server_close()
             dispatcher.close()
+            if isinstance(error, _instance_registry.PftInstanceRegistryError):
+                raise PftBridgeError(error.code, error.message) from None
             raise PftBridgeError("START_FAILED", "服务线程启动失败。") from None
         return get_status()
 
 
 def stop_server():
     """Close approval entry before stopping dispatch; already applying work continues."""
-    global _server, _server_thread, _dispatcher, _stop_thread
+    global _server, _server_thread, _dispatcher, _stop_thread, _service_identity, _registration, _registration_error
     dispatcher = None
     try:
         with _state_lock:
@@ -468,6 +650,14 @@ def stop_server():
             _server = None
             _server_thread = None
             _dispatcher = None
+            _service_identity = None
+            if _registration is not None and _registration_error is None:
+                try:
+                    _registration.remove()
+                    _registration = None
+                    _registration_error = None
+                except _instance_registry.PftInstanceRegistryError as error:
+                    _registration_error = {"code": error.code, "uncertain": error.uncertain}
             if server is not None:
                 def shutdown():
                     try:
