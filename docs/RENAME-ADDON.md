@@ -14,14 +14,15 @@
 | 安装所有者 | phoenix-freecad-mcp | phoenix-freecad-tools | 精确标记和文件指纹校验 |
 | 安装标记 | .phoenix-freecad-mcp-install.json | .phoenix-freecad-tools-install.json | 新安装、旧迁移、拒绝未知目录 |
 | 备份根目录 | .phoenix-freecad-mcp | .phoenix-freecad-tools | 新备份位于 Mod 外；旧备份不搬动 |
-| npm 包 / CLI / MCP server.name | phoenix-freecad-mcp | 保留，专指 Node MCP 服务 | Node 元数据和启动合同 |
+| npm 安装包名 | phoenix-freecad-mcp | @phoenix-wing/phoenix-freecad-mcp | 根包/锁文件身份、实际 tgz 与安装示例 |
+| CLI / MCP server.name | phoenix-freecad-mcp | 保持，专指 Node MCP 服务 | bin 与 MCP 握手身份 |
 | GUI 名称与命令 | Phoenix Tools / PhoenixTools_ | 保持 | 用户入口不变 |
 | Python 自有模块 | phoenix_freecad_* / phoenix_workbench_* | pft_* / pft_workbench_* | 导入和文件名回归 |
 | 环境变量 / 协议 | PHOENIX_FREECAD_URL 等 / v1 | 保持 | 配置和协议回归 |
 
 ## 内部前缀
 
-Python 自有模块迁为 pft_bridge、pft_operations、pft_runtime、pft_business、pft_document_state 及 pft_workbench_*；测试文件为 test_pft_*。自有类用 Pft 前缀，FreeCAD 入口 Init.py / InitGui.py 保留。TypeScript 适配器采用 pft-freecad-client.ts、PftFreeCadClient / PftBridgeError；标准 CLI 入口和 Node 服务包名保持。
+Python 自有模块迁为 pft_bridge、pft_operations、pft_runtime、pft_business、pft_document_state 及 pft_workbench_*；测试文件为 test_pft_*。自有类用 Pft 前缀，FreeCAD 入口 Init.py / InitGui.py 保留。TypeScript 适配器采用 pft-freecad-client.ts、PftFreeCadClient / PftBridgeError；标准 CLI 入口和 MCP 服务名保持 `phoenix-freecad-mcp`；npm 安装身份使用组织包 `@phoenix-wing/phoenix-freecad-mcp`，两者不能混用。
 
 模块导入、按文件名加载、打包白名单、测试路径和当前使用说明同时更新。不为旧 Python 模块注册运行别名；历史证据中的旧模块名表达当时事实。
 

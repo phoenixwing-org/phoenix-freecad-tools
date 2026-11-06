@@ -54,10 +54,39 @@ class ChatSettingsTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.node = self.root / "node"; self.node.write_text("fixture"); self.node.chmod(0o700)
-        package = self.root / "package"; (package / "dist").mkdir(parents=True)
-        (package / "package.json").write_text(json.dumps({"name": "phoenix-freecad-mcp", "version": "0.6.0"}))
+        package = self.root / "node_modules" / "@phoenix-wing" / "phoenix-freecad-mcp"
+        (package / "dist").mkdir(parents=True)
+        (package / "package.json").write_text(json.dumps({"name": "@phoenix-wing/phoenix-freecad-mcp", "version": "0.3.2"}))
         self.cli = package / "dist/cli.js"; self.cli.write_text("fixture")
         self.app = App()
+
+    def test_scoped_npm_layout_is_accepted_without_changing_cli_configuration(self):
+        self.assertEqual(self.cli.parts[-5:],
+                         ("node_modules", "@phoenix-wing", "phoenix-freecad-mcp", "dist", "cli.js"))
+        config = settings.build_chat_mcp_config(
+            {"enabled": True, "node_executable": str(self.node), "cli_entry": str(self.cli)},
+            {"running": True, "port": 9876})
+        self.assertEqual(config, {"node_executable": str(self.node.resolve()),
+                                  "cli_entry": str(self.cli.resolve()),
+                                  "bridge_url": "http://127.0.0.1:9876/"})
+        self.assertEqual(self.app.groups, [])
+        self.assertEqual(self.app.preference.writes, [])
+
+    def test_other_package_identities_including_unscoped_candidate_are_rejected_before_save(self):
+        metadata = self.cli.parent.parent / "package.json"
+        self.app.preference.values["ModelId"] = "unchanged-model"
+        before = dict(self.app.preference.values)
+        for name in ("phoenix-freecad-mcp", "@phoenix-wing/freecad-mcp",
+                     "@other/phoenix-freecad-mcp", "@phoenix-wing/phoenix-freecad-mcp-extra",
+                     "unrelated-package"):
+            with self.subTest(name=name):
+                metadata.write_text(json.dumps({"name": name, "version": "0.3.2"}))
+                with self.assertRaisesRegex(settings.PftChatSettingsError, "dist/cli\\.js"):
+                    settings.save_chat_options(self.app, True, str(self.node), str(self.cli))
+                self.assertEqual(self.app.preference.values, before)
+                self.assertEqual(self.app.preference.writes, [])
+                self.assertEqual(self.app.groups, [])
+                self.assertEqual(self.app.persisted, [])
 
     def test_unset_and_failed_read_are_disabled_without_writes(self):
         expected = {"enabled": False, "desk_enabled": False, "node_executable": "", "cli_entry": ""}

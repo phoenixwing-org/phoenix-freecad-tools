@@ -2,9 +2,11 @@
 
 ![Phoenix](addon/PhoenixFreeCADTools/Resources/icons/phoenix-wing-mark.svg)
 
-让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中英文工作台工具。当前统一源码候选 **0.3.2**（以0.3.1为归并基线，尚未正式发布），采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
+让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中英文工作台工具。当前统一版本 **0.3.2**（以0.3.1为归并基线；[发行说明](docs/RELEASE-0.3.2.md)），采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
 
-FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语言设置和桥接启停；Node 服务默认提供25个 MCP 工具，明确开启多实例发现后完整模式为27项，内嵌聊天保持受控19工具模式。原生 Codex 聊天通过官方 ChatGPT 登录，无需 Platform API Key；提供消息收发、中断和受控 MCP 工具接入。
+本轮基础发行范围是 **MCP 接入和常用工作台按钮**；复杂 Desk 集成作为可选实验能力，不作为基础使用的前提。npm 包名为 **`@phoenix-wing/phoenix-freecad-mcp`**，CLI 命令与 MCP 服务名仍为 `phoenix-freecad-mcp`。
+
+FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语言设置和桥接启停；Node 服务默认提供25个 MCP 工具，明确开启多实例发现后完整模式为27项，内嵌聊天保持受控19工具模式。可选原生 Codex 聊天使用官方 ChatGPT 登录流程，无需 Platform API Key；提供消息收发、中断和受控 MCP 工具接入，真实官方认证与模型服务的本轮验收状态见[聊天说明](docs/CHAT-USAGE.md)。
 
 [工具帮助](addon/PhoenixFreeCADTools/HELP.md) · [版本约定](docs/VERSIONING.md) · [设计诊断](docs/DESIGN-INSPECTION.md) · [当前文档工具](docs/CURRENT-DOCUMENT-TOOLS.md) · [原生聊天](docs/CHAT-USAGE.md) · [原生修改确认](docs/NATIVE-PART-APPROVAL.md) · [有限Pad编辑](docs/PAD-LENGTH-EDIT.md) · [关联尺寸](docs/TECHDRAW-DIMENSIONS.md) · [安装包说明](docs/ADDON-INSTALL.md) · [Desk自包含资源](docs/DESK-RESOURCE.md) · [单页导出草案](docs/TECHDRAW-EXPORT-PLAN.md) · [批量出图方案](docs/BATCH-EXPORT-PLAN.md) · [命名迁移](docs/RENAME-ADDON.md) · [Wing 复用](docs/WING-REUSE.md) · [循环迭代计划](docs/NEXT-ITERATION.md) · [开发与发布计划](docs/RELEASE-PLAN.md) · [MCP 调研](docs/MCP-RESEARCH.md) · [Desk 集成计划](docs/DESK-INTEGRATION.md) · [接入说明](docs/CODEX.md) · [接口协议](docs/PROTOCOL.md) · [架构](docs/ARCHITECTURE.md) · [能力计划](docs/CAPABILITY-PLAN.md) · [验证记录](docs/VERIFICATION.md)
 
@@ -16,7 +18,7 @@ FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语�
 | --- | --- |
 | MCP | 默认完整25工具、聊天19工具，显式发现完整模式27工具，专属worker4工具；常规原生读取及明确图页投影查询提供来源、实例与部分事件修订；原有业务预览/应用保持 |
 | 设计诊断 | 提供 Body Tip、草图约束/自由度、有限特征参数和表达式的有界读取；不求解、不重算 |
-| 参数化零件 | 有限首个Pad的Length编辑源码：完整预览、原生人工确认、自有事务、一次局部重算和几何反验；范围及原生待验见[合同](docs/PAD-LENGTH-EDIT.md)。另有独立人工板/Pad/Pocket示例 |
+| 参数化零件 | 有限首个Pad的Length编辑源码：完整预览、原生人工确认、自有事务、一次局部重算和几何反验；有限独立原生链已验，撤销后的Touched完成状态及更多范围仍待验，见[合同](docs/PAD-LENGTH-EDIT.md)。另有独立人工板/Pad/Pocket示例 |
 | STEP | 提供已知参数样例的导出、导入、参数化重建与几何对比脚本，不承诺恢复任意原始特征历史 |
 | TechDraw | 基础A4三视图及五类关联尺寸已接原生确认链；投影引用只读窗口、实际量值回读、独立Body/父容器/不同Scale与撤销重做已验；尺寸完整性、排版及导出继续分项验收，见[草稿](docs/TECHDRAW-DRAFT.md)与[关联尺寸](docs/TECHDRAW-DIMENSIONS.md) |
 | 工作台 | MVC 分层、命名修正、正式属性填写、Link 名称同步；窗口内多选目标，独立状态圆点、灰色启停、齿轮设置和默认取消的停止确认 |
@@ -30,7 +32,15 @@ FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语�
 
 独立工作台只需要带 GUI 的 FreeCAD，使用其内置 Python。聊天 MCP 另需 Node.js 22+ 和 npm。默认完整25项、聊天19项，明确发现的完整模式27项，专属worker4项，桥接协议仍为v1；优先适配 FreeCAD 1.1.0，所有宣称平台的原生安装和功能须分别验收。
 
-普通用户可从已发布 Release 的附件下载 `phoenix-freecad-tools-addon-<版本>.zip`，按[安装包说明](docs/ADDON-INSTALL.md)解压到 Mod。正式 Release 尚待发布，GitHub 自动生成的整个仓库 Source ZIP 不等同于工作台安装包。源码安装方式如下：
+工作台使用 Release 附件 `phoenix-freecad-tools-addon-<版本>.zip`，按[安装包说明](docs/ADDON-INSTALL.md)解压到 Mod。版本及附件是否可用，以[实际发行页](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases)为准；GitHub 自动生成的整个仓库 Source ZIP 不等同于工作台安装包。普通工作台按钮无需 Node。
+
+Node MCP 的正式安装身份如下；需目标版本已实际发布到 npm 后使用：
+
+```bash
+npm install --global @phoenix-wing/phoenix-freecad-mcp@0.3.2
+```
+
+安装后可执行命令为 `phoenix-freecad-mcp`，由客户端作为 stdio 子进程启动，不需要另开终端重复运行。也可用下文固定版本的 `npx` 配置，无需全局安装。
 
 以下为完整源码包的构建流程。预构建 Node tgz 用于运行服务，不含 lockfile/tsconfig；不要在其解包目录执行源码重建步骤。
 
@@ -77,7 +87,20 @@ pft_bridge.start_server()
 
 启动 FreeCAD 桥接后运行 `npm run check`，检查 `protocol_version:1`、`running:true`、插件版本和 `supported_methods`。离线工具清单不证明当前内存中的插件支持所有新增能力。
 
-支持 stdio MCP 的客户端使用以下配置，并替换为本机绝对路径：
+已发布的组织包可由支持 stdio MCP 的客户端按固定版本启动：
+
+```json
+{
+  "mcpServers": {
+    "phoenix-freecad": {
+      "command": "npx",
+      "args": ["--yes", "--package", "@phoenix-wing/phoenix-freecad-mcp@0.3.2", "phoenix-freecad-mcp"]
+    }
+  }
+}
+```
+
+`npx` 首次需要联网获取该版本，包名带 scope，最后一个参数是未改名的 CLI。已构建源码或固定本机安装可继续使用绝对路径，并替换为已核实的位置：
 
 ```json
 {

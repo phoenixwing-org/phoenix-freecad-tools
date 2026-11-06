@@ -42,7 +42,7 @@ def validate_mcp_paths(node_executable, cli_entry):
                 or not package.is_file() or package.stat().st_size > 65536):
             raise ValueError()
         metadata = json.loads(package.read_text(encoding="utf-8"))
-        if metadata.get("name") != "phoenix-freecad-mcp":
+        if metadata.get("name") != "@phoenix-wing/phoenix-freecad-mcp":
             raise ValueError()
     except (OSError, ValueError, TypeError):
         raise PftChatSettingsError("请选择已构建 Phoenix MCP 包中的 dist/cli.js。") from None

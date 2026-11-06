@@ -1,6 +1,6 @@
 # FreeCAD Tools 发布步骤（个人维护、组织发布）
 
-本文说明如何由个人维护者发布 Phoenix FreeCAD Tools，npm 发布到组织 `@phoenix-wing`。流程核对日期：2026-11-06。当前仓库记录为 **0.3.2 本地源码候选，尚未正式发布**；本文是操作步骤，不是发布回执。
+本文说明如何由个人维护者发布 Phoenix FreeCAD Tools，npm 发布到组织 `@phoenix-wing`。流程核对日期：2026-11-06。当前源码版本为 **0.3.2**，npm 源码已采用 **`@phoenix-wing/phoenix-freecad-mcp`**；实际发行状态以 GitHub Release 与 npm Registry 各自的公开回执为准。本文是操作步骤，不是发布回执。
 
 发布门槛以[开发与发布计划](RELEASE-PLAN.md)为准，版本身份见[版本约定](VERSIONING.md)，用户安装步骤见[安装包说明](ADDON-INSTALL.md)。
 
@@ -24,7 +24,7 @@ GitHub Release 和 npm 支持个人账号发布，FreeCAD 官方索引要求有�
 
 正式 npm 包名采用 **`@phoenix-wing/phoenix-freecad-mcp`**，CLI 命令保持 **`phoenix-freecad-mcp`**。`phoenix-freecad-mcp` 是名称主体；加上组织 scope 后才是完整 npm 安装名称。
 
-源码原先使用无 scope 的 `phoenix-freecad-mcp`。发布准备必须将 `package.json` 的 `name` 和 `package-lock.json` 中的根包名称同步为上述组织包名，并核对安装/npx 示例和相关测试。建议设置 `publishConfig.access` 为 `public`、`publishConfig.registry` 为 `https://registry.npmjs.org`。下面的组织 tgz 文件名及发布命令均以完成该身份切换并重新打包为前提；旧无 scope 的 tgz 不能通过改发布命令变成组织包。
+源码已将 `package.json` 的 `name` 和 `package-lock.json` 中的根包名称同步为上述组织包名，并设置 `publishConfig.access=public`、`publishConfig.registry=https://registry.npmjs.org`；CLI 与 MCP 服务名保持不变。安装/npx 示例和实际打包身份须随本次发布检查。此处记录源码准备完成；实际发行以 Release / Registry 回执为准。重新打包后的文件名为 `phoenix-wing-phoenix-freecad-mcp-0.3.2.tgz`；旧无 scope 的 tgz 不能通过改文件名或发布命令变成组织包。
 
 参考：[GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)、[npm 组织公共包发布](https://docs.npmjs.com/creating-and-publishing-an-organization-scoped-package/)。
 
@@ -100,20 +100,53 @@ Addon ZIP 应只有一个顶层 `PhoenixFreeCADTools/`，入口为其中的 `Ini
 )
 ```
 
-若增加其他附件，将它们的摘要一并纳入 `SHA256SUMS`。Windows 可用 PowerShell `Get-FileHash -Algorithm SHA256` 计算并核对摘要。
+当前自动发行严格使用上述两个包和由其生成的 `SHA256SUMS`，不能直接加入其他附件。额外源码归档若需纳入同一发行，须先另行审定清单与验证规则。Windows 可用 PowerShell `Get-FileHash -Algorithm SHA256` 计算并核对摘要。
 
 现有 [package.yml](../.github/workflows/package.yml) 可手动构建 ZIP、tgz 和校验文件，并上传 Actions artifact；它没有创建 GitHub Release 或执行 npm 发布。使用 Actions 时仍需核对运行对应的受审提交与实际附件。
 
 ## 5. 发布 GitHub Release
 
-1. 确认本次受审提交、版本、附件、说明和发布权限，再为该提交创建或选择正式版本标签，例如 `v0.3.2`。不批量推送旧分支或标签，不覆盖已公开标签和产物。
-2. 在 GitHub 仓库的 **Releases → Draft a new release** 创建草稿，核对标签目标确为本次受审提交。
-3. 填写功能变化、安装方法、已验平台、已知限制，以及普通工作台与聊天 MCP 各自的安装要求。
-4. 上传受审的 Addon ZIP、Node tgz、`SHA256SUMS`，按需要附源码 ZIP；核对下载文件名和版本。
-5. 完成最终检查并发布。GitHub 自动生成的 **Source code ZIP** 是仓库源码归档，不是工作台安装 ZIP。
-6. 从公开 Release 重新下载附件，核对字节摘要与安装结果，记录 Release URL、标签、提交和附件摘要。
+首选 [release.yml](../.github/workflows/release.yml) 的受控自动流程；[package.yml](../.github/workflows/package.yml) 仍是原有的手动构建流程，不创建发行。GitHub Release 完成并读回验证后，再按第 6 节发布 npm；自动 Release 工作流本身不执行 npm 发布。
 
-可先标为预发布供小范围用户测试；GitHub Release 发布不表示已经进入 npm 或 FreeCAD Addon Manager。操作入口见 [GitHub 官方说明](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)。
+### 发布清单与提交绑定
+
+[`.github/releases/0.3.2.json`](../.github/releases/0.3.2.json) 是本版受审资产清单，严格记录版本、组织包名，以及两个实际附件的文件名和真实预期 SHA-256：
+
+- `phoenix-freecad-tools-addon-0.3.2.zip`
+- `phoenix-wing-phoenix-freecad-mcp-0.3.2.tgz`
+
+清单必须来自已构建、审阅和验收的实际字节，不能使用示例摘要或把当前失败产物的摘要直接写回以绕过检查。清单、发行说明和源码一起接受审查；最终标签必须指向该受审提交。若改变会进入制品的源码或文档，先重新构建、审查和更新预期摘要，再冻结新的来源提交。
+
+本地可先检查身份与实际附件；这些命令只验证或生成校验文件，不创建 Release：
+
+```sh
+node .github/scripts/verify-release.mjs --tag v0.3.2 --metadata-only
+node .github/scripts/verify-release.mjs --tag v0.3.2 --assets-dir artifacts/release-0.3.2 --write-checksums
+```
+
+第二条要求目录严格只有两个候选包，或再含完全一致的 `SHA256SUMS`；已有不同的校验文件不会被覆盖。标签、版本、组织包名、附件名称或字节摘要不符均停止。
+
+### 分支预检与标签发布
+
+1. 推送受审候选到 `codex/npm-release` 时，`release.yml` 只构建、测试并上传候选 Actions artifact，随后校验清单；**分支预检不会创建或发布 Release，也不会发布 npm**。候选附件保留供检查，不等于正式发行。
+2. 只有在确认受审提交、资产摘要、权限及发行说明后，才明确授权为该提交创建并推送 `v0.3.2` 标签。推送 `v*` 标签是发布动作，会触发自动发布流程，不是普通构建按钮。标签必须与 `package.json` 版本完全匹配，且解析出的提交须与本次 checkout / 事件提交一致。
+3. 标签运行先在该提交构建并验证实际 ZIP、tgz 与已提交的预期 SHA，再将候选附件交给发布作业。发布作业重新验证下载到的构建附件及标签提交，才创建草稿 Release。
+4. 草稿只上传两个包和 `SHA256SUMS`。流程核对新草稿身份、目标提交、三份附件的完整上传状态，然后重新下载附件并与受审清单逐项核验，再复核同一草稿、附件身份和远端标签提交，全部通过才解除 draft 并发布。
+5. 发现既有同名 Release、已发布附件或标签指向不一致时停止，不覆盖标签、不删除或替换旧发行。失败可能留下草稿供审查；重跑不会自动接管或续写该草稿。先调查实际状态，再决定后续处置。
+6. 自动流程启用后，不同时手动创建同一标签的发行，避免两个发布者竞争。工作流文件存在、分支预检通过和正式发行成功分别记录；正式回执仍须核对公开 Release URL、标签、提交以及下载附件的摘要。
+
+若 CI 构建字节与受审清单不一致，保留候选查明平台或输入差异；不能忽略校验、临时换包或覆盖已公开资产。GitHub 自动提供的 **Source code ZIP** 是仓库源码归档，不是工作台安装 ZIP。
+
+### 可选的手动发布路径
+
+仅在本次明确选择手动路径、自动发行未启用或已确认不会并行运行时使用：
+
+1. 确认受审提交与正式标签指向一致，核实不存在需要保留的同名 Release；不批量推送旧标签，不覆盖已公开标签或资产。
+2. 在 **Releases → Draft a new release** 创建草稿，填写本次功能、安装方式、已验平台和限制，上传受审的两个包及其 `SHA256SUMS`。
+3. 按同一资产清单重新下载并校验附件，确认草稿、标签提交与文件身份均未变化后再发布。不绕过清单检查，也不把自动运行留下的未知草稿当作可直接复用的空位。
+4. 从公开 Release 再次下载核对，记录真实 Release URL、标签、来源提交和摘要。可按本次发布决定标为预发布，但 GitHub Release 不代表已进入 npm 或 Addon Manager。
+
+操作入口见 [GitHub 官方说明](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)。
 
 ## 6. 发布 npm MCP 包
 

@@ -2,7 +2,7 @@
 
 本页保留最小原型的规划范围，不代表当前能力清单。当前目标见 [GOALS](GOALS.md)，实际结果见 [验证记录](VERIFICATION.md)，后续范围见 [能力计划](CAPABILITY-PLAN.md)。
 
-项目目录：`phoenix-freecad-tools`；当前 MCP 包：`phoenix-freecad-mcp`。主服务使用 TypeScript/Node.js，项目采用 Apache-2.0。
+项目目录：`phoenix-freecad-tools`；原型使用无 scope 的 `phoenix-freecad-mcp`。当前 npm 包为 `@phoenix-wing/phoenix-freecad-mcp`，CLI 命令仍为 `phoenix-freecad-mcp`，见[命名约定](NAMING.md)。主服务使用 TypeScript/Node.js，项目采用 Apache-2.0。
 
 ## 首版闭环
 

@@ -19,6 +19,14 @@ npm run test:python
 
 [分发材料回归](verification-managed-addon.json)仅记录独立临时 package/Mod 的文件验收：安装器 44 项、完整 Node 166 项和 Python 打包 6 项通过。离线构建包在独立临时 Mod 核验 dry-run、法律材料字节与指纹、幂等重装、卸载备份和缺材料拒绝；不安装到用户目录，不连接 FreeCAD 或 Desk。使用说明见[受管理安装](ADDON-MANAGED-INSTALL.md)。这不证明全新依赖安装、原生 GUI 或跨平台发行通过。
 
+## 组织npm包与发布准备
+
+npm安装身份已同步为`@phoenix-wing/phoenix-freecad-mcp@0.3.2`，CLI/bin及MCP服务名保持`phoenix-freecad-mcp`，历史安装owner/标记和迁移拒绝规则保持。锁文件仅两个根包name变化，依赖和integrity不变；真实scoped tgz检查包含包身份、命令入口、shebang和所需Addon模块。聊天设置校验真实scoped目录，错误scope、旧无scope和近似包名均拒绝。
+
+发布准备的完整Python1735项、Node357项及类型检查/构建通过；新增发布门禁的独立检查和实际Actions另记，不把这组计数视为后续CI已执行。私有空npm配置及独立目录通过公共Registry干净安装实际tgz，247个文件与包字节一致，官方SDK连接实际安装CLI核对25工具、MCP协议和bridge1。实际Addon ZIP按79条目/78文件manifest验证后安装为真实目录，运行后78文件及18个已加载模块仍匹配。独立FreeCAD1.1.4/Qt6.8.3完成文档/来源读取、轴测Fit、实际当前文档面板、外观实时50%预览取消，以及MCP外观修改后原生Undo恢复等七项；不调用模型服务、读取账号、保存CAD或访问用户实例/剪贴板。
+
+早期QA收尾在明确停止桥接后多查一次状态，原始回执保留；只修测试脚本收尾后，在新私有profile和新独立样件完整复测，最终原始结果七项通过且无清理错误，自有FreeCAD与MCP子进程均实际正常退出。回执留在仓库外。这些证据只覆盖该批实际包及明确样件，不是跨平台、任意模型、复杂Desk或正式发布结果；GitHub Release、npm版本及下载安装须分别回读核实。
+
 ## 原生验收要求
 
 - 文档读取：区分活动文档、固定文档、未保存状态、缓存值与不可读值；读取不得触发保存或改变选择。

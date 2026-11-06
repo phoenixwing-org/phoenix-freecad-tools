@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "version": "0.3.2",
+  "npm_package": "@phoenix-wing/phoenix-freecad-mcp",
+  "assets": [
+    {
+      "name": "phoenix-freecad-tools-addon-0.3.2.zip",
+      "sha256": "e64e7e4ac18ff767950991ec5a0ec3e3d7d91fb9ac094102d468b885f5a1ef5a"
+    },
+    {
+      "name": "phoenix-wing-phoenix-freecad-mcp-0.3.2.tgz",
+      "sha256": "622d0c818c125aa7e03a06984a41f2bda9b5fd9d490c305ac3517e3295f5fea6"
+    }
+  ]
+}

@@ -9,7 +9,8 @@
 | 项目目录 | `phoenix-freecad-tools` |
 | 项目标题 | Phoenix FreeCAD Tools |
 | FreeCAD 工作台显示 | **Phoenix Tools** |
-| npm 包 / CLI / MCP 服务名 | `phoenix-freecad-mcp` |
+| npm 安装包名 | `@phoenix-wing/phoenix-freecad-mcp` |
+| CLI 命令 / MCP 服务名 | `phoenix-freecad-mcp` |
 | 示例客户端服务条目 | `phoenix-freecad` |
 | 插件源码 / 安装目录 | `addon/PhoenixFreeCADTools` / `PhoenixFreeCADTools` |
 | 工作台类 | `PftWorkbench` |
@@ -20,7 +21,7 @@
 | 安装标记 | `.phoenix-freecad-tools-install.json` |
 | 本机桥接 | 默认端口 `9876`，协议版本 `1` |
 
-统一源码候选版本为`0.3.2`，桥接协议仍为 `1`，两者不混用。环境变量使用 `PHOENIX_FREECAD_URL` 和 `PHOENIX_TIMEOUT_MS`。Node npm/CLI 名称保持；本轮同步迁移 Addon 身份、安装标记/owner 和 HTTP 产品标识，协议版本保持 v1，见 [迁移矩阵](RENAME-ADDON.md)。
+统一源码候选版本为`0.3.2`，桥接协议仍为 `1`，两者不混用。环境变量使用 `PHOENIX_FREECAD_URL` 和 `PHOENIX_TIMEOUT_MS`。npm 包使用组织 scope；CLI 命令和 MCP 服务名保持不变。Addon 身份、安装标记/owner 和 HTTP 产品标识沿用已完成的统一名称，协议版本保持 v1，见 [迁移矩阵](RENAME-ADDON.md)。历史无 scope 包和归档保留原名，不通过重命名旧 tgz 冒充组织包。
 
 ## GUI 命令
 

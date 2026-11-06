@@ -1,9 +1,21 @@
 {
-  "name": "phoenix-freecad-mcp",
+  "name": "@phoenix-wing/phoenix-freecad-mcp",
   "version": "0.3.2",
   "description": "Phoenix 的 Node.js/TypeScript FreeCAD MCP 服务",
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phoenixwing-org/phoenix-freecad-tools.git"
+  },
+  "homepage": "https://github.com/phoenixwing-org/phoenix-freecad-tools#readme",
+  "bugs": {
+    "url": "https://github.com/phoenixwing-org/phoenix-freecad-tools/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "engines": {
     "node": ">=22"
   },

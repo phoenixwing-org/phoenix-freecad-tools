@@ -63,7 +63,7 @@ PhoenixFreeCADTools/
 普通按钮可以直接使用。聊天接入则有两个独立进程：
 
 1. 在 Phoenix Tools 中点击灰色三角图标启动 FreeCAD 内的本机桥接。状态圆点转绿，动作按钮变成灰色方块；点击方块默认需要确认停止。圆点只显示状态，点击查看详情，不执行启停。
-2. 另行安装 **Node.js 22+ 和 `phoenix-freecad-mcp` Node 服务**，按 [聊天客户端接入说明](https://github.com/phoenixwing-org/phoenix-freecad-tools/blob/master/docs/CODEX.md) 配置并重新连接客户端。
+2. 另行安装 **Node.js 22+ 和 `@phoenix-wing/phoenix-freecad-mcp` Node 包**（CLI 命令仍为 `phoenix-freecad-mcp`），按 [聊天客户端接入说明](https://github.com/phoenixwing-org/phoenix-freecad-tools/blob/master/docs/CODEX.md) 配置并重新连接客户端。
 
 桥接启停按钮不会启动聊天客户端或 Node MCP，不创建聊天会话，也不要求填写聊天 API Key。独立的“AI 聊天”入口由用户显式连接官方 app-server；启用工具模式时由该客户端启动 Node MCP，使用专属 ChatGPT 登录。选择工作台不会自动启动桥接；默认在正常重启 FreeCAD 后需要再次点击启动。可在灰色齿轮设置中开启“FreeCAD 启动时自动启动 MCP”，下次启动生效；手动停止始终弹出确认，没有关闭选项。正在停止时圆点为红色、动作按钮不可用，悬停显示具体状态，等待结束后再启动。
 

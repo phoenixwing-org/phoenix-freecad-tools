@@ -5,7 +5,7 @@
 ## 命名与模块
 
 - Addon 目录为 `PhoenixFreeCADTools`；自有 Python 模块用 `pft_*.py`，测试文件用 `test_pft_*.py`，生产公开类用 `Pft...`，私有类可用 `_Pft...`。
-- Node 包/CLI `phoenix-freecad-mcp`、GUI 命令 `PhoenixTools_*`、MCP 方法、正式 BOM 字段和用户数据是各自合同，不做无语义的前缀替换。
+- npm 包 `@phoenix-wing/phoenix-freecad-mcp`、CLI/MCP 服务名 `phoenix-freecad-mcp`、GUI 命令 `PhoenixTools_*`、MCP 方法、正式 BOM 字段和用户数据是各自合同，不做无语义的前缀替换。
 - `Init.py` / `InitGui.py` 和 FreeCAD/Qt 要求的钩子名称遵循宿主。InitGui 保持薄入口，主体放正常模块，不依赖 FreeCAD loader 共用 globals/locals 的偶然行为。
 - 动态加载按本模块位置解析来源；复用模块缓存时核对同一来源，来源不明明确拒绝，不调用未知模块的清理代码或静默混用安装副本。
 

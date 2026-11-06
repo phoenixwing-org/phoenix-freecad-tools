@@ -1,0 +1,145 @@
+name: Publish verified release
+on:
+  push:
+    branches:
+      - 'codex/npm-release'
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'phoenixwing-org/phoenix-freecad-tools'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.1'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify source and approved manifest
+        id: metadata
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+            test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
+          else
+            RELEASE_TAG="v$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          fi
+          node .github/scripts/verify-release.mjs --tag "$RELEASE_TAG" --metadata-only
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:python
+      - name: Build exactly two candidate packages
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          mkdir release-assets
+          python3 scripts/package-addon.py --output-dir "$RUNNER_TEMP/pft-addon-build"
+          cp "$RUNNER_TEMP/pft-addon-build/phoenix-freecad-tools-addon-${VERSION}.zip" release-assets/
+          npm pack --ignore-scripts --pack-destination release-assets
+      # Preserve only the two reviewed package types for platform byte comparison,
+      # even when the following pinned SHA verification rejects this candidate.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-assets
+          path: |
+            release-assets/phoenix-freecad-tools-addon-${{ steps.metadata.outputs.version }}.zip
+            release-assets/phoenix-wing-phoenix-freecad-mcp-${{ steps.metadata.outputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify approved asset hashes and generate checksums
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: node .github/scripts/verify-release.mjs --tag "$RELEASE_TAG" --assets-dir release-assets --write-checksums
+  publish:
+    needs: verify
+    if: github.repository == 'phoenixwing-org/phoenix-freecad-tools' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.1'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidate-assets
+          path: release-assets
+      - name: Verify downloaded packages and tagged source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
+          node .github/scripts/verify-release.mjs --tag "$RELEASE_TAG" --assets-dir release-assets --write-checksums
+      # A failure leaves the draft for inspection; this workflow never deletes,
+      # overwrites, or resumes an existing release, including its own failed draft.
+      - name: Create draft, read back all assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: phoenixwing-org/phoenix-freecad-tools
+          GH_HOST: github.com
+          GH_PROMPT_DISABLED: '1'
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$GITHUB_SHA"
+          gh release create "$RELEASE_TAG" \
+            "release-assets/phoenix-freecad-tools-addon-${VERSION}.zip" \
+            "release-assets/phoenix-wing-phoenix-freecad-mcp-${VERSION}.tgz" \
+            release-assets/SHA256SUMS \
+            --draft --verify-tag --target "$GITHUB_SHA" \
+            --title "Phoenix FreeCAD Tools ${VERSION}" \
+            --notes-file "docs/RELEASE-${VERSION}.md"
+          RELEASE_API="$(gh release view "$RELEASE_TAG" --json apiUrl --jq '.apiUrl')"
+          [[ "$RELEASE_API" =~ ^https://api[.]github[.]com/repos/phoenixwing-org/phoenix-freecad-tools/releases/([1-9][0-9]*)$ ]]
+          RELEASE_ID="${BASH_REMATCH[1]}"
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > "$RUNNER_TEMP/pft-created-release.json"
+          node .github/scripts/verify-release.mjs --tag "$RELEASE_TAG" --assets-dir release-assets \
+            --remote-metadata "$RUNNER_TEMP/pft-created-release.json" --target "$GITHUB_SHA"
+          READBACK="$(mktemp -d "$RUNNER_TEMP/pft-release-readback.XXXXXX")"
+          gh release download "$RELEASE_TAG" --dir "$READBACK"
+          node .github/scripts/verify-release.mjs --tag "$RELEASE_TAG" --assets-dir "$READBACK"
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > "$RUNNER_TEMP/pft-rechecked-release.json"
+          node .github/scripts/verify-release.mjs --tag "$RELEASE_TAG" --assets-dir "$READBACK" \
+            --remote-metadata "$RUNNER_TEMP/pft-rechecked-release.json" \
+            --same-release-as "$RUNNER_TEMP/pft-created-release.json" --target "$GITHUB_SHA"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$GITHUB_SHA"
+          gh api --method PATCH "repos/$GH_REPO/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest=true > "$RUNNER_TEMP/pft-published-release.json"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const read = name => JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/pft-${name}-release.json`, 'utf8'));
+          const before = read('rechecked'), after = read('published');
+          for (const key of ['id', 'tag_name', 'target_commitish']) assert.equal(after[key], before[key]);
+          assert.equal(after.draft, false);
+          assert.equal(after.prerelease, false);
+          assert.deepEqual(after.assets.map(a => [a.name, a.id, a.size, a.state]).sort(), before.assets.map(a => [a.name, a.id, a.size, a.state]).sort());
+          NODE

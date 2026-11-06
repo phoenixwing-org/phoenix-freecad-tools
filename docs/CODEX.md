@@ -2,11 +2,27 @@
 
 版本说明：当前统一候选为0.3.2；本页0.4.0–0.10.0均为未发布内部迭代标签，保留当时代码、原生版本及归档事实，不能视为多个正式发行或本轮最终验收。详见[版本约定](VERSIONING.md)。
 
-本服务将当前 FreeCAD 会话作为工具提供给 Codex。聊天和模型选择仍由客户端管理，FreeCAD 插件不需要填写聊天 API Key。项目目录为 `phoenix-freecad-tools`，npm 包和启动命令仍为 `phoenix-freecad-mcp`，示例 Codex 服务 ID 为 `phoenix-freecad`。
+本服务将当前 FreeCAD 会话作为工具提供给 Codex。聊天和模型选择仍由客户端管理，FreeCAD 插件不需要填写聊天 API Key。项目目录为 `phoenix-freecad-tools`，npm 包为 `@phoenix-wing/phoenix-freecad-mcp`，CLI 命令和 MCP 服务名仍为 `phoenix-freecad-mcp`，示例 Codex 服务 ID 为 `phoenix-freecad`。
 
 ## 安装、启动与注册
 
-在项目目录执行，Node.js 需为 22 或更高版本：
+Node.js 需为 22 或更高版本。普通工作台可先按[安装包说明](ADDON-INSTALL.md)安装独立 Addon ZIP；不需要 Node。目标版本发布到 npm 后，MCP 可全局安装：
+
+```bash
+npm install --global @phoenix-wing/phoenix-freecad-mcp@0.3.2
+```
+
+也可由 Codex 直接通过固定版本的 `npx` 启动，无需全局安装：
+
+```bash
+codex mcp add phoenix-freecad -- npx --yes --package @phoenix-wing/phoenix-freecad-mcp@0.3.2 phoenix-freecad-mcp
+codex mcp get phoenix-freecad --json
+codex mcp list
+```
+
+`--package` 后是完整 npm 包名，末尾是稳定 CLI 命令；`--yes` 避免 stdio 启动时等待安装提问。首次 `npx` 获取需要联网。这是安装/注册方式，不是本仓已经发布成功的回执。
+
+开发或使用完整源码包时，在项目目录执行：
 
 ```bash
 cd /absolute/path/to/phoenix-freecad-tools
@@ -27,7 +43,7 @@ codex mcp get phoenix-freecad --json
 codex mcp list
 ```
 
-命令格式已按 [OpenAI 官方 Codex MCP 命令说明](https://learn.chatgpt.com/docs/developer-commands#codex-mcp) 和本机 `codex mcp add --help` 核对。启动入口直接使用 Node 与 `dist/cli.js`，MCP stdio 的 stdout 用于协议消息。
+注册格式依据 [OpenAI 官方 MCP 接入说明](https://learn.chatgpt.com/docs/extend/mcp)。`codex mcp add <服务ID> -- <命令与参数>` 的服务 ID 是客户端配置名，不是 npm 包名。选择 `npx` 或本机 Node/`dist/cli.js` 中的一种方式注册；同一条目无需重复注册。MCP stdio 的 stdout 用于协议消息。
 
 注册成功不等于既有聊天已刷新工具清单。让客户端重新连接或重新加载 MCP 后，先调用 `get_connection_status`，确认 `running`、协议 `1`、插件实际加载版本（新候选为0.3.2，勿用磁盘版本代替内存读回）、实际 `supported_methods` 与 `script_session_id`。`get_capabilities` 是离线清单，不证明插件已连接或支持新功能。模型 ID 不写在 MCP 配置中。
 
@@ -71,7 +87,7 @@ node /absolute/path/to/phoenix-freecad-tools/scripts/call-tool.mjs get_connectio
 - 相机：`fit_view`、`set_axonometric_view`、`set_view`。
 - 外观：`set_appearance`。
 - 通用操作 `general_actions`：`set_selection`、`set_visibility`、`recompute_document`。
-- Phoenix 业务 `phoenix`：`prepare_part_changes`、`apply_part_changes`。
+- Phoenix 业务 `phoenix`：`prepare_part_changes`、`request_part_change_approval`、`get_part_change_status`；完整模式另有`apply_part_changes`。
 - 图像：`capture_view`。
 - 高级脚本：`execute_script`、`get_script_status`。
 
@@ -140,7 +156,7 @@ node /absolute/path/to/phoenix-freecad-tools/scripts/call-tool.mjs get_connectio
 3. 有blocked行、`can_apply:false`或没有变更时先处理原因；可应用时以原token调用`request_part_change_approval`，打开或复用FreeCAD原生窗口。
 4. 用户在窗口核对并点击“确认修改”后，以原token调用`get_part_change_status`，再读取对象核对结果。等待确认或正在应用均不是完成；不要自动轮询、提交确认标志或替换token重复操作。
 
-此链覆盖Label命名、直接Link实例名称同步、五个BOM字符串字段及[有限Pad Length](PAD-LENGTH-EDIT.md)；Pad必须原生人工确认，不能使用直接apply；当前为源码能力，原生聊天、人工确认及实际撤销重做的端到端验收尚未完成。完整状态和边界见[原生确认链](NATIVE-PART-APPROVAL.md)。
+此链覆盖Label命名、直接Link实例名称同步、五个BOM字符串字段及[有限Pad Length](PAD-LENGTH-EDIT.md)；Pad必须原生人工确认，不能使用直接apply；五项零件业务和有限Pad的独立正式MCP/原生按钮自动化已分项验收。Pad的Document.undo/redo可恢复参数与缓存几何，但Touched完成状态及完整内置聊天链仍待验，不能泛化为所有撤销路径均通过。完整状态和边界见[原生确认链](NATIVE-PART-APPROVAL.md)。
 
 例如，保存以下参数为 `/absolute/path/to/prepare.args.json`。所有名称和值均为虚构示例；仅 `set_properties` 需要且允许 `values`，对象键须与 `objects` 精确对应，本批所有对象采用相同字段集。
 

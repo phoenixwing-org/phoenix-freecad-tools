@@ -1,6 +1,6 @@
 # Phoenix Tools — npm 受管理安装
 
-本说明随 Node 包安装器放入 `PhoenixFreeCADTools/README.md`，对应带 `.phoenix-freecad-tools-install.json` 标记的安装。普通工作台工具在 FreeCAD 内运行；Node 服务与聊天客户端另行配置。版本见同目录 `package.xml`，本说明不表示正式 Release 或跨平台原生验收已完成。
+本说明随 Node 包安装器放入 `PhoenixFreeCADTools/README.md`，对应带 `.phoenix-freecad-tools-install.json` 标记的安装。普通工作台工具在 FreeCAD 内运行；Node 服务与聊天客户端另行配置。当前 npm 包名为 `@phoenix-wing/phoenix-freecad-mcp`，CLI 命令仍为 `phoenix-freecad-mcp`，不改变安装器所有权标记。版本见同目录 `package.xml`，本说明不表示正式 Release 或跨平台原生验收已完成。
 
 ## 安装与升级
 
