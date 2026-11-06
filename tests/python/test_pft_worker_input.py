@@ -102,7 +102,7 @@ def edit_member(raw, name, change):
 
 class WorkerInputTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="pft-worker-input-", dir="/private/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="pft-worker-input-", dir=Path(tempfile.gettempdir()).resolve())
         self.addCleanup(self.temporary.cleanup)
         self.folder = Path(self.temporary.name)
         self.staging = self.folder / "staging"

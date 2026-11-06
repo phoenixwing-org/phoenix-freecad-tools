@@ -18,7 +18,7 @@ spec.loader.exec_module(settings)
 
 class SettingsTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="pft-mcp-settings-", dir="/private/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="pft-mcp-settings-", dir=Path(tempfile.gettempdir()).resolve())
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name)
         self.kw = {"home": self.home, "platform": "darwin", "env": {}}

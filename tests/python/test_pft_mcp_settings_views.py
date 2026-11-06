@@ -86,7 +86,7 @@ class Gui:
 
 class McpSettingsViewTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="pft-mcp-settings-ui-", dir="/private/tmp")
+        temporary = tempfile.TemporaryDirectory(prefix="pft-mcp-settings-ui-", dir=Path(tempfile.gettempdir()).resolve())
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.options = {"home": self.home, "platform": "darwin", "env": {}}

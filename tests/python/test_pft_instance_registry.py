@@ -20,7 +20,7 @@ spec.loader.exec_module(registry)
 @unittest.skipUnless(os.name == "posix", "POSIX ownership/mode contract")
 class InstanceRegistryTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="pft-instance-test-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="pft-instance-test-", dir=Path(tempfile.gettempdir()).resolve())
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.home = self.base / "home"
