@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "scope": "managed_addon_packaged_materials_development_followup",
+  "package_version": "0.3.2",
+  "published": false,
+  "archived_tag_changed": false,
+  "tests": {
+    "node_complete": 166,
+    "installer": 44,
+    "installer_added": 21,
+    "python_addon_packaging": 6
+  },
+  "materials": {
+    "LICENSE": "LICENSE",
+    "NOTICE": "docs/ADDON-NOTICE.txt",
+    "README.md": "docs/ADDON-MANAGED-INSTALL.md"
+  },
+  "integration_fixture": {
+    "input": "actual_local_offline_npm_tgz",
+    "target": "independent_temporary_mod_directory",
+    "dry_run_no_directories": true,
+    "documents_match_package_bytes_and_marker_hashes": true,
+    "same_package_reinstall_no_op": true,
+    "uninstall_preserves_documents_in_backup": true,
+    "missing_document_rejected_before_writes": true
+  },
+  "guards": [
+    "missing_empty_oversized_or_nonregular_material",
+    "source_file_or_parent_symlink",
+    "conflicting_source_content_or_directory",
+    "local_installed_modification",
+    "material_change_during_stage_copy"
+  ],
+  "custom_source_scope": "independent_custom_sources_are_copied_as_supplied",
+  "not_verified": [
+    "native_gui_installation",
+    "windows_linux_gui_installation",
+    "clean_dependency_install",
+    "formal_release_or_addon_manager"
+  ],
+  "files_sha256": {
+    "scripts/install-addon.mjs": "7c9dedc1dea923c55c126345678c769077d5053beb93c65107e7d30e5b5181b8",
+    "tests/install.test.ts": "a0d568413baa51c15f3e9fda59b266e440ad27c610809be35adb02a7158764e9",
+    "docs/ADDON-MANAGED-INSTALL.md": "dd78ce3b72968cc56283a08a991f43d0e86871cc55f59173f8fd15954cf5f07f"
+  }
+}

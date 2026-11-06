@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- SPDX-License-Identifier: Apache-2.0; original Phoenix Tools artwork -->
+  <title>帮助</title>
+  <circle cx="12" cy="12" r="9.25" fill="#edf4fa" stroke="#52738b" stroke-width="1.5"/>
+  <path d="M8.8 8.5a3.3 3.3 0 0 1 6.4 1c0 2.4-3.2 2.4-3.2 4.5" fill="none" stroke="#5286ad" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="12" cy="17.4" r="1.1" fill="#5286ad"/>
+</svg>
