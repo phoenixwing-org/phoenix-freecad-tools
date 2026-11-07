@@ -96,7 +96,7 @@ test('official SDK worker transports a valid PNG over 3MiB only once in the MCP 
 
 for (const scope of ['full', 'chat'] as const) {
   test(`official SDK source keeps existing ${scope} tools and does not expose the worker surface`, { timeout: 20000 }, async (t) => {
-    const f = await fixture(t, scope), tools = await f.client.listTools(); assert.equal(tools.tools.length, scope === 'full' ? 25 : 19);
+    const f = await fixture(t, scope), tools = await f.client.listTools(); assert.equal(tools.tools.length, scope === 'full' ? 28 : 22);
     assert.equal(tools.tools.some(tool => (PFT_THUMBNAIL_WORKER_METHODS as readonly string[]).includes(tool.name)), false);
     const capabilities = await f.client.callTool({ name: 'get_capabilities', arguments: {} });
     assert.equal(record(capabilities.structuredContent).connection_checked, false); assert.equal(f.calls.length, 0);

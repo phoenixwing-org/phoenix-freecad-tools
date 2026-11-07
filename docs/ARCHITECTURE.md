@@ -40,9 +40,10 @@ Phoenix FreeCAD Tools 同时提供独立工作台按钮与聊天工具。Node.js
 
 | 模块 | 职责 |
 | --- | --- |
-| `src/server.ts` | 注册完整25/聊天19个工具、严格 schema、标题和副作用声明 |
+| `src/server.ts` | 注册完整28/聊天22个工具、严格 schema、标题和副作用声明 |
 | `src/adapters/pft-freecad-client.ts` | 本机 HTTP、参数映射、`supported_methods` 检查、响应与 PNG 边界 |
 | `src/pft-part-approval.ts` | 原生确认能力与状态schema、token绑定、4 KiB数据体预算及单次请求，无外部确认参数 |
+| `src/pft-drawing-export.ts` | 独立PDF导出capability/严格状态schema、request ID/token与实例绑定，来源为内存历史，无外部路径或确认参数 |
 | `src/pft-recompute.ts` | 原生重算计数与完成/几何结论分开；兼容能力门禁、严格结果与一次调用 |
 | `src/pft-read-provenance.ts` | 三个文档/对象读取及设计诊断来源schema、实例/修订条件及 128 KiB 预算合同 |
 | `pft_document_state.py` | 原生文档观察器、会话实例和部分事件计数、显式来源/未知状态；不读取 Shape 或改模型 |
@@ -51,6 +52,10 @@ Phoenix FreeCAD Tools 同时提供独立工作台按钮与聊天工具。Node.js
 | `pft_runtime.py` | 显式脚本、会话内去重/状态、有限量结果和三维视图捕获 |
 | `pft_business.py` | `phoenix` 业务分组：完整预览、内存token/原生私有确认授权、状态查询、实例/快照/来源复核与共享Controller应用 |
 | `pft_part_approval_views.py` | 非模态完整预览、默认取消及人工确认回调；状态定时器仅读内存，不直接读写CAD |
+| `pft_drawing_export.py` | 独立有界导出登记、原生确认私有授权、异步捕获与同字节发布，分别保留捕获/发布/清理/CAD保护结果 |
+| `pft_drawing_export_profile.py` | 有限原生图纸/来源/资源/显示输入快照、显式开页与私有stage捕获、写后保护核对 |
+| `pft_drawing_export_views.py` | 非模态捕获与冻结PDF预览、异步文件框及最终发布确认，AI不能跳过原生步骤 |
+| `pft_pdf_contract.py` / `pft_pdf_helper.py` / `pft_pdf_qprocess.py` / `pft_pdf_preview_views.py` | 冻结PDF有界协议、独立CoreGraphics进程及自有生命周期、原生像素预览；不读CAD或选择用户文件 |
 
 Node 与客户端走 MCP stdio；Node 与插件走本机 JSON HTTP。两种协议不同，端口不提供 Streamable HTTP MCP。离线清单不代表运行时能力，新工具必须由插件明确声明；完整接口见 [协议](PROTOCOL.md)。
 
@@ -86,7 +91,7 @@ pft_desk_prompt 是纯配置提示生成器：以三个有界候选路径和用�
 
 聊天分为 `pft_chat_profile.py`（专属 profile）、`pft_chat_settings.py`（本机显式路径/偏好）、`pft_chat_controller.py`（无 Qt 协议/状态）、`pft_chat_qprocess.py`（应用拥有的异步子进程）及 `pft_chat_views.py`。QProcess 生命周期不依赖可删除 Dock。
 
-Node 的 `PHOENIX_FREECAD_TOOL_SCOPE=chat` 从注册阶段限制19工具；完整外部客户端默认25工具。`pft-appearance.ts` 接受类型化参数，生成固定 Python 调用原生材质事务，不接受模型提供任意代码。原生桥接仍协议v1，复用现有脚本任务去重与状态查询；Node 工具数与桥接方法数不是一一对应。
+Node 的 `PHOENIX_FREECAD_TOOL_SCOPE=chat` 从注册阶段限制22工具；完整外部客户端默认28工具。`pft-appearance.ts` 接受类型化参数，生成固定 Python 调用原生材质事务，不接受模型提供任意代码。原生桥接仍协议v1，复用现有脚本任务去重与状态查询；Node 工具数与桥接方法数不是一一对应。
 
 0.9.0 的 `pft_design_inspection.py` 独立负责有界只读设计缓存，`pft-design-inspection.ts` 严格核验输入、DTO、未知状态与分页；通过同一文档状态模块取得原生来源和部分事件修订。桥接只路由，不把草图求解或几何重算混入读取。设计诊断不新增专属按钮；当前文档面板移除重复快捷区，轴测Fit与外观统一由工作台命令提供。
 
@@ -107,7 +112,7 @@ Node 的 `PHOENIX_FREECAD_TOOL_SCOPE=chat` 从注册阶段限制19工具；完�
 
 `src/adapters/pft-desk-client.ts`只消费正式Desk CLI状态与固定HTTP领域接口；`src/pft-desk-tools.ts`拥有MCP schema、来源标签、结果总预算和错误映射，`server.ts`仅按full+显配条件注册。普通FreeCAD客户端不承担Desk数据库业务；Desk连接失败不隐式改用脚本、目录扫描或其他后台。
 
-默认完整模式25项、chat19项；同时明确三个Desk路径的full模式为30项，chat还须明确opt-in才为24项。离线清单不探测后台，每次操作再fresh status和身份核对。查询不持久记录输入或结果，批量逐项快照不冒充原子读取；文件去重/引用行/BOM行与实物数量严格分开。接口、副作用和后续同快照批量合同见[能力共享](DESK-MCP-CONTRACT.md)。
+默认完整模式28项、chat22项；同时明确三个Desk路径的full模式为33项，chat还须明确opt-in才为27项。离线清单不探测后台，每次操作再fresh status和身份核对。查询不持久记录输入或结果，批量逐项快照不冒充原子读取；文件去重/引用行/BOM行与实物数量严格分开。接口、副作用和后续同快照批量合同见[能力共享](DESK-MCP-CONTRACT.md)。
 
 
 ## 原生偏好保存

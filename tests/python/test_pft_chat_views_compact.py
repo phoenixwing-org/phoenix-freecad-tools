@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Chat presentation, command shortcuts and explicit actions without Qt or CAD."""
 from copy import deepcopy
+import gc
 import json
 from html.parser import HTMLParser
 from pathlib import Path
 import sys
 import types
 import unittest
+import weakref
 from unittest.mock import Mock, patch
 
 ADDON = Path(__file__).resolve().parents[2] / "addon" / "PhoenixFreeCADTools"
@@ -14,6 +16,7 @@ _old_path = list(sys.path)
 try:
     sys.path.insert(0, str(ADDON))
     import pft_chat_views as views
+    import pft_quick_toolbar as quick_toolbar
     import pft_chat_controller as chat_controller
     import pft_chat_network as chat_network
     import pft_workbench_i18n as i18n
@@ -22,16 +25,21 @@ finally:
 
 
 class Signal:
-    def __init__(self): self.slots = []
-    def connect(self, callback): self.slots.append(callback)
+    def __init__(self, weak=False): self.slots, self.weak = [], weak
+    def connect(self, callback): self.slots.append(weakref.ref(callback) if self.weak else callback)
     def emit(self, *args):
-        for callback in list(self.slots): callback(*args)
+        for entry in list(self.slots):
+            callback = entry() if self.weak else entry
+            if callback is not None:
+                signature = getattr(getattr(callback, "__func__", callback), "_qt_slot_types", None)
+                callback(*args if signature is None else args[:len(signature)])
 
 
 class ChatQt:
     def __init__(self):
         owner = self
         self.objects, self.clipboard = [], []
+        self.weak_button_callbacks = False
 
         class Policy:
             Ignored = 13
@@ -45,6 +53,7 @@ class ChatQt:
         class Widget:
             def __init__(self, parent=None):
                 self._parent, self._name = None, ""
+                self.destroyed = Signal()
                 self.visible, self.enabled, self.value = True, True, ""
                 self.policy, self._font = Policy(), Font()
                 owner.objects.append(self)
@@ -67,6 +76,7 @@ class ChatQt:
             def setSizePolicy(self, value): self.policy = value
             def setWordWrap(self, value): self.word_wrap = value
             def setTextFormat(self, value): self.text_format = value
+            def setTextInteractionFlags(self, value): self.interaction_flags = value
             def setText(self, value): self.value = value
             def text(self): return self.value
             def setToolTip(self, value): self.tooltip = value
@@ -114,8 +124,10 @@ class ChatQt:
 
         class Button(Text):
             def __init__(self, value="", parent=None):
+                if isinstance(value, Widget) and parent is None:
+                    parent, value = value, ""
                 super().__init__(value, parent)
-                self.clicked, self.toggled = Signal(), Signal()
+                self.clicked, self.toggled = Signal(weak=owner.weak_button_callbacks), Signal()
                 self.checked, self.checkable = False, False
             def setCheckable(self, value): self.checkable = value
             def setChecked(self, value):
@@ -191,6 +203,17 @@ class ChatQt:
             def stop(self): self.active = False
             def fire(self):
                 if self.active: self.timeout.emit()
+            def objectName(self): return ""
+
+        class Object:
+            def __init__(self, parent=None): self._parent = parent
+            def parent(self): return self._parent
+
+        def slot(*arguments):
+            def decorate(callback):
+                callback._qt_slot_types = arguments
+                return callback
+            return decorate
 
         class Scroll(Widget):
             def setWidgetResizable(self, value): self.widget_resizable = value
@@ -202,7 +225,7 @@ class ChatQt:
             WA_DeleteOnClose=1, PlainText=2, ToolButtonIconOnly=3, ScrollBarAlwaysOff=4,
             Key_Return=0x1000004, Key_Enter=0x1000005, NoModifier=0, ShiftModifier=0x2000000,
             KeypadModifier=0x20000000, TextSelectableByMouse=1, TextSelectableByKeyboard=2),
-            QUrl=lambda value: value, QTimer=Timer)
+            QUrl=lambda value: value, QTimer=Timer, QObject=Object, Slot=slot)
         self.gui = types.SimpleNamespace(QFont=Font, QIcon=lambda value: value,
             QTextOption=types.SimpleNamespace(WrapAtWordBoundaryOrAnywhere=4), QPalette=types.SimpleNamespace(Base=9),
             QDesktopServices=types.SimpleNamespace(openUrl=Mock(return_value=True)))
@@ -259,10 +282,19 @@ class CompactChatViewTests(unittest.TestCase):
         self.window = self.qt.widgets.QWidget()
         self.app = types.SimpleNamespace(getUserAppDataDir=Mock(return_value="/fixture/user-data"))
         self.gui = types.SimpleNamespace(getMainWindow=lambda: self.window, runCommand=Mock())
+        self.gui.listWorkbenches = Mock(return_value={"PftWorkbench": object()})
+        self.gui.activateWorkbench = Mock()
         self.app.Console = types.SimpleNamespace(PrintError=Mock())
         self.facade = types.SimpleNamespace(show_document_tools_dialog=Mock(),
             run_axonometric_fit=Mock(), show_appearance_dialog=Mock())
-        self.real_facade_loader = views._shortcut_facade
+        def native_shortcut(gui, identifier):
+            gui.runCommand(identifier, 0)
+            callback = {"PhoenixTools_DocumentTools": self.facade.show_document_tools_dialog,
+                        "PhoenixTools_AxonometricFit": self.facade.run_axonometric_fit,
+                        "PhoenixTools_Appearance": self.facade.show_appearance_dialog}[identifier]
+            return callback()
+        self.facade.run_native_shortcut = Mock(side_effect=native_shortcut)
+        self.real_facade_loader = quick_toolbar._shortcut_facade
         self.controllers, self.processes = [], []
         owner = self
         class Process:
@@ -319,7 +351,7 @@ class CompactChatViewTests(unittest.TestCase):
             "pft_chat_qprocess": types.SimpleNamespace(PftChatProcess=Process),
             "pft_chat_profile": self.profile, "pft_chat_settings": self.settings}
         patches = [patch.dict(sys.modules, modules),
-            patch.object(views, "_shortcut_facade", return_value=self.facade),
+            patch.object(quick_toolbar, "_shortcut_facade", return_value=self.facade),
             patch.object(views, "mount_panel_dock", side_effect=lambda dock, parent, content: dock.setWidget(content)),
             patch.object(views, "present_panel", side_effect=lambda dock: dock.show())]
         for handle in patches: handle.start(); self.addCleanup(handle.stop)
@@ -347,6 +379,7 @@ class CompactChatViewTests(unittest.TestCase):
         config = {'approval_policy': 'never', 'sandbox_mode': 'read-only', 'model_provider': 'openai',
             'forced_login_method': 'chatgpt', 'web_search': 'disabled', 'cli_auth_credentials_store': 'file',
             'features': {name: False for name in chat_controller._PFT_DISABLE}, 'tools': {'view_image': False}}
+        config['features'].update(respect_system_proxy=True, system_proxy_fallback=False)
         transport.result('config/read', {'config': config})
 
     def finish_preparation(self, transport, new_thread=True):
@@ -361,7 +394,7 @@ class CompactChatViewTests(unittest.TestCase):
 
     def proxy_real_view(self, reader):
         transport = ChatRpcTransport()
-        resolve = lambda: chat_network.build_chat_proxy_environment({"NO_PROXY": "example.invalid"}, reader)
+        resolve = lambda: chat_network.build_chat_proxy_environment(reader())
         modules = {
             "pft_chat_controller": types.SimpleNamespace(PftChatController=lambda process, changed, open_url:
                 chat_controller.PftChatController(process, changed, open_url, network_environment=resolve)),
@@ -665,16 +698,17 @@ class CompactChatViewTests(unittest.TestCase):
         self.registration_inspector.assert_not_called()
         self.profile.prepare_chat_profile.assert_not_called()
 
-    def test_explicit_connect_passes_system_proxy_without_login_or_sending_the_draft(self):
-        reader = Mock(return_value={"proxies": {"https": "http://proxy.example.invalid:8080"},
-            "bypass": ["198.51.100.0/24"], "exclude_simple": False, "pac_enabled": False, "auto_detect": False})
+    def test_explicit_connect_delegates_system_proxy_without_login_or_sending_the_draft(self):
+        reader = Mock(return_value={"NO_PROXY": "example.invalid"})
         controller, transport = self.proxy_real_view(reader)
         reader.assert_not_called()
         self.named("Input").setPlainText("Neutral unsent draft")
         self.named("Connect").click()
         reader.assert_called_once_with()
-        self.assertEqual(transport.starts[0]["HTTPS_PROXY"], "http://proxy.example.invalid:8080")
-        self.assertEqual(transport.starts[0]["NO_PROXY"], "example.invalid,198.51.100.0/24,localhost,127.0.0.1,::1")
+        self.assertNotIn("HTTPS_PROXY", transport.starts[0])
+        self.assertNotIn("HTTP_PROXY", transport.starts[0])
+        self.assertNotIn("ALL_PROXY", transport.starts[0])
+        self.assertEqual(transport.starts[0]["NO_PROXY"], "example.invalid,localhost,127.0.0.1,::1")
         self.assertEqual(controller.snapshot["phase"], "connecting")
         self.assertEqual([row["method"] for row in transport.messages], ["initialize"])
         self.assertEqual(self.named("Input").toPlainText(), "Neutral unsent draft")
@@ -682,20 +716,19 @@ class CompactChatViewTests(unittest.TestCase):
         self.assertNotIn("proxy.example.invalid", self.named("Status").text())
 
     def test_proxy_policy_error_keeps_connect_available_and_preserves_draft_for_manual_retry(self):
-        reader = Mock(return_value={"proxies": {}, "bypass": [], "exclude_simple": False,
-                                   "pac_enabled": True, "auto_detect": False})
+        reader = Mock(return_value={"HTTPS_PROXY": "neutral-invalid-proxy"})
         controller, transport = self.proxy_real_view(reader)
         self.named("Input").setPlainText("Neutral unsent draft")
         self.named("Connect").click()
-        self.assertEqual(controller.snapshot["error"]["code"], "CHAT_PROXY_UNSUPPORTED")
+        self.assertEqual(controller.snapshot["error"]["code"], "CHAT_PROXY_INVALID")
         self.assertEqual(controller.snapshot["phase"], "disconnected")
         self.assertTrue(self.named("Connect").isEnabled())
         self.assertTrue(self.named("Connect").visible)
         self.assertEqual(transport.starts, [])
         self.assertEqual(transport.messages, [])
         self.assertEqual(self.named("Input").toPlainText(), "Neutral unsent draft")
-        self.assertIn("系统代理规则", self.named("Status").text())
-        reader.return_value["pac_enabled"] = False
+        self.assertIn("代理配置无效", self.named("Status").text())
+        reader.return_value["HTTPS_PROXY"] = "http://proxy.example.invalid:8080"
         self.named("Connect").click()
         self.assertEqual(reader.call_count, 2)
         self.assertEqual(controller.snapshot["phase"], "connecting")
@@ -983,10 +1016,13 @@ class CompactChatViewTests(unittest.TestCase):
         settings = self.named("Settings")
         self.assertFalse(settings.visible)
         toolbar = scroll.content.layout.children[0]
-        self.assertEqual([child.objectName() if hasattr(child, "objectName") else child for child in toolbar.children], [
+        self.assertIs(toolbar, dock._quick_toolbar)
+        self.assertEqual(toolbar.objectName(), "PhoenixTools_ChatQuickToolbar")
+        self.assertEqual([child.objectName() if hasattr(child, "objectName") else child for child in toolbar.layout.children], [
             "PhoenixTools_ChatDocumentToolsAction", "PhoenixTools_ChatAxonometricFitAction",
-            "PhoenixTools_ChatAppearanceAction", ("stretch", 1), "PhoenixTools_ChatSettingsToggle"])
-        for suffix in ("DocumentToolsAction", "AxonometricFitAction", "AppearanceAction", "SettingsToggle"):
+            "PhoenixTools_ChatAppearanceAction", ("stretch", 1), "PhoenixTools_ChatWorkbenchAction",
+            "PhoenixTools_ChatSettingsToggle"])
+        for suffix in ("DocumentToolsAction", "AxonometricFitAction", "AppearanceAction", "WorkbenchAction", "SettingsToggle"):
             button = self.named(suffix)
             self.assertEqual(button.style, self.qt.core.Qt.ToolButtonIconOnly)
             self.assertTrue(button.auto_raise)
@@ -1007,16 +1043,19 @@ class CompactChatViewTests(unittest.TestCase):
         self.settings.save_chat_preferences.assert_not_called()
         self.gui.runCommand.assert_not_called()
 
-    def test_shortcuts_dispatch_fixed_facade_callbacks_and_reopening_reuses_the_chat(self):
+    def test_shortcuts_dispatch_fixed_native_commands_and_reopening_reuses_the_chat(self):
         dock = self.show()
-        views._shortcut_facade.assert_not_called()
+        quick_toolbar._shortcut_facade.assert_not_called()
         for suffix, callback in (("DocumentToolsAction", self.facade.show_document_tools_dialog),
                                  ("AxonometricFitAction", self.facade.run_axonometric_fit),
                                  ("AppearanceAction", self.facade.show_appearance_dialog)):
             self.named(suffix).click()
             callback.assert_called_once_with()
-        self.assertEqual(views._shortcut_facade.call_count, 3)
-        self.gui.runCommand.assert_not_called()
+        self.assertEqual(quick_toolbar._shortcut_facade.call_count, 3)
+        self.assertEqual(self.gui.runCommand.call_args_list, [
+            unittest.mock.call("PhoenixTools_DocumentTools", 0),
+            unittest.mock.call("PhoenixTools_AxonometricFit", 0),
+            unittest.mock.call("PhoenixTools_Appearance", 0)])
         self.assertIs(self.show(), dock)
         self.assertEqual((len(self.controllers), len(self.processes)), (1, 1))
         self.controllers[0].connect.assert_not_called()
@@ -1025,40 +1064,245 @@ class CompactChatViewTests(unittest.TestCase):
 
     def test_shortcut_failures_are_visible_without_native_exception_details(self):
         self.show()
-        message = i18n.tr("快捷操作失败；未自动保存 CAD 文档。")
+        message = "PFT_CHAT_SHORTCUT_ACTION_FAILED\n" + i18n.tr("快捷操作失败；请使用工作台同名工具核对当前目标。")
         for suffix, callback in (("DocumentToolsAction", self.facade.show_document_tools_dialog),
                                  ("AxonometricFitAction", self.facade.run_axonometric_fit),
                                  ("AppearanceAction", self.facade.show_appearance_dialog)):
             with self.subTest(action=suffix):
                 callback.side_effect = RuntimeError("SYNTHETIC_NATIVE_DETAIL")
-                self.named(suffix).click()
+                self.named(suffix).clicked.emit(True)
                 self.assertEqual(self.named("Status").value, message)
                 self.assertNotIn("SYNTHETIC_NATIVE_DETAIL", self.named("Status").value)
                 callback.side_effect = None
         self.assertEqual(self.app.Console.PrintError.call_count, 3)
         self.assertTrue(all(call.args == ("[Phoenix Tools] " + message + "\n",)
                             for call in self.app.Console.PrintError.call_args_list))
-        self.gui.runCommand.assert_not_called()
+        self.assertEqual(self.gui.runCommand.call_count, 3)
         self.controllers[0].connect.assert_not_called()
 
     def test_shortcut_loader_failure_is_visible_before_any_callback(self):
         self.show()
-        views._shortcut_facade.side_effect = RuntimeError("SYNTHETIC_LOADER_DETAIL")
+        quick_toolbar._shortcut_facade.side_effect = RuntimeError("SYNTHETIC_LOADER_DETAIL")
         self.named("DocumentToolsAction").click()
-        self.assertEqual(self.named("Status").value, i18n.tr("快捷操作失败；未自动保存 CAD 文档。"))
+        self.assertEqual(self.named("Status").value, "PFT_CHAT_SHORTCUT_LOAD_FAILED\n" +
+                         i18n.tr("无法加载快捷操作组件；请核对当前插件安装。"))
         self.facade.show_document_tools_dialog.assert_not_called()
         self.app.Console.PrintError.assert_called_once()
 
     def test_shortcut_loader_rejects_foreign_facade_before_callback(self):
-        foreign = types.SimpleNamespace(__file__="/fixture/other-addon/pft_workbench_tools.py",
-            show_document_tools_dialog=Mock())
-        with patch.dict(sys.modules, {"pft_workbench_tools": foreign}):
+        foreign = types.SimpleNamespace(__file__="/fixture/other-addon/pft_workbench_gui.py",
+            run_native_shortcut=Mock())
+        with patch.dict(sys.modules, {"pft_workbench_gui": foreign}):
             with self.assertRaises(RuntimeError):
                 self.real_facade_loader()
-        foreign.show_document_tools_dialog.assert_not_called()
-        local = types.SimpleNamespace(__file__=str(ADDON / "pft_workbench_tools.py"))
-        with patch.dict(sys.modules, {"pft_workbench_tools": local}):
+        foreign.run_native_shortcut.assert_not_called()
+        local = types.SimpleNamespace(__file__=str(ADDON / "pft_workbench_gui.py"))
+        with patch.dict(sys.modules, {"pft_workbench_gui": local}):
             self.assertIs(self.real_facade_loader(), local)
+
+    def test_real_cached_host_dispatches_only_the_selected_command_id(self):
+        self.show()
+        for suffix, identifier in (("DocumentToolsAction", "PhoenixTools_DocumentTools"),
+                                   ("AxonometricFitAction", "PhoenixTools_AxonometricFit"),
+                                   ("AppearanceAction", "PhoenixTools_Appearance")):
+            callback = Mock()
+            facade = types.SimpleNamespace(__file__=str(ADDON / "pft_workbench_gui.py"), run_native_shortcut=callback)
+            with self.subTest(action=suffix), patch.dict(sys.modules, {"pft_workbench_gui": facade}), \
+                    patch.object(quick_toolbar, "_shortcut_facade", side_effect=self.real_facade_loader):
+                self.named(suffix).click()
+                callback.assert_called_once_with(self.gui, identifier)
+                self.assertIs(sys.modules["pft_workbench_gui"], facade)
+                self.assertFalse(self.named("CopyError").visible)
+        self.app.Console.PrintError.assert_not_called()
+        self.gui.runCommand.assert_not_called()
+
+    def test_foreign_facade_click_has_copyable_source_error_and_never_replaces_or_calls_it(self):
+        self.show()
+        facade = types.SimpleNamespace(__file__="/fixture/other-addon/pft_workbench_gui.py",
+            run_native_shortcut=Mock())
+        with patch.dict(sys.modules, {"pft_workbench_gui": facade}), \
+                patch.object(quick_toolbar, "_shortcut_facade", side_effect=self.real_facade_loader):
+            self.named("DocumentToolsAction").click()
+            self.assertIs(sys.modules["pft_workbench_gui"], facade)
+        facade.run_native_shortcut.assert_not_called()
+        self.assertTrue(self.named("DocumentToolsAction").enabled)
+        self.assertTrue(self.named("CopyError").visible)
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard[-1], "PFT_CHAT_SHORTCUT_SOURCE_MISMATCH\n" +
+            i18n.tr("快捷操作来源与当前插件不一致；请正常退出 FreeCAD 后重新启动。"))
+        self.assertNotIn("/fixture/", self.named("Status").text())
+
+    def test_closed_chat_ignores_a_queued_shortcut_signal(self):
+        dock = self.show()
+        self.assertTrue(dock.close())
+        self.named("DocumentToolsAction").clicked.emit(False)
+        quick_toolbar._shortcut_facade.assert_not_called()
+        self.facade.show_document_tools_dialog.assert_not_called()
+
+    def test_dock_retains_actions_when_signal_storage_does_not_own_python_handlers(self):
+        self.qt.weak_button_callbacks = True
+        dock = self.show()
+        gc.collect()
+        for suffix, callback in (("DocumentToolsAction", self.facade.show_document_tools_dialog),
+                                 ("AxonometricFitAction", self.facade.run_axonometric_fit),
+                                 ("AppearanceAction", self.facade.show_appearance_dialog)):
+            self.named(suffix).click()
+            callback.assert_called_once_with()
+        self.named("WorkbenchAction").click()
+        self.gui.activateWorkbench.assert_called_once_with("PftWorkbench")
+        self.controllers[0].push(phase="error", error={"code": "CHAT_TIMEOUT",
+            "message": "聊天操作超时，连接已停止；不会自动重试。"})
+        gc.collect()
+        self.named("CopyError").click()
+        self.assertTrue(self.qt.clipboard[-1].startswith("CHAT_TIMEOUT\n"))
+        self.assertFalse(dock._closed)
+
+    def test_destroyed_dock_releases_retained_actions_and_rejects_late_handlers(self):
+        dock = self.show()
+        late = [(button.objectName(), handler) for button, handler in dock._action_bindings
+                if button.objectName().endswith(("Action", "CopyError"))]
+        late.extend((button.objectName(), handler) for button, handler in dock._quick_toolbar._bindings
+                    if button.objectName().endswith("Action"))
+        dock.destroyed.emit(dock)
+        self.assertEqual(dock._action_bindings, [])
+        self.assertEqual(dock._quick_toolbar._bindings, [])
+        for name, handler in late:
+            handler() if name.endswith("CopyError") else handler(False)
+        quick_toolbar._shortcut_facade.assert_not_called()
+        self.gui.activateWorkbench.assert_not_called()
+        self.assertEqual(self.qt.clipboard, [])
+
+    def test_native_connections_use_owned_decorated_qobject_receivers(self):
+        dock = self.show()
+        self.assertGreater(len(dock._action_bindings), 15)
+        for sender, handler in dock._action_bindings:
+            receiver = handler.__self__
+            self.assertIsInstance(receiver, self.qt.core.QObject)
+            self.assertIs(receiver.parent(), dock)
+            self.assertIn(receiver, dock._action_receivers)
+            self.assertIn(handler.__func__._qt_slot_types, ((), (bool,), (int,)))
+        dock.destroyed.emit(dock)
+        self.assertEqual(dock._action_receivers, [])
+
+    def test_workbench_button_switches_only_the_exact_registered_id_on_explicit_click(self):
+        self.show()
+        self.gui.listWorkbenches.assert_not_called()
+        self.gui.activateWorkbench.assert_not_called()
+        button = self.named("WorkbenchAction")
+        self.assertTrue(button.icon.endswith("phoenix-wing-mark.svg"))
+        self.assertEqual(button.tooltip, i18n.tr("切换到 Phoenix 工作台"))
+        self.assertEqual(button.accessible_name, button.tooltip)
+        button.click(); button.click()
+        self.assertEqual(self.gui.activateWorkbench.call_args_list,
+                         [unittest.mock.call("PftWorkbench"), unittest.mock.call("PftWorkbench")])
+        quick_toolbar._shortcut_facade.assert_not_called()
+        self.controllers[0].connect.assert_not_called()
+
+    def test_workbench_lookup_or_activation_failure_is_fixed_and_copyable(self):
+        self.show()
+        self.gui.listWorkbenches.return_value = {"OtherWorkbench": object()}
+        self.named("WorkbenchAction").click()
+        self.gui.activateWorkbench.assert_not_called()
+        self.assertIn("PFT_CHAT_SHORTCUT_WORKBENCH_UNAVAILABLE", self.named("Status").text())
+        self.gui.listWorkbenches.return_value = {"PftWorkbench": object()}
+        self.gui.activateWorkbench.side_effect = RuntimeError("/fixture/private workbench detail")
+        self.named("WorkbenchAction").click()
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard[-1], "PFT_CHAT_SHORTCUT_WORKBENCH_ACTIVATION_FAILED\n" +
+            i18n.tr("无法切换到 Phoenix 工作台；请使用工作台列表重试。"))
+        self.assertNotIn("private", self.qt.clipboard[-1])
+
+    def test_error_copy_is_a_compact_accessible_icon_button(self):
+        self.show()
+        button = self.named("CopyError")
+        self.assertEqual(button.style, self.qt.core.Qt.ToolButtonIconOnly)
+        self.assertTrue(button.auto_raise)
+        self.assertTrue(button.icon.endswith("copy.svg"))
+        self.assertEqual(button.tooltip, i18n.tr("复制错误"))
+        self.assertEqual(button.accessible_name, button.tooltip)
+
+    def test_shortcut_error_remains_copyable_during_status_timer_refresh_and_clears_on_success(self):
+        dock = self.show()
+        self.processes[0].has_active_session = True
+        self.controllers[0].push(phase="ready", can_send=True)
+        self.facade.run_axonometric_fit.side_effect = RuntimeError("SYNTHETIC_NATIVE_DETAIL")
+        self.named("AxonometricFitAction").click()
+        dock._status_timer.fire()
+        self.assertTrue(self.named("CopyError").visible)
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard[-1], "PFT_CHAT_SHORTCUT_ACTION_FAILED\n" +
+            i18n.tr("快捷操作失败；请使用工作台同名工具核对当前目标。"))
+        self.facade.run_axonometric_fit.side_effect = None
+        self.named("AxonometricFitAction").click()
+        self.assertFalse(self.named("CopyError").visible)
+
+    def test_missing_registered_host_is_reported_without_loading_or_camera_dispatch(self):
+        self.show()
+        with patch.dict(sys.modules, {"pft_workbench_gui": None}), \
+                patch.object(quick_toolbar, "_shortcut_facade", side_effect=self.real_facade_loader):
+            self.named("AxonometricFitAction").click()
+        self.assertIn("PFT_CHAT_SHORTCUT_UNAVAILABLE", self.named("Status").text())
+        self.gui.runCommand.assert_not_called()
+
+    def test_missing_selected_callback_and_known_target_error_have_distinct_diagnostics(self):
+        self.show()
+        with patch.object(quick_toolbar, "_shortcut_facade", return_value=types.SimpleNamespace()):
+            self.named("AppearanceAction").click()
+        self.assertIn("PFT_CHAT_SHORTCUT_UNAVAILABLE", self.named("Status").text())
+        self.facade.PftToolError = type("PftToolError", (RuntimeError,), {})
+        self.facade.run_axonometric_fit.side_effect = self.facade.PftToolError("当前没有打开的文档。")
+        self.named("AxonometricFitAction").click()
+        self.assertEqual(self.named("Status").text(), "PFT_CHAT_SHORTCUT_NO_DOCUMENT\n当前没有打开的文档。")
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard[-1], self.named("Status").text())
+        self.facade.run_axonometric_fit.side_effect = self.facade.PftToolError("/fixture/private native detail")
+        self.named("AxonometricFitAction").click()
+        self.assertIn("PFT_CHAT_SHORTCUT_ACTION_FAILED", self.named("Status").text())
+        self.assertNotIn("private", self.named("Status").text())
+
+    def test_native_command_receipt_error_is_copyable_and_never_copies_arbitrary_details(self):
+        class CommandError(RuntimeError):
+            def __init__(self, code, message):
+                super().__init__(message)
+                self.code, self.message = code, message
+        self.facade.pft_global_menu = types.SimpleNamespace(PftGlobalMenuError=CommandError)
+        self.facade.run_native_shortcut.side_effect = CommandError("PFT_CHAT_SHORTCUT_NO_3D_VIEW",
+            "没有可确定的活动三维视图，请先激活目标文档的三维视图。")
+        self.show()
+        self.named("AppearanceAction").click()
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard[-1], "PFT_CHAT_SHORTCUT_NO_3D_VIEW\n" +
+            i18n.tr("没有可确定的活动三维视图，请先激活目标文档的三维视图。"))
+        self.facade.run_native_shortcut.side_effect = CommandError("PFT_CHAT_SHORTCUT_ACTION_FAILED", "SYNTHETIC_PRIVATE_DETAIL")
+        self.named("AppearanceAction").click()
+        self.named("CopyError").click()
+        self.assertNotIn("PRIVATE", self.qt.clipboard[-1])
+
+    def test_main_status_is_selectable_and_copies_only_current_sanitized_error(self):
+        self.show()
+        self.assertEqual(self.named("Status").interaction_flags,
+            self.qt.core.Qt.TextSelectableByMouse | self.qt.core.Qt.TextSelectableByKeyboard)
+        self.assertFalse(self.named("CopyError").visible)
+        message = "聊天操作超时，连接已停止；不会自动重试。"
+        self.controllers[0].push(phase="error", error={"code": "CHAT_TIMEOUT", "message": message,
+            "raw": "https://example.invalid/?token=neutral-private-token"})
+        self.assertTrue(self.named("CopyError").visible)
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard, ["CHAT_TIMEOUT\n" + i18n.tr(message)])
+        self.controllers[0].push(phase="ready", error=None)
+        self.assertFalse(self.named("CopyError").visible)
+        self.named("CopyError").click()
+        self.assertEqual(len(self.qt.clipboard), 1)
+        self.controllers[0].connect.assert_not_called()
+
+    def test_error_copy_hides_unrecognized_text_and_malformed_codes(self):
+        self.show()
+        self.controllers[0].push(phase="error", error={"code": "https://example.invalid/neutral-token",
+            "message": "Synthetic provider detail /fixture/private?token=neutral-token"})
+        self.named("CopyError").click()
+        self.assertEqual(self.qt.clipboard[-1], "CHAT_UI_ERROR\n" +
+            i18n.tr("错误详情已隐藏，请根据错误代码检查连接。"))
+        self.assertNotIn("neutral-token", self.qt.clipboard[-1])
 
     def test_connection_conveniences_follow_phase_and_empty_tool_diagnostics_stay_hidden(self):
         self.show()

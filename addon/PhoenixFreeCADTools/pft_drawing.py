@@ -2,12 +2,17 @@
 """Finite, additive TechDraw drafts behind the native confirmation lifecycle.
 
 Previews read cached native geometry and a fixed installed template only. The
-write creates five nodes in one owned transaction, recomputes only those nodes,
-and never pumps GUI events, waits for projection, exports, or saves a document.
+write creates five nodes in one owned transaction and recomputes their checked
+local, expression-free native dependency graph. It never pumps GUI events,
+waits for projection, exports, or saves a document.
 Native callbacks are not isolated; source preservation and transaction closure
 are checked, while rendered projection remains explicitly unverified.
 """
 import hashlib
+import importlib
+import importlib.util
+import json
+import sys
 import math
 from pathlib import Path
 import re
@@ -30,17 +35,42 @@ _MESSAGES = {
     'DRAWING_PROJECTION_UNAVAILABLE': '原生精确投影引擎初始化未通过核对，未创建图纸节点。',
     'DRAWING_NATIVE_CONFIRMATION_REQUIRED': '图纸草稿创建只能由原生确认窗口的人工确认回调执行。',
     'DRAWING_RESULT_INVALID': '图纸草稿结果格式或内容未通过核对。',
+    'DRAWING_DRAFT_LAYOUT_UNAVAILABLE': '当前原生版本、图框或完整标注留白计划无法核验，未创建草稿。',
+    'DRAWING_DRAFT_LAYOUT_NO_SPACE': '三视图及固定纸面标注留白无法完整放入已核验区域，未创建草稿。',
+    'DRAWING_DRAFT_LAYOUT_STALE': '新草稿的来源、原生环境或冻结留白计划已变化，请重新预览。',
 }
 _TEMPLATE_CHOICES = ('ISO/A4_Landscape_ISO5457_advanced.svg',
                      'A4_Landscape_ISO5457_advanced.svg',
                      'Default_Template_A4_Landscape.svg')
 _SCALES = (1., .5, .2, .1, .05, .02, .01, .005, .002, .001)
 _MAX_PARENT_DEPTH = 16
+_MAX_DEPENDENCY_NODES = 256
+_MAX_DEPENDENCY_EDGES = 2048
 # Reserve the lower 80 mm for the installed A4 title block. Conservative
 # view boxes stay within x=30..270, y=80..195, with a gap between projections.
 _SPECS = (('front', (0., -1., 0.), (1., 0., 0.), 85., 160., 110., 60.),
           ('top', (0., 0., 1.), (1., 0., 0.), 85., 100., 110., 40.),
           ('axonometric', (1., -1., 1.), (1., 1., 0.), 215., 150., 110., 90.))
+
+_DRAFT_TEMPLATE_SHA256 = '321b65bd1ea8a4799ada857126698df4773cfafaf2c033b39c35ac6837c63ebf'
+
+def _sibling(name):
+    filename = Path(__file__).resolve().with_name(name + '.py')
+    key = '_pft_drawing_' + name
+    module = sys.modules.get(key)
+    if module is not None:
+        if Path(getattr(module, '__file__', '')).resolve() != filename:
+            _fail('DRAWING_DRAFT_LAYOUT_UNAVAILABLE')
+        return module
+    spec = importlib.util.spec_from_file_location(key, filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        raise
+    return module
 
 
 class PftDrawingError(RuntimeError):
@@ -171,6 +201,80 @@ def _native(obj, document):
     return (obj.Name, obj.TypeId, tuple(states), _placement(obj))
 
 
+def _dependency_snapshot(document, roots):
+    """Freeze a finite, clean, expression-free native dependency graph.
+
+    The recompute subset is not an isolation boundary: native FreeCAD follows
+    OutList (including external links and expressions) beyond the given nodes.
+    Check document identity before inspecting a dependency's other properties.
+    Auxiliary native Origin/Plane/Sketch nodes need neither Shape nor Placement.
+    Keep references beside IDs so an old signature cannot survive ID reuse.
+    """
+    try:
+        return _dependency_records(document, roots)
+    except PftDrawingError:
+        raise
+    except Exception:
+        _fail()
+
+
+def _dependency_records(document, roots):
+    if type(roots) is not tuple or not 1 <= len(roots) <= 2:
+        _fail()
+    records, colors, edges = [], {}, 0
+    stack = [(root, False) for root in reversed(roots)]
+    while stack:
+        obj, leaving = stack.pop()
+        identity = id(obj)
+        if leaving:
+            colors[identity] = 2
+            continue
+        color = colors.get(identity, 0)
+        if color == 1:
+            _fail()
+        if color == 2:
+            continue
+        if len(records) >= _MAX_DEPENDENCY_NODES:
+            _fail()
+        # Never read a foreign object's Name/Type/Proxy/State/OutList or Shape.
+        if obj is None or obj.Document is not document:
+            _fail()
+        name = obj.Name
+        if not _name(name) or document.getObject(name) is not obj:
+            _fail()
+        kind = obj.TypeId
+        if (type(kind) is not str or not kind or kind.endswith('Python')
+                or kind.startswith('App::Link')):
+            _fail()
+        properties = _sequence(obj.PropertiesList)
+        if any(type(value) is not str for value in properties) or 'Proxy' in properties:
+            _fail()
+        try:
+            getattr(obj, 'Proxy')
+        except AttributeError:
+            pass
+        else:
+            _fail()
+        states = _sequence(obj.State, 16)
+        if (not states or any(type(value) is not str for value in states)
+                or set(states) - {'Up-to-date', 'Expanded'} or 'Up-to-date' not in states
+                or obj.isValid() is not True or _sequence(obj.ExpressionEngine, 100)):
+            _fail()
+        children = _sequence(obj.OutList, _MAX_DEPENDENCY_EDGES)
+        edges += len(children)
+        if edges > _MAX_DEPENDENCY_EDGES:
+            _fail()
+        # Preflight every child before inspecting any of its remaining fields.
+        for child in children:
+            if child is None or child.Document is not document:
+                _fail()
+        records.append((identity, obj, name, kind, states, tuple(id(child) for child in children)))
+        colors[identity] = 1
+        stack.append((obj, True))
+        stack.extend((child, False) for child in reversed(children))
+    return tuple(records)
+
+
 def _shape(shape):
     if (shape.isNull() is not False or shape.isValid() is not True
             or len(_sequence(shape.Solids, 2)) != 1):
@@ -282,11 +386,12 @@ def _capture(app, gui, document, source, controller, owned=None, created=(), all
     state = _native(source, document)
     if source.TypeId not in ('Part::Feature', 'PartDesign::Body'):
         _fail()
+    tip = source.Tip if source.TypeId == 'PartDesign::Body' else None
+    dependencies = _dependency_snapshot(document, (source,) if tip is None else (source, tip))
     shape = source.Shape
     geometry = _shape(shape)
-    tip, tip_state, tip_shape, tip_geometry = None, None, None, None
+    tip_state, tip_shape, tip_geometry = None, None, None
     if source.TypeId == 'PartDesign::Body':
-        tip = source.Tip
         tip_state = _native(tip, document)
         if (tip is source or not tip.TypeId.startswith(('PartDesign::', 'Part::'))
                 or not any(member is tip for member in _sequence(source.Group, 10000))):
@@ -304,7 +409,8 @@ def _capture(app, gui, document, source, controller, owned=None, created=(), all
         located.Placement = global_placement
         projection_geometry = _shape(located)
     _context(app, gui, document, controller, owned, bool(created))
-    return (objects, (state, geometry, tip_state, tip_geometry, global_state, parent_states, projection_geometry),
+    return (objects, (state, geometry, tip_state, tip_geometry, global_state, parent_states, projection_geometry,
+                      dependencies),
             (shape, tip_shape), tip, parents)
 
 
@@ -322,18 +428,109 @@ def _scale(geometry):
     _fail()
 
 
-def prepare_plan(app, gui, document, source, controller):
+
+def _draft_runtime(app):
+    version = _sequence(app.Version(), 16)
+    if (version[:3] != ('1', '1', '4')
+            or any(type(v) is not str or not 1 <= len(v) <= 256 for v in version)):
+        _fail('DRAWING_DRAFT_LAYOUT_UNAVAILABLE')
+    qt = importlib.import_module('PySide6.QtCore').qVersion()
+    if type(qt) is not str or qt != '6.8.3':
+        _fail('DRAWING_DRAFT_LAYOUT_UNAVAILABLE')
+    return version, qt
+
+
+def _draft_profile(app, template, digest):
+    root = (Path(app.getResourceDir()) / 'Mod/TechDraw/Templates').resolve()
+    if digest != _DRAFT_TEMPLATE_SHA256 or not template.is_relative_to(root):
+        _fail('DRAWING_DRAFT_LAYOUT_UNAVAILABLE')
+    return _draft_runtime(app), root, template, digest
+
+
+def _draft_specs(value):
+    return tuple((v['kind'], tuple(v['direction']), tuple(v['x_direction']), *v['center_mm'],
+                  v['projected_span_mm'][0] + 40., v['projected_span_mm'][1] + 40.) for v in value['views'])
+
+
+def _draft_stamp(plan):
+    active, count = set(), [0]
+    def freeze(value, depth=0):
+        count[0] += 1
+        if depth > 64 or count[0] > 100000:
+            _fail('DRAWING_DRAFT_LAYOUT_STALE')
+        kind = type(value)
+        if value is None or kind in (bool, int, float, str):
+            return kind.__name__, value
+        if kind not in (dict, list, tuple):
+            return 'native', id(value)
+        if id(value) in active or len(value) > 10000:
+            _fail('DRAWING_DRAFT_LAYOUT_STALE')
+        active.add(id(value))
+        try:
+            if kind is dict:
+                if any(type(k) is not str for k in value):
+                    _fail('DRAWING_DRAFT_LAYOUT_STALE')
+                return 'dict', tuple((k, freeze(value[k], depth + 1)) for k in sorted(value))
+            return kind.__name__, tuple(freeze(v, depth + 1) for v in value)
+        finally:
+            active.remove(id(value))
+    if type(plan) is not dict:
+        _fail('DRAWING_DRAFT_LAYOUT_STALE')
+    value = freeze({k: v for k, v in plan.items() if k != '_draft_stamp'})
+    if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf8')) > 2 * 1024 * 1024:
+        _fail('DRAWING_DRAFT_LAYOUT_STALE')
+    return value
+
+
+def _draft_check(plan, expected=None):
     try:
+        stamp = plan['_draft_stamp'] if expected is None else expected
+        if _draft_stamp(plan) != stamp or plan.get('_draft_stamp') != stamp:
+            _fail('DRAWING_DRAFT_LAYOUT_STALE')
+        value = _sibling('pft_draft_layout').validate(plan['draft_layout'])
+        if (value['source'] != plan['request']['source'] or value['page'] != plan['request']['page']
+                or value['source'] != plan['source'].Name or value['page'] != plan['names'][0]
+                or [v['name'] for v in value['views']] != list(plan['names'][2:])
+                or value['source_spans_mm'] != list(plan['snapshot'][6][3])
+                or value['scale'] != plan['scale'] or _draft_specs(value) != plan['_draft_specs']):
+            _fail('DRAWING_DRAFT_LAYOUT_STALE')
+        if _draft_stamp(plan) != stamp:
+            _fail('DRAWING_DRAFT_LAYOUT_STALE')
+        return value
+    except PftDrawingError:
+        raise
+    except Exception:
+        _fail('DRAWING_DRAFT_LAYOUT_STALE')
+
+
+def _specs(plan):
+    return plan['_draft_specs'] if 'draft_layout' in plan else _SPECS
+
+
+def prepare_plan(app, gui, document, source, controller, *, draft_layout=False):
+    try:
+        if type(draft_layout) is not bool:
+            _fail('DRAWING_DRAFT_LAYOUT_UNAVAILABLE')
         objects, snapshot, shapes, tip, parents = _capture(app, gui, document, source, controller)
         template, digest = _template(app)
         names = _names(source)
         if any(document.getObject(name) is not None for name in names):
             _fail()
-        scale = _scale(snapshot[6])
+        public_layout = profile = None
+        if draft_layout:
+            profile = _draft_profile(app, template, digest)
+            try:
+                public_layout = _sibling('pft_draft_layout').plan(source.Name, names[0], names[2:], snapshot[6][3])
+            except Exception as error:
+                _fail(getattr(error, 'code', 'DRAWING_DRAFT_LAYOUT_UNAVAILABLE'))
+        scale = public_layout['scale'] if draft_layout else _scale(snapshot[6])
         plan = {'document': document, 'source': source, 'tip': tip, 'objects': objects,
                 'snapshot': snapshot, 'shapes': shapes, 'parents': parents, 'template_path': template,
                 'template_digest': digest, 'names': names, 'scale': scale,
                 'request': {'source': source.Name, 'page': names[0]}}
+        if draft_layout:
+            plan.update(draft_layout=public_layout, _draft_profile=profile, _draft_specs=_draft_specs(public_layout))
+            plan['_draft_stamp'] = _draft_stamp(plan)
         descriptions = ('A4 横向图纸草稿；第一角投影', '安装内置 A4 横向模板',
                         '主视图', '俯视图（位于主视图下方）', '轴测图')
         rows = [{'object': name, 'field': 'TechDraw draft node', 'old': None,
@@ -342,17 +539,29 @@ def prepare_plan(app, gui, document, source, controller):
                  'note': ('来源 %s；比例 %g；确认后只创建图纸节点并受限重算；'
                           '无尺寸、无导出、不保存；投影尚未核验，须人工检查排版和内容。') % (source.Name, scale)}
                 for name, text in zip(names, descriptions)]
-        for row, spec in zip(rows[2:], _SPECS):
+        for row, spec in zip(rows[2:], _specs(plan)):
             row['note'] += ' 视图中心 X=%g mm，Y=%g mm；下部预留标题栏。' % (spec[3], spec[4])
+        if draft_layout:
+            for row, item in zip(rows[2:], public_layout['views']):
+                row['note'] += ' 几何估算框 %s；标注留白框 %s；纸面固定20mm留白，尚无尺寸。' % (
+                    item['estimated_geometry_bounds_mm'], item['annotation_envelope_mm'])
+            _sibling('pft_draft_layout').validate_preview(
+                {'draft_layout': public_layout, 'draft_layout_reason': None}, plan['request'], rows, can_apply=True)
         verify_plan(app, gui, document, plan, controller)
         return plan, rows
-    except PftDrawingError:
+    except PftDrawingError as error:
+        if draft_layout and error.code not in ('DRAWING_DRAFT_LAYOUT_UNAVAILABLE', 'DRAWING_DRAFT_LAYOUT_NO_SPACE',
+                                                'DRAWING_DRAFT_LAYOUT_STALE'):
+            _fail('DRAWING_DRAFT_LAYOUT_STALE' if error.code == 'DRAWING_PLAN_STALE' else 'DRAWING_DRAFT_LAYOUT_UNAVAILABLE')
         raise
     except Exception:
-        _fail()
+        _fail('DRAWING_DRAFT_LAYOUT_UNAVAILABLE' if draft_layout else 'DRAWING_UNSUPPORTED')
 
 
 def _verify(app, gui, document, plan, controller, owned=None, created=()):
+    draft_mode = any(k in plan for k in ('draft_layout', '_draft_stamp', '_draft_specs', '_draft_profile'))
+    if draft_mode:
+        _draft_check(plan)
     if plan['document'] is not document or plan['names'] != _names(plan['source']):
         _fail('DRAWING_PLAN_STALE')
     objects, snapshot, shapes, tip, parents = _capture(app, gui, document, plan['source'], controller, owned, created)
@@ -364,18 +573,24 @@ def _verify(app, gui, document, plan, controller, owned=None, created=()):
         _fail('DRAWING_PLAN_STALE')
     if _template(app) != (plan['template_path'], plan['template_digest']):
         _fail('DRAWING_PLAN_STALE')
-    if plan['scale'] != _scale(snapshot[6]):
+    if draft_mode:
+        if _draft_profile(app, plan['template_path'], plan['template_digest']) != plan['_draft_profile']:
+            _fail('DRAWING_DRAFT_LAYOUT_STALE')
+        _draft_check(plan)
+    elif plan['scale'] != _scale(snapshot[6]):
         _fail('DRAWING_PLAN_STALE')
     for index, name in enumerate(plan['names']):
         if document.getObject(name) is not (created[index] if index < len(created) else None):
             _fail('DRAWING_PLAN_STALE')
+    if draft_mode:
+        _draft_check(plan)
 
 
 def verify_plan(app, gui, document, plan, controller):
     try:
         _verify(app, gui, document, plan, controller)
     except PftDrawingError as error:
-        if error.code == 'DRAWING_PLAN_STALE':
+        if error.code in ('DRAWING_PLAN_STALE', 'DRAWING_DRAFT_LAYOUT_STALE'):
             raise
         _fail('DRAWING_PLAN_STALE')
     except Exception:
@@ -386,9 +601,55 @@ def _result(plan):
     names = plan['names']
     return {'kind': 'drawing_draft', 'page': names[0], 'template': names[1],
             'source': plan['source'].Name,
-            'views': [{'name': name, 'kind': spec[0]} for name, spec in zip(names[2:], _SPECS)],
+            'views': [{'name': name, 'kind': spec[0]} for name, spec in zip(names[2:], _specs(plan))],
             'scale': plan['scale'], 'projection': 'first_angle', 'paper': 'A4_landscape',
             'projection_verification': 'not_checked', 'manual_review_required': True}
+
+
+def _verify_created_dependencies(document, plan, nodes):
+    """Keep each newly created native node inside the exact recompute graph.
+
+    FreeCAD 1.1.4 DrawPage links Template/Views, DrawSVGTemplate has no links,
+    and DrawViewPart links Source/XSource. OutList also includes dynamic link
+    properties and expressions, so checking only the advertised Source is not
+    sufficient. Compare identities without dereferencing unexpected targets.
+    """
+    if type(nodes) not in (list, tuple) or len(nodes) != 5:
+        _fail('DRAWING_CREATE_FAILED')
+    page, template, *views = nodes
+    kinds = ('TechDraw::DrawPage', 'TechDraw::DrawSVGTemplate') + ('TechDraw::DrawViewPart',) * 3
+    links = ((template, *views), (), *((plan['source'],) for _ in views))
+    for node, kind, expected in zip(nodes, kinds, links):
+        if (node.Document is not document or not _name(node.Name)
+                or document.getObject(node.Name) is not node
+                or type(node.TypeId) is not str or node.TypeId != kind):
+            _fail('DRAWING_CREATE_FAILED')
+        properties = _sequence(node.PropertiesList)
+        if any(type(value) is not str for value in properties) or 'Proxy' in properties:
+            _fail('DRAWING_CREATE_FAILED')
+        try:
+            getattr(node, 'Proxy')
+        except AttributeError:
+            pass
+        else:
+            _fail('DRAWING_CREATE_FAILED')
+        if _sequence(node.ExpressionEngine, 100):
+            _fail('DRAWING_CREATE_FAILED')
+        if kind == 'TechDraw::DrawViewPart':
+            if 'XSource' not in properties or _sequence(node.XSource, 100):
+                _fail('DRAWING_CREATE_FAILED')
+        actual = _sequence(node.OutList, 4)
+        if (len(actual) != len(expected)
+                or any(sum(child is target for child in actual) != 1 for target in expected)):
+            _fail('DRAWING_CREATE_FAILED')
+    # The last owner/read-only callbacks may also have changed an old edge.
+    roots = (plan['source'],) if plan['tip'] is None else (plan['source'], plan['tip'])
+    try:
+        dependencies = _dependency_snapshot(document, roots)
+    except PftDrawingError:
+        _fail('DRAWING_PLAN_STALE')
+    if dependencies != plan['snapshot'][7]:
+        _fail('DRAWING_PLAN_STALE')
 
 
 def _verify_created(app, gui, document, plan, controller, nodes, owned=None):
@@ -401,13 +662,18 @@ def _verify_created(app, gui, document, plan, controller, nodes, owned=None):
             or any(type(v) is not str or v != '' for v in template.EditableTexts.values())
             or any(any(state in ('Invalid', 'Error') for state in _sequence(node.State, 16)) for node in nodes)):
         _fail('DRAWING_CREATE_FAILED')
-    for view, spec in zip(views, _SPECS):
+    for view, spec in zip(views, _specs(plan)):
         if (view.TypeId != 'TechDraw::DrawViewPart' or tuple(view.Source) != (plan['source'],)
                 or tuple(_number(getattr(view.Direction, k)) for k in ('x', 'y', 'z')) != spec[1]
                 or tuple(_number(getattr(view.XDirection, k)) for k in ('x', 'y', 'z')) != spec[2]
                 or view.ScaleType != 'Custom' or _number(view.Scale) != plan['scale'] or view.CoarseView is not False
                 or _number(view.X) != spec[3] or _number(view.Y) != spec[4]):
             _fail('DRAWING_CREATE_FAILED')
+        if 'draft_layout' in plan and (_number(view.Rotation) != 0. or view.Perspective is not False):
+            _fail('DRAWING_CREATE_FAILED')
+    if 'draft_layout' in plan:
+        _draft_check(plan)
+    _verify_created_dependencies(document, plan, nodes)
 
 
 _projection_primed = False
@@ -422,9 +688,18 @@ def _prime_projection_engine(app):
     It does not isolate unrelated native jobs or prove the final page layout.
     """
     global _projection_primed
-    if _projection_primed:
-        return
     try:
+        # Precise HLR and face jobs read these native groups from background
+        # workers. GetGroup may create a missing empty group and notify native
+        # observers, so do this on the confirmed GUI apply path before workers
+        # start, even when the independent OCCT warm-up was already performed.
+        # This does not set/remove values, save parameters, or change the pool.
+        preferences = app.ParamGet('User parameter:BaseApp/Preferences/Mod/TechDraw')
+        groups = tuple(preferences.GetGroup(name) for name in ('General', 'debug'))
+        if any(group is None for group in groups):
+            raise ValueError()
+        if _projection_primed:
+            return
         import Part
         import TechDraw
         projected = TechDraw.project(Part.makeBox(1., 1., 1.), app.Vector(0., 0., 1.))
@@ -437,11 +712,33 @@ def _prime_projection_engine(app):
 
 
 def apply_plan(app, gui, document, plan, controller):
+    draft_mode = 'draft_layout' in plan
+    draft_stamp = plan.get('_draft_stamp') if draft_mode else None
+    def binding():
+        if draft_mode:
+            _draft_check(plan, draft_stamp)
     try:
+        binding()
         verify_plan(app, gui, document, plan, controller)
+        binding()
         _prime_projection_engine(app)
+        binding()
         verify_plan(app, gui, document, plan, controller)
+        binding()
         nodes = []
+        def before_write(owned):
+            if draft_mode:
+                binding()
+                _verify(app, gui, document, plan, controller, owned, nodes)
+                binding()
+                owned(before_write=True)
+                binding()
+        def assigned(obj, field, value, owned):
+            before_write(owned)
+            setattr(obj, field, value)
+            if draft_mode:
+                owned(require_pending=True)
+                binding()
         def write(owned):
             _verify(app, gui, document, plan, controller, owned)
             for kind, name in zip(('TechDraw::DrawPage', 'TechDraw::DrawSVGTemplate',
@@ -450,73 +747,91 @@ def apply_plan(app, gui, document, plan, controller):
                 owned()
                 if document.getObject(name) is not None:
                     _fail('DRAWING_PLAN_STALE')
-                owned(before_write=True)
+                if not draft_mode:
+                    owned(before_write=True)
+                before_write(owned)
                 obj = document.addObject(kind, name)
                 owned(require_pending=True)
+                binding()
                 if obj.Name != name or obj.TypeId != kind or obj.Document is not document:
                     _fail('DRAWING_CREATE_FAILED')
                 nodes.append(obj)
                 _verify(app, gui, document, plan, controller, owned, nodes)
             page, template, *views = nodes
             owned()
-            template.Template = str(plan['template_path'])
+            assigned(template, 'Template', str(plan['template_path']), owned)
             owned()
             texts = dict(template.EditableTexts)
-            template.EditableTexts = {key: '' for key in texts}
+            assigned(template, 'EditableTexts', {key: '' for key in texts}, owned)
             owned()
-            page.Template = template
+            assigned(page, 'Template', template, owned)
             owned()
-            page.Scale = plan['scale']
+            assigned(page, 'Scale', plan['scale'], owned)
             owned()
-            page.ProjectionType = 'First angle'
+            assigned(page, 'ProjectionType', 'First angle', owned)
             owned()
-            for view, spec in zip(views, _SPECS):
+            for view, spec in zip(views, _specs(plan)):
                 owned()
-                view.Source = [plan['source']]
+                assigned(view, 'Source', [plan['source']], owned)
                 owned()
-                view.CoarseView = False
+                assigned(view, 'CoarseView', False, owned)
                 owned()
-                view.Direction = app.Vector(*spec[1])
+                assigned(view, 'Direction', app.Vector(*spec[1]), owned)
                 owned()
-                view.XDirection = app.Vector(*spec[2])
+                assigned(view, 'XDirection', app.Vector(*spec[2]), owned)
                 owned()
-                view.ScaleType = 'Custom'
+                if draft_mode:
+                    assigned(view, 'Rotation', 0., owned)
+                    assigned(view, 'Perspective', False, owned)
+                assigned(view, 'ScaleType', 'Custom', owned)
                 owned()
-                view.Scale = plan['scale']
+                assigned(view, 'Scale', plan['scale'], owned)
                 owned()
+                before_write(owned)
                 page.addView(view)
                 owned()
-                view.X = spec[3]
+                binding()
+                assigned(view, 'X', spec[3], owned)
                 owned()
-                view.Y = spec[4]
+                assigned(view, 'Y', spec[4], owned)
                 owned()
             _verify_created(app, gui, document, plan, controller, nodes, owned)
             owned()
+            before_write(owned)
+            # Revalidate after the final ownership/before-write callbacks.
+            # A subset argument alone cannot prevent native dependency spread.
+            _verify_created(app, gui, document, plan, controller, nodes, owned)
             try:
                 count = document.recompute(list(nodes), False, True)
             except Exception:
                 owned()
                 _fail('DRAWING_RECOMPUTE_UNVERIFIED')
             owned()
+            binding()
             if type(count) is not int or not 0 <= count <= 9007199254740991:
                 _fail('DRAWING_RECOMPUTE_UNVERIFIED')
             # No GUI activation or event pumping. Native asynchronous HLR may
             # still be pending; restore/check positions without claiming pixels.
-            for view, spec in zip(views, _SPECS):
+            for view, spec in zip(views, _specs(plan)):
                 owned()
                 if _number(view.X) != spec[3]:
-                    view.X = spec[3]
+                    assigned(view, 'X', spec[3], owned)
                 owned()
                 if _number(view.Y) != spec[4]:
-                    view.Y = spec[4]
+                    assigned(view, 'Y', spec[4], owned)
             _verify_created(app, gui, document, plan, controller, nodes, owned)
             owned()
         def rollback():
             _verify(app, gui, document, plan, controller)
+            binding()
         def committed():
             _verify_created(app, gui, document, plan, controller, nodes)
+            binding()
         controller._run_transaction(app, document, 'Phoenix: create A4 drawing draft', write, rollback, committed)
-        return _result(plan)
+        binding()
+        result = _result(plan)
+        binding()
+        return result
     except (PftDrawingError, controller.PftWriteError):
         raise
     except Exception:

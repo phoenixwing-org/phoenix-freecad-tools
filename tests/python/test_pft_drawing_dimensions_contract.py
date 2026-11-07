@@ -210,5 +210,63 @@ class DrawingDimensionsContractTests(unittest.TestCase):
             result = dimension_result(); result["dimensions"][0][key] = Forbidden()
             self.reject_result(result)
 
+    def test_auto_intent_is_explicit_opt_in_and_manual_contract_stays_unchanged(self):
+        intent = dimension_request()
+        intent["dimensions"][0] = {"edge": "Edge0", "kind": "Distance", "placement": "auto"}
+        before = deepcopy(intent)
+        checked = contract.validate_intent(intent)
+        self.assertEqual(checked, intent)
+        checked["dimensions"][0]["edge"] = "Edge2"
+        self.assertEqual(intent, before)
+        self.reject_request(intent)
+        self.assertEqual(contract.validate_intent(dimension_request()), dimension_request())
+        for row in ({"edge": "Edge0", "kind": "Distance"},
+                    {"edge": "Edge0", "kind": "Distance", "x_mm": 0},
+                    {"edge": "Edge0", "kind": "Distance", "placement": "explicit"},
+                    {"edge": "Edge0", "kind": "Distance", "placement": True},
+                    {"edge": "Edge0", "kind": "Distance", "placement": "auto", "x_mm": 0, "y_mm": 1},
+                    {"edge": "Edge0", "kind": "Distance", "placement": "auto", "extra": 1}):
+            intent["dimensions"][0] = row
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                contract.validate_intent(intent)
+
+    def test_auto_intent_keeps_canonical_names_kinds_batch_and_duplicate_limits(self):
+        auto = {"edge": "Edge0", "kind": "Distance", "placement": "auto"}
+        for row in (dict(auto, edge="Edge00"), dict(auto, edge="Edge2048"),
+                    dict(auto, kind="DistanceZ"), dict(auto, kind=True),
+                    dict(auto, edge="Edge0\n")):
+            intent = dimension_request(); intent["dimensions"] = [row]
+            with self.assertRaises(ValueError): contract.validate_intent(intent)
+        for rows in ([], [auto] * 9, [auto, dict(auto, x_mm=1, y_mm=2)],
+                     [auto, {"edge": "Edge0", "kind": "Distance", "x_mm": 1, "y_mm": 2}],
+                     (auto,)):
+            intent = dimension_request(); intent["dimensions"] = rows
+            with self.assertRaises(ValueError): contract.validate_intent(intent)
+        intent = dimension_request()
+        intent["dimensions"] = [dict(auto, edge="Edge" + str(i), kind=contract.KINDS[i % 5]) for i in range(8)]
+        self.assertEqual(contract.validate_intent(intent), intent)
+
+    def test_resolution_binds_complete_order_and_only_auto_rows_may_gain_positions(self):
+        intent = dimension_request()
+        intent["dimensions"][0] = {"edge": "Edge0", "kind": "Distance", "placement": "auto"}
+        resolved = dimension_request()
+        resolved["dimensions"][0].update(x_mm=45.25, y_mm=-18.75)
+        self.assertEqual(contract.validate_resolution(intent, resolved), resolved)
+        before = deepcopy(resolved)
+        checked = contract.validate_resolution(intent, resolved)
+        checked["dimensions"][0]["x_mm"] = 0
+        self.assertEqual(resolved, before)
+        for mode in ("page", "view", "count", "order", "edge", "kind", "explicit_x", "explicit_y", "auto_coords", "unresolved"):
+            value = deepcopy(resolved)
+            if mode in ("page", "view"): value[mode] = "DifferentOwner"
+            elif mode == "count": value["dimensions"].pop()
+            elif mode == "order": value["dimensions"].reverse()
+            elif mode in ("edge", "kind"): value["dimensions"][0][mode] = "Edge1" if mode == "edge" else "DistanceX"
+            elif mode.startswith("explicit"): value["dimensions"][1]["x_mm" if mode.endswith("x") else "y_mm"] += 1e-10
+            elif mode == "auto_coords": value["dimensions"][0]["placement"] = "auto"
+            else: value["dimensions"][0] = deepcopy(intent["dimensions"][0])
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                contract.validate_resolution(intent, value)
+
 
 if __name__ == "__main__": unittest.main()

@@ -2,6 +2,8 @@
 """Qt transport tests with an owned child stub; no native process is started."""
 import base64
 import binascii
+from enum import IntEnum
+import gc
 import importlib.util
 import json
 import struct
@@ -44,7 +46,40 @@ class PftSignal:
     def disconnect(self, callback):
         self.disconnect_calls += 1; self.callbacks.remove(callback)
     def emit(self, *values):
-        for callback in tuple(self.callbacks): callback(*values)
+        for callback in tuple(self.callbacks):
+            receiver = getattr(callback, '__self__', None)
+            if isinstance(receiver, PftQObject) and receiver.cpp_deleted:
+                continue
+            callback(*values)
+
+    def discard_generic_callable_contexts(self):
+        self.callbacks[:] = [callback for callback in self.callbacks
+            if isinstance(getattr(callback, '__self__', None), PftQObject)
+            and hasattr(callback, '_pft_slot_types')]
+
+
+class PftQObject:
+    def __init__(self, parent=None):
+        self.parent, self.children = parent, []
+        self.cpp_deleted, self.deleted = False, False
+        self.destroyed = PftSignal()
+        if isinstance(parent, PftQObject):
+            parent.children.append(self)
+
+    def destroy(self):
+        if self.cpp_deleted:
+            return
+        self.cpp_deleted = True
+        self.destroyed.emit(self)
+        for child in tuple(self.children):
+            child.destroy()
+
+
+def pft_slot(*types):
+    def decorate(callback):
+        callback._pft_slot_types = types
+        return callback
+    return decorate
 
 
 class PftQtCore:
@@ -52,14 +87,20 @@ class PftQtCore:
 
     def __init__(self):
         self.processes, self.timers = [], []
-        self.application = object()
+        self.application = PftQObject()
         self.QCoreApplication = types.SimpleNamespace(instance=lambda: self.application)
+        self.QObject, self.Slot = PftQObject, pft_slot
         owner = self
-        class PftProcess:
+        class PftProcess(PftQObject):
+            class ProcessError(IntEnum):
+                FailedToStart, Crashed = 0, 1
+            class ExitStatus(IntEnum):
+                NormalExit, CrashExit = 0, 1
             FailedToStart, NormalExit = 0, 0
             NotRunning, Starting, Running = 0, 1, 2
             ProcessState = types.SimpleNamespace(NotRunning=0, Starting=1, Running=2)
             def __init__(self, parent):
+                super().__init__(parent)
                 owner.processes.append(self)
                 self.parent, self.killed, self.deleted = parent, 0, False
                 self.cpp_deleted, self.delete_calls = False, 0
@@ -87,8 +128,9 @@ class PftQtCore:
                 result = bytes(self.stderr); self.stderr.clear(); return result
             def output(self, data): self.stdout.extend(data); self.readyReadStandardOutput.emit()
             def diagnostic(self, data): self.stderr.extend(data); self.readyReadStandardError.emit()
-        class PftTimer:
+        class PftTimer(PftQObject):
             def __init__(self, parent):
+                super().__init__(parent)
                 self.parent, self.timeout, self.active, self.delay = parent, PftSignal(), False, None
                 owner.timers.append(self)
             def setSingleShot(self, value): self.single_shot = value
@@ -105,6 +147,14 @@ class PftQtCore:
             def __init__(self): self.values = {}
             def insert(self, key, value): self.values[key] = value
         self.QProcess, self.QTimer, self.QProcessEnvironment = PftProcess, PftTimer, PftEnvironment
+
+    def discard_generic_callable_contexts(self):
+        for process in self.processes:
+            for name in ('readyReadStandardOutput', 'readyReadStandardError', 'finished',
+                         'errorOccurred', 'started', 'destroyed'):
+                getattr(process, name).discard_generic_callable_contexts()
+        for timer in self.timers:
+            timer.timeout.discard_generic_callable_contexts()
 
 
 class PftChatProcessTests(unittest.TestCase):
@@ -226,6 +276,83 @@ class PftChatProcessTests(unittest.TestCase):
         for key in ('NODE_OPTIONS', 'OPENAI_API_KEY'):
             self.assertNotIn(key, process.environment)
         self.assertEqual(self.data + self.errors + self.exits, [])
+
+    def test_each_native_signal_has_one_process_child_receiver_and_exact_slot_signature(self):
+        process = self.start()
+        receiver = self.transport._session['receiver']
+        self.assertIsInstance(receiver, self.core.QObject)
+        self.assertIs(receiver.parent, process)
+        bindings = ((process.readyReadStandardOutput, ()),
+                    (process.readyReadStandardError, ()),
+                    (process.finished, (int, self.core.QProcess.ExitStatus)),
+                    (process.errorOccurred, (self.core.QProcess.ProcessError,)),
+                    (process.started, ()), (process.destroyed, (self.core.QObject,)),
+                    (self.core.timers[-1].timeout, ()))
+        for signal, signature in bindings:
+            self.assertEqual(signal.connect_calls, 1)
+            self.assertEqual(len(signal.callbacks), 1)
+            callback = signal.callbacks[0]
+            self.assertIs(callback.__self__, receiver)
+            self.assertEqual(callback._pft_slot_types, signature)
+        self.assertEqual(len(self.transport._session['signal_connections']), 7)
+        self.assertIs(self.transport._session['timeout_handler'], self.core.timers[-1].timeout.callbacks[0])
+
+    def test_data_stderr_and_normal_exit_survive_generic_context_retirement_and_gc(self):
+        process = self.start()
+        process.started.emit()
+        process.output(b'{"id":1,"result":{"neutral_echo":"before"}}\n')
+        self.core.discard_generic_callable_contexts()
+        gc.collect()
+        process.output(b'{"id":2,"result":{"neutral_echo":"after"}}\n')
+        process.diagnostic(b'neutral diagnostic')
+        self.assertEqual(self.transport._session['stderr'], len(b'neutral diagnostic'))
+        process.finished.emit(0, self.core.QProcess.ExitStatus.NormalExit)
+        self.assertEqual([row['id'] for row in self.data], [1, 2])
+        self.assertEqual(self.exits, [0])
+        self.assertEqual(self.errors, [])
+        self.assertFalse(self.transport.has_active_session)
+        self.assertEqual(process.delete_calls, 1)
+
+    def test_registered_error_and_stable_timeouts_survive_generic_context_retirement(self):
+        for event in ('error', 'fatal_timeout', 'optional_timeout'):
+            with self.subTest(event=event):
+                self.setUp()
+                process = self.start()
+                expired = []
+                if event == 'optional_timeout':
+                    self.transport.arm_timeout(10, lambda: expired.append(True))
+                else:
+                    self.transport.arm_timeout(10)
+                self.core.discard_generic_callable_contexts()
+                gc.collect()
+                if event == 'error':
+                    process.state_value = self.core.QProcess.NotRunning
+                    process.errorOccurred.emit(self.core.QProcess.ProcessError.FailedToStart)
+                    self.assertEqual([e.code for e in self.errors], ['CHAT_PROCESS_FAILED'])
+                    self.assertFalse(self.transport.has_active_session)
+                else:
+                    self.core.timers[-1].expire()
+                    self.assertEqual(expired, [True] if event == 'optional_timeout' else [])
+                    self.assertEqual([e.code for e in self.errors], [] if event == 'optional_timeout' else ['CHAT_TIMEOUT'])
+                    self.assertEqual(process.killed, 0 if event == 'optional_timeout' else 1)
+                    process.finished.emit(0, self.core.QProcess.ExitStatus.NormalExit)
+                    self.assertEqual(self.exits, [0] if event == 'optional_timeout' else [])
+                    self.assertFalse(self.transport.has_active_session)
+
+    def test_retired_receiver_slots_cannot_touch_replacement_session(self):
+        old = self.start()
+        receiver = self.transport._session['receiver']
+        old.finished.emit(0, self.core.QProcess.ExitStatus.NormalExit)
+        self.assertEqual(receiver._callbacks, {})
+        new = self.start()
+        receiver.read_stdout(); receiver.read_stderr(); receiver.process_started()
+        receiver.process_error(self.core.QProcess.ProcessError.Crashed)
+        receiver.process_finished(1, self.core.QProcess.ExitStatus.CrashExit)
+        receiver.process_destroyed(old); receiver.timed_out()
+        self.assertEqual(self.exits, [0])
+        self.assertEqual(self.errors, [])
+        self.assertIs(self.transport._session['process'], new)
+        self.assertEqual(new.killed, 0)
 
     def test_write_queues_until_started_and_utf8_jsonl_may_arrive_in_fragments(self):
         process = self.start()
@@ -893,6 +1020,58 @@ class PftChatProcessLeaseIntegrationTests(unittest.TestCase):
         self.assertFalse(hasattr(process, 'program'))
         self.assertIsNone(self.transport._session)
         self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_FAILED'])
+
+    def test_missing_qobject_slot_or_enum_fails_before_start_without_functor_fallback(self):
+        for scope, attribute in (('core', 'QObject'), ('core', 'Slot'),
+                                 ('process', 'ExitStatus'), ('process', 'ProcessError')):
+            with self.subTest(attribute=attribute):
+                self.setUp()
+                delattr(self.core if scope == 'core' else self.core.QProcess, attribute)
+                process = self.start()
+                self.assertEqual(self.factory.leases[0].releases, ['never_started'])
+                self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_FAILED'])
+                self.assertFalse(hasattr(process, 'program'))
+                self.assertEqual(process.killed, 0)
+                self.assertFalse(self.transport.has_active_session)
+
+    def test_late_started_after_context_retirement_keeps_owned_lease_and_does_not_flush(self):
+        process = self.start()
+        owned_lease = self.factory.leases[0]
+        self.transport.write(b'{"id":1,"method":"initialize"}\n')
+        self.transport.stop()
+        self.core.discard_generic_callable_contexts()
+        gc.collect()
+        process.started.emit()
+        self.assertEqual(owned_lease.started_pids, [process.pid])
+        self.assertEqual(process.writes, [])
+        self.assertEqual(process.killed, 2)
+        self.assertEqual(owned_lease.releases, [])
+        process.finished.emit(0, self.core.QProcess.ExitStatus.NormalExit)
+        self.assertEqual(owned_lease.releases, ['exit'])
+        self.assertEqual(self.data + self.errors + self.exits, [])
+        self.assertFalse(self.transport.has_active_session)
+
+    def test_application_destruction_reaches_receiver_before_children_without_faking_exit(self):
+        observed = []
+        receiver = None
+        def on_error(error):
+            self.errors.append(error)
+            observed.append(receiver.cpp_deleted)
+        process = self.start(on_error=on_error)
+        process.started.emit()
+        receiver = self.transport._session['receiver']
+        self.core.discard_generic_callable_contexts()
+        self.core.application.destroy()
+        self.assertEqual(observed, [False])
+        self.assertTrue(receiver.cpp_deleted)
+        self.assertEqual([error.code for error in self.errors], ['CHAT_PROCESS_FAILED'])
+        self.assertFalse(self.transport.has_active_session)
+        self.assertEqual(self.exits, [])
+        self.assertEqual(self.factory.leases[0].releases, [])
+        self.assertEqual(process.killed, 0)
+        with self.assertRaises(transport_module.PftChatProcessError) as caught:
+            self.start()
+        self.assertEqual(caught.exception.code, 'CHAT_PROCESS_LEASE_BUSY')
 
     def test_qobject_disappearance_cleans_wrapper_but_keeps_lease_as_a_gate(self):
         process = self.start()

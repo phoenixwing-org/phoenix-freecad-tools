@@ -22,7 +22,16 @@ class PftSignal:
     def __init__(self): self.slots = []
     def connect(self, slot): self.slots.append(slot)
     def emit(self, *args):
-        for slot in list(self.slots): slot(*args)
+        for slot in list(self.slots):
+            types_ = getattr(getattr(slot, "__func__", slot), "_qt_slot_types", None)
+            slot(*(args if types_ is None else args[:len(types_)]))
+
+
+class PftCloseEvent:
+    def __init__(self): self._accepted = True
+    def accept(self): self._accepted = True
+    def ignore(self): self._accepted = False
+    def isAccepted(self): return self._accepted
 
 
 class PftWidgets:
@@ -59,6 +68,7 @@ class PftWidgets:
             def setAttribute(self, *_): pass
             def setTextFormat(self, *_): pass
             def setToolTip(self, value): self.tooltip = value
+            def setAccessibleName(self, value): self.accessible_name = value
             def setWordWrap(self, value): self.word_wrap = value
             def setVisible(self, value): self.visible = bool(value)
             def setMinimumWidth(self, value): self.minimum_width = value
@@ -74,6 +84,7 @@ class PftWidgets:
             def close(self):
                 self.deleted, self.visible = True, False
                 self.destroyed.emit(self)
+            def closeEvent(self, event): event.accept()
             def findChildren(self, kind, name):
                 return [item for item in owner.objects if isinstance(item, kind) and item._parent is self and item._name == name and not item.deleted]
             def findChild(self, kind, name):
@@ -90,6 +101,12 @@ class PftWidgets:
         class Dock(Base):
             def setMinimumWidth(self, value): self.minimum_width = value
             def setWidget(self, value): self.content = value
+            def close(self):
+                event = PftCloseEvent()
+                self.closeEvent(event)
+                if not event.isAccepted(): return False
+                super().close()
+                return True
         class Scroll(Base):
             AdjustIgnored = 0
             def setWidgetResizable(self, value): self.widget_resizable = value
@@ -100,6 +117,7 @@ class PftWidgets:
             def __init__(self, *_): pass
             def addWidget(self, *_): pass
             def addLayout(self, *_): pass
+            def addStretch(self, *_): pass
             def setContentsMargins(self, *_): pass
         class Form(Layout):
             WrapLongRows, AllNonFixedFieldsGrow = 1, 2
@@ -127,6 +145,7 @@ class PftWidgets:
             def setArrowType(self, value): self.arrow = value
             def setToolButtonStyle(self, value): self.style = value
             def setIcon(self, value): self.icon = value
+            def setAutoRaise(self, value): self.auto_raise = value
         class Check(Button):
             def __init__(self, *args): super().__init__("", *args); self.checked = False; self.stateChanged = PftSignal()
             def setChecked(self, value):
@@ -229,10 +248,18 @@ class PftDocumentPanelTests(unittest.TestCase):
         self.addCleanup(i18n.set_language, self.old_language)
         self.widgets = PftWidgets()
         core = types.SimpleNamespace(Qt=types.SimpleNamespace(ItemIsEditable=1, PlainText=0, WA_DeleteOnClose=2,
+            ToolButtonIconOnly=52,
             ArrowType=types.SimpleNamespace(DownArrow=41, RightArrow=42),
-            ToolButtonStyle=types.SimpleNamespace(ToolButtonTextBesideIcon=51),
+            ToolButtonStyle=types.SimpleNamespace(ToolButtonTextBesideIcon=51, ToolButtonIconOnly=52),
             TextElideMode=types.SimpleNamespace(ElideRight=1),
             ScrollBarPolicy=types.SimpleNamespace(ScrollBarAlwaysOff=1)))
+        class QObject:
+            def __init__(self, parent): self._parent = parent
+            def parent(self): return self._parent
+        def slot(*types_):
+            def decorate(method): method._qt_slot_types = types_; return method
+            return decorate
+        core.QObject, core.Slot = QObject, slot
         class Timer(self.widgets.Base):
             def __init__(self, parent):
                 super().__init__(parent)
@@ -242,8 +269,9 @@ class PftDocumentPanelTests(unittest.TestCase):
         core.QTimer = Timer
         self.core = core
         self.patch = patch.object(views, "_qt", return_value=(core, self.widgets)); self.patch.start(); self.addCleanup(self.patch.stop)
-        icon_patch = patch.object(views, "_settings_icon", return_value="public-gear-icon")
-        icon_patch.start(); self.addCleanup(icon_patch.stop)
+        qt_patch = patch.dict(sys.modules, {"PySide": types.SimpleNamespace(QtCore=core, QtWidgets=self.widgets,
+            QtGui=types.SimpleNamespace(QIcon=lambda name: "public-icon:" + Path(name).name))})
+        qt_patch.start(); self.addCleanup(qt_patch.stop)
         self.window = self.widgets.Base()
         self.mounts = []
         def mount(dock, window, content):
@@ -264,9 +292,107 @@ class PftDocumentPanelTests(unittest.TestCase):
         self.app, self.gui = PftApp(self.doc), PftGui(self.doc)
         self.gui.getMainWindow = lambda: self.window
         self.gui.activeDocument = lambda: types.SimpleNamespace(Document=self.app.ActiveDocument)
+        self.gui.listWorkbenches = Mock(return_value={"PftWorkbench": object()})
+        self.gui.activateWorkbench = Mock()
+        self.native_shortcut = Mock(side_effect=lambda gui, identifier:
+            self.show() if identifier == "PhoenixTools_DocumentTools" else None)
+        host_patch = patch.dict(sys.modules, {"pft_workbench_gui": types.SimpleNamespace(
+            __file__=str(ADDON / "pft_workbench_gui.py"), run_native_shortcut=self.native_shortcut)})
+        host_patch.start(); self.addCleanup(host_patch.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="pft-document-view-"); self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name).resolve()
     def show(self): return views.show_document_tools_dialog(self.app, self.gui)
+
+    def test_toolbar_document_click_only_presents_existing_panel(self):
+        dialog = self.show()
+        self.native_shortcut.assert_not_called()
+        before = self.widgets.named("PhoenixTools_DocumentInformation").toPlainText()
+        with patch.object(views.tools, "read_document_tools") as read, patch.object(views.tools, "list_open_documents") as opened:
+            self.widgets.click("PhoenixTools_DocumentToolsAction")
+            read.assert_not_called()
+            opened.assert_not_called()
+        self.native_shortcut.assert_called_once_with(self.gui, "PhoenixTools_DocumentTools")
+        self.assertTrue(dialog.visible)
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentInformation").toPlainText(), before)
+        button = self.widgets.named("PhoenixTools_DocumentToolsAction")
+        self.assertEqual((button.icon, button.style, button.tooltip, button.accessible_name),
+                         ("public-icon:document-tools.svg", 52, "当前文档工具", "当前文档工具"))
+        self.assertTrue(button.auto_raise)
+
+    def test_toolbar_clicks_delegate_to_shared_registered_commands_only(self):
+        self.show()
+        self.native_shortcut.assert_not_called()
+        self.widgets.click("PhoenixTools_DocumentAxonometricFitAction")
+        self.native_shortcut.assert_called_once_with(self.gui, "PhoenixTools_AxonometricFit")
+        self.widgets.click("PhoenixTools_DocumentAppearanceAction")
+        self.assertEqual(self.native_shortcut.call_args_list,
+            [unittest.mock.call(self.gui, "PhoenixTools_AxonometricFit"),
+             unittest.mock.call(self.gui, "PhoenixTools_Appearance")])
+        self.gui.activateWorkbench.assert_not_called()
+
+    def test_toolbar_wrong_installation_failure_preserves_frozen_information(self):
+        self.show()
+        before = self.widgets.named("PhoenixTools_DocumentInformation").toPlainText()
+        foreign = types.SimpleNamespace(__file__=str(self.folder / "pft_workbench_gui.py"))
+        with patch.dict(sys.modules, {"pft_workbench_gui": foreign}):
+            with patch.object(views.tools, "read_document_tools") as read:
+                self.widgets.click("PhoenixTools_DocumentAppearanceAction")
+                read.assert_not_called()
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentInformation").toPlainText(), before)
+        status = self.widgets.named("PhoenixTools_DocumentShortcutStatus")
+        self.assertTrue(status.visible)
+        self.assertEqual(status.text, "PFT_CHAT_SHORTCUT_SOURCE_MISMATCH\n" +
+            i18n.tr("快捷操作来源与当前插件不一致；请正常退出 FreeCAD 后重新启动。"))
+        self.assertNotIn(str(self.folder), status.text)
+        self.assertEqual(self.widgets.messages, [])
+
+    def test_shared_toolbar_error_is_nonmodal_and_clears_only_after_success(self):
+        self.show()
+        before = self.widgets.named("PhoenixTools_DocumentInformation").toPlainText()
+        self.native_shortcut.side_effect = RuntimeError("SYNTHETIC_PRIVATE_NATIVE_DETAIL")
+        self.widgets.click("PhoenixTools_DocumentAppearanceAction")
+        status = self.widgets.named("PhoenixTools_DocumentShortcutStatus")
+        self.assertTrue(status.visible)
+        self.assertEqual(status.text, "PFT_CHAT_SHORTCUT_ACTION_FAILED\n" +
+            i18n.tr("快捷操作失败；请使用工作台同名工具核对当前目标。"))
+        self.assertNotIn("PRIVATE", status.text)
+        self.assertEqual(self.widgets.messages, [])
+        self.assertEqual(self.widgets.named("PhoenixTools_DocumentInformation").toPlainText(), before)
+        self.native_shortcut.side_effect = None
+        self.widgets.click("PhoenixTools_DocumentAxonometricFitAction")
+        self.assertFalse(status.visible)
+        self.assertEqual(status.text, "")
+
+    def test_shared_toolbar_owned_slots_stop_all_actions_after_document_dock_close(self):
+        dock = self.show()
+        toolbar = dock._pft_quick_toolbar
+        handlers = []
+        for sender, handler in toolbar._bindings:
+            receiver = handler.__self__
+            self.assertIsInstance(receiver, self.core.QObject)
+            self.assertIs(receiver.parent(), toolbar)
+            if handler.__func__._qt_slot_types == (bool,):
+                handlers.append(handler)
+        self.assertEqual(set(toolbar.buttons), {"document", "axonometric_fit", "appearance", "workbench", "settings"})
+        with patch.object(views, "_choose_property_names") as configure:
+            dock.close()
+            self.assertTrue(dock._closed)
+            self.assertEqual(toolbar._bindings, [])
+            for handler in handlers:
+                handler(False)
+            configure.assert_not_called()
+        self.native_shortcut.assert_not_called()
+        self.gui.activateWorkbench.assert_not_called()
+        self.assertIsNot(self.show(), dock)
+
+    def test_shared_phoenix_button_switches_only_the_registered_workbench(self):
+        self.show()
+        self.gui.activateWorkbench.assert_not_called()
+        self.widgets.click("PhoenixTools_DocumentWorkbenchAction")
+        self.gui.activateWorkbench.assert_called_once_with("PftWorkbench")
+        self.native_shortcut.assert_not_called()
+        self.assertEqual(self.gui.Selection.records, [])
+
     def test_open_and_reuse_have_no_clipboard_or_file_actions(self):
         dialog = self.show()
         self.assertTrue(dialog.visible)
@@ -286,12 +412,12 @@ class PftDocumentPanelTests(unittest.TestCase):
     def test_property_settings_are_explicit_cancel_safe_and_preserve_target_scope(self):
         self.show()
         with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read, \
-                patch.object(views, "_choose_property_names", return_value=(False, ("Cost",))) as choose:
+                patch.object(views, "_choose_property_names", return_value=(False, ("Cost",), True)) as choose:
             self.widgets.click("PhoenixTools_DocumentPropertySettings")
             choose.assert_called_once()
             read.assert_not_called()
         with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read, \
-                patch.object(views, "_choose_property_names", return_value=(True, ("Cost", "Enabled"))):
+                patch.object(views, "_choose_property_names", return_value=(True, ("Cost", "Enabled"), False)):
             self.widgets.click("PhoenixTools_DocumentPropertySettings")
             self.assertEqual(read.call_args.kwargs["property_names"], ("Cost", "Enabled"))
             self.assertEqual(read.call_args.kwargs["target_names"], ["Body"])
@@ -318,20 +444,65 @@ class PftDocumentPanelTests(unittest.TestCase):
             editor.setPlainText(" Cost，Enabled\nLength ")
             box.accepted.emit()
         self.widgets.on_preview = configure
-        accepted, names = views._choose_property_names(self.core, self.widgets, self.window, None)
+        accepted, names, units = views._choose_property_names(self.core, self.widgets, self.window, None)
         self.assertTrue(accepted)
+        self.assertFalse(units)
         self.assertEqual(names, ("Cost", "Enabled", "Length"))
         def defaults():
             self.widgets.click("PhoenixTools_DocumentPropertiesDefault")
             self.widgets.named("PhoenixTools_DocumentPropertySettingsButtons").accepted.emit()
         self.widgets.on_preview = defaults
-        self.assertEqual(views._choose_property_names(self.core, self.widgets, self.window, ("Cost",)), (True, None))
+        self.assertEqual(views._choose_property_names(self.core, self.widgets, self.window, ("Cost",)), (True, None, False))
         self.widgets.on_preview = lambda: self.widgets.named("PhoenixTools_DocumentPropertyNames").setPlainText("Arbitrary")
-        self.assertEqual(views._choose_property_names(self.core, self.widgets, self.window, None), (False, None))
+        self.assertEqual(views._choose_property_names(self.core, self.widgets, self.window, None), (False, None, False))
+
+    def test_display_unit_setting_updates_even_with_unchanged_fields_and_preserves_scope(self):
+        self.show()
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read, \
+                patch.object(views, "_choose_property_names", return_value=(True, None, True)) as choose:
+            self.widgets.click("PhoenixTools_DocumentPropertySettings")
+            self.assertFalse(choose.call_args.args[-1])
+            self.assertIs(read.call_args.kwargs["use_user_units"], True)
+            self.assertIsNone(read.call_args.kwargs["property_names"])
+            self.assertEqual(read.call_args.kwargs["target_names"], ["Body"])
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read, \
+                patch.object(views, "_choose_property_names", return_value=(False, (), False)) as choose:
+            self.widgets.click("PhoenixTools_DocumentPropertySettings")
+            self.assertTrue(choose.call_args.args[-1])
+            read.assert_not_called()
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read:
+            self.widgets.click("PhoenixTools_DocumentRefresh")
+            self.assertIs(read.call_args.kwargs["use_user_units"], True)
+        self.widgets.named("PhoenixTools_DocumentToolsDock").close()
+        with patch.object(views.tools, "read_document_tools", wraps=views.tools.read_document_tools) as read:
+            self.show()
+            self.assertIs(read.call_args.kwargs["use_user_units"], False)
+        self.assertIs(self.app.ActiveDocument, self.doc)
+        self.assertEqual(self.gui.Selection.records, [])
+        self.assertEqual(self.widgets.clipboard_calls + self.widgets.save_calls, 0)
+
+    def test_settings_unit_checkbox_is_explicit_and_cancel_restores_original_mode(self):
+        self.widgets.preview_result = 1
+        def accept():
+            checkbox = self.widgets.named("PhoenixTools_DocumentUserUnits")
+            self.assertFalse(checkbox.isChecked())
+            checkbox.setChecked(True)
+            self.widgets.named("PhoenixTools_DocumentPropertySettingsButtons").accepted.emit()
+            checkbox.setChecked(False)  # A trailing signal cannot change the accepted choice.
+        self.widgets.on_preview = accept
+        self.assertEqual(views._choose_property_names(self.core, self.widgets, self.window, None), (True, None, True))
+        self.widgets.preview_result = 0
+        def cancel():
+            checkbox = self.widgets.named("PhoenixTools_DocumentUserUnits")
+            self.assertTrue(checkbox.isChecked())
+            checkbox.setChecked(False)
+            self.widgets.named("PhoenixTools_DocumentPropertySettingsButtons").rejected.emit()
+        self.widgets.on_preview = cancel
+        self.assertEqual(views._choose_property_names(self.core, self.widgets, self.window, None, True), (False, None, True))
 
     def test_empty_explicit_property_scope_is_panel_only_and_resets_on_reopen(self):
         self.show()
-        with patch.object(views, "_choose_property_names", return_value=(True, ())):
+        with patch.object(views, "_choose_property_names", return_value=(True, (), False)):
             self.widgets.click("PhoenixTools_DocumentPropertySettings")
         text = self.widgets.named("PhoenixTools_DocumentInformation").toPlainText()
         self.assertNotIn("PartNumber", text)
@@ -560,9 +731,9 @@ class PftDocumentPanelTests(unittest.TestCase):
             suggest(self.doc.Name)
         self.assertEqual((self.widgets.exec_calls, self.widgets.save_calls), (0, 0))
 
-    def test_document_panel_omits_duplicate_view_and_appearance_quick_actions(self):
+    def test_document_panel_uses_toolbar_without_old_inline_appearance_actions(self):
         self.show()
-        removed = {"PhoenixTools_DocumentAxonometricFitAction", "PhoenixTools_DocumentRandomColorAction",
+        removed = {"PhoenixTools_DocumentRandomColorAction",
                    "PhoenixTools_DocumentTransparencyAction", "PhoenixTools_DocumentVisualStatus"}
         self.assertFalse(removed.intersection(item.objectName() for item in self.widgets.objects))
         self.assertEqual((self.widgets.exec_calls, self.widgets.clipboard_calls, self.widgets.save_calls), (0, 0, 0))
@@ -823,7 +994,7 @@ class PftDocumentPanelTests(unittest.TestCase):
             self.app.ActiveDocument = second
             self.widgets.named("PhoenixTools_DocumentFollowTimer").timeout.emit()
             self.widgets.named("PhoenixDocumentTarget_SecondBody").setChecked(False)
-            with patch.object(views, "_choose_property_names", return_value=(True, ())):
+            with patch.object(views, "_choose_property_names", return_value=(True, (), False)):
                 self.widgets.click("PhoenixTools_DocumentPropertySettings")
             return str(target), "Markdown"
         def confirm(_core, _widgets, _parent, plan):

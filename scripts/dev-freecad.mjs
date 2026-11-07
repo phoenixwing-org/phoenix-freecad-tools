@@ -90,8 +90,11 @@ pft_development.write_readiness(App, Gui)
 `;
 
 export function prepareDevelopment({ profile = path.join(os.homedir(), 'Library', 'Application Support', 'PhoenixFreeCADTools', 'Development'),
-  app = '/Applications/FreeCAD.app', repository = REPOSITORY, port = 9877 } = {}) {
+  app = '/Applications/FreeCAD.app', repository = REPOSITORY, port = 9877, purpose = '通用' } = {}) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('开发端口必须为 1024 至 65535 的整数。');
+  if (typeof purpose !== 'string' || !purpose.trim() || [...purpose.trim()].length > 80
+      || /[\u0000-\u001f\u007f|｜]/u.test(purpose)) throw new Error('开发用途必须为不含控制字符或分隔符的 1 至 80 字文本。');
+  purpose = purpose.trim();
   const repo = fs.realpathSync(repository);
   const source = fs.realpathSync(path.join(repo, 'addon', 'PhoenixFreeCADTools'));
   if (!fs.statSync(path.join(source, 'InitGui.py')).isFile()) throw new Error('未找到开发工作台源码。');
@@ -149,12 +152,15 @@ export function prepareDevelopment({ profile = path.join(os.homedir(), 'Library'
   const qtIdentity = { vendor: 'org.phoenix.freecadtools.development.' + marker.owner_id.replaceAll('-', ''),
     application: 'PhoenixFreeCADDevelopment' };
   const environment = {};
-  for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'DISPLAY']) {
+  // Explicit caller proxy settings belong only to the private child env. Keep
+  // case and empty overrides intact; launch manifests/output omit these keys.
+  for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'DISPLAY',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy']) {
     if (typeof process.env[key] === 'string') environment[key] = process.env[key];
   }
   Object.assign(environment, { FREECAD_USER_HOME: root, FREECAD_USER_DATA: root,
     FREECAD_USER_TEMP: path.join(root, 'temp'), PFT_DEVELOPMENT: '1', PFT_DEVELOPMENT_PORT: String(port),
-    PFT_DEVELOPMENT_PROFILE: root, PFT_DEVELOPMENT_RECEIPT: receipt,
+    PFT_DEVELOPMENT_PROFILE: root, PFT_DEVELOPMENT_RECEIPT: receipt, PFT_DEVELOPMENT_PURPOSE: purpose,
     PFT_DEVELOPMENT_OWNER_ID: marker.owner_id, PYTHONDONTWRITEBYTECODE: '1' });
   // --set-config is multitoken. The following named --user-cfg option ends
   // its values; the final positional macro must never be swallowed by it.
@@ -231,10 +237,10 @@ export async function main(argv = process.argv.slice(2)) {
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--prepare') prepareOnly = true;
-    else if (['--profile', '--app', '--port'].includes(arg) && argv[index + 1]) {
+    else if (['--profile', '--app', '--port', '--purpose'].includes(arg) && argv[index + 1]) {
       const value = argv[++index];
       options[arg.slice(2)] = arg === '--port' ? Number(value) : value;
-    } else throw new Error('用法：node scripts/dev-freecad.mjs [--prepare] [--profile 专属目录] [--app FreeCAD.app] [--port 9877]');
+    } else throw new Error('用法：node scripts/dev-freecad.mjs [--prepare] [--profile 专属目录] [--app FreeCAD.app] [--port 9877] [--purpose 用途]');
   }
   const prepared = prepareDevelopment(options);
   const result = prepareOnly ? prepared.launch : await launchDevelopment(prepared);

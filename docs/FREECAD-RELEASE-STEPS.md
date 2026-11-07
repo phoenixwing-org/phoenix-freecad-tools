@@ -1,6 +1,6 @@
 # FreeCAD Tools 发布步骤（个人维护、组织发布）
 
-本文说明如何由个人维护者发布 Phoenix FreeCAD Tools，npm 发布到组织 `@phoenix-wing`。流程核对日期：2026-11-06。当前源码版本为 **0.3.2**，npm 源码已采用 **`@phoenix-wing/phoenix-freecad-mcp`**；实际发行状态以 GitHub Release 与 npm Registry 各自的公开回执为准。本文是操作步骤，不是发布回执。
+本文说明如何由个人维护者发布 Phoenix FreeCAD Tools，npm 发布到组织 `@phoenix-wing`。每次开始先执行 [发布点检表](RELEASE-CHECKLIST.md)。本文命令以历史 **0.3.2** 发行作示例；当前候选版本以 `package.json`、README 和本版发行说明为准。npm 包名为 **`@phoenix-wing/phoenix-freecad-mcp`**；实际发行状态以 GitHub Release 与 npm Registry 各自的公开回执为准。本文是操作步骤，不是发布回执。
 
 发布门槛以[开发与发布计划](RELEASE-PLAN.md)为准，版本身份见[版本约定](VERSIONING.md)，用户安装步骤见[安装包说明](ADDON-INSTALL.md)。
 
@@ -68,17 +68,18 @@ npm pack --dry-run --json
 以下以 **0.3.2** 为例，命令从仓库根目录执行；未来版本需同步替换命令中的版本。输出目录须为本批新建的空目录。若目录已有产物，保留旧包并换用新的批次目录，不删除或覆盖旧包。
 
 ```sh
-npm run addon:pack -- --output-dir artifacts/release-0.3.2
+python3 scripts/package-addon.py --output-dir artifacts/addon-build-0.3.2
+mkdir artifacts/release-0.3.2
+cp artifacts/addon-build-0.3.2/phoenix-freecad-tools-addon-0.3.2.zip artifacts/release-0.3.2/
 npm pack --pack-destination artifacts/release-0.3.2
 ```
 
-应生成：
+Release目录应包含两个实际包：
 
 - `phoenix-freecad-tools-addon-0.3.2.zip`
-- `phoenix-freecad-tools-addon-0.3.2.zip.sha256`
 - `phoenix-wing-phoenix-freecad-mcp-0.3.2.tgz`
 
-组织 tgz 的文件名以 `npm pack` 实际输出为准；清单中的 manifest 必须为 `@phoenix-wing/phoenix-freecad-mcp`。`npm pack` 的 `prepack` 会构建当前源码。工作台打包器使用文件白名单，并拒绝覆盖同名不同内容的旧 ZIP。dry-run 清单不能代替实际制品审查。
+Addon构建目录中另有`phoenix-freecad-tools-addon-0.3.2.zip.sha256`；该单包侧车文件不复制到Release目录。Release验证器只接受两个包及统一的`SHA256SUMS`。组织 tgz 的文件名以 `npm pack` 实际输出为准；清单中的 manifest 必须为 `@phoenix-wing/phoenix-freecad-mcp`。`npm pack` 的 `prepack` 会构建当前源码。工作台打包器使用文件白名单，并拒绝覆盖同名不同内容的旧 ZIP。dry-run 清单不能代替实际制品审查。
 
 列出两个实际包的成员，并解压到独立临时目录检查内容、版本、许可和公开边界：
 
@@ -169,7 +170,7 @@ npm view @phoenix-wing/phoenix-freecad-mcp versions --json --registry https://re
 npm publish ./artifacts/release-0.3.2/phoenix-wing-phoenix-freecad-mcp-0.3.2.tgz --access public --registry https://registry.npmjs.org
 ```
 
-如果需要持续迭代预发布，先采用 `0.3.2-rc.1` 等独立候选版本，同步全部版本位置并重新构建验证，再发布对应 tgz，在命令中增加 `--tag next`。同步写明安装的精确版本及测试性质。
+如果需要持续迭代预发布，可另行设计 `0.3.2-rc.1` 等独立候选版本及`next`标签流程。当前`verify-release.mjs`与自动Release工作流只接受稳定三段版本，不能直接套用该流程发布rc；预发布须先单独审定版本校验、制品和发布规则。
 
 `--tag next` 只控制默认分发标签，不改变版本身份：已发布的同一 `name@version` 不能覆盖或重新发布。如果正式版本 `0.3.2` 已用 `next` 发布且制品字节保持不变，后续正式推广只调整 dist-tag；若制品仍需修改，应使用新的版本身份，不能重新发布不同内容的 `0.3.2`。
 

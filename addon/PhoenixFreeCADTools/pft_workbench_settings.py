@@ -13,6 +13,7 @@ PREFERENCE_PATH = "User parameter:BaseApp/Preferences/Mod/PhoenixTools"
 LANGUAGE_KEY = "Language"
 AUTO_START_KEY = "AutoStartMCP"
 TOOLBAR_BUTTON_STYLE_KEY = "ToolbarButtonStyle"
+SHOW_PRIMARY_MENU_KEY = "ShowPrimaryMenu"
 TOOLBAR_BUTTON_STYLES = ("icon_text", "icon")
 _UNSET = object()
 
@@ -87,6 +88,21 @@ def load_toolbar_button_style(app):
         return "icon_text"
 
 
+def _read_primary_menu_visible(preference):
+    value = preference.GetBool(SHOW_PRIMARY_MENU_KEY, False)
+    if type(value) is not bool:
+        raise TypeError("Menu visibility preference must return a bool value")
+    return value
+
+
+def load_primary_menu_visible(app):
+    """Read presentation only; an unavailable or unset preference hides the menu."""
+    try:
+        return _read_primary_menu_visible(app.ParamGet(PREFERENCE_PATH))
+    except Exception:
+        return False
+
+
 def load_options(app):
     """Read the complete settings dialog state without writing preferences."""
     try:
@@ -94,11 +110,13 @@ def load_options(app):
         stored = preference.GetString(LANGUAGE_KEY, "zh")
         options = _read_service_options(preference)
         toolbar_button_style = _read_toolbar_button_style(preference)
+        show_primary_menu = _read_primary_menu_visible(preference)
     except Exception as error:
         raise PftSettingsError("无法读取工作台设置。") from error
     language = stored if stored in LANGUAGES else "zh"
     set_language(language)
-    return {"language": language, "toolbar_button_style": toolbar_button_style, **options}
+    return {"language": language, "toolbar_button_style": toolbar_button_style,
+            "show_primary_menu": show_primary_menu, **options}
 
 
 def _snapshot(preference, kind, key, default):
@@ -129,8 +147,8 @@ def _restore(preference, snapshot):
         raise RuntimeError("Preference rollback did not retain its value")
 
 
-def save_options(app, language, auto_start_mcp, toolbar_button_style=_UNSET):
-    """Flush choices natively; legacy calls leave toolbar presentation intact."""
+def save_options(app, language, auto_start_mcp, toolbar_button_style=_UNSET, show_primary_menu=_UNSET):
+    """Flush choices natively; omitted presentation choices retain their values."""
     if type(language) is not str or language not in LANGUAGES:
         raise PftSettingsError("不支持的界面语言。")
     if type(auto_start_mcp) is not bool:
@@ -138,11 +156,15 @@ def save_options(app, language, auto_start_mcp, toolbar_button_style=_UNSET):
     if toolbar_button_style is not _UNSET and (
             type(toolbar_button_style) is not str or toolbar_button_style not in TOOLBAR_BUTTON_STYLES):
         raise PftSettingsError("不支持的工具条显示样式。")
+    if show_primary_menu is not _UNSET and type(show_primary_menu) is not bool:
+        raise PftSettingsError("菜单显示设置必须使用布尔值。")
     changes = (
         ("String", LANGUAGE_KEY, "zh", language),
         ("Bool", AUTO_START_KEY, False, auto_start_mcp),
     )
     if toolbar_button_style is not _UNSET:
         changes += (("String", TOOLBAR_BUTTON_STYLE_KEY, "icon_text", toolbar_button_style),)
+    if show_primary_menu is not _UNSET:
+        changes += (("Bool", SHOW_PRIMARY_MENU_KEY, False, show_primary_menu),)
     _save_changes(app, changes)
     set_language(language)

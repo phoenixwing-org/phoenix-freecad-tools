@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native Qt chat client; all account/network actions require explicit user action."""
-import importlib.util
-from pathlib import Path
 from datetime import datetime
-import sys
+import re
 
-from pft_workbench_i18n import tr
+from pft_workbench_i18n import ENGLISH, tr
 from pft_chat_transcript import render_chat_transcript
 from pft_panel_host import mount_panel_dock, present_panel
+from pft_quick_toolbar import compact_icon_button, create_quick_toolbar
 
 PFT_CHAT_PROMPT = (
     "请通过 phoenix-freecad MCP 检查连接并列出已打开文档，读取目标文档和对象状态。"
@@ -29,28 +28,17 @@ def _qt_enum(namespace, group, name):
     return value if value is not None else getattr(getattr(namespace, group), name)
 
 
-def _shortcut_facade():
-    """Load only this installation's fixed workbench facade, on a click."""
-    name = "pft_workbench_tools"
-    filename = Path(__file__).resolve().with_name(name + ".py")
-    existing = sys.modules.get(name)
-    if existing is not None:
-        origin = getattr(existing, "__file__", None)
-        if not isinstance(origin, str) or Path(origin).resolve() != filename:
-            raise RuntimeError("Shortcut facade belongs to another installation")
-        return existing
-    spec = importlib.util.spec_from_file_location(name, filename)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Shortcut facade is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        if sys.modules.get(name) is module:
-            del sys.modules[name]
-        raise
-    return module
+def _error_copy_text(error):
+    """Copy fixed local diagnostics only, never arbitrary native/provider text."""
+    if type(error) is not dict:
+        return ""
+    code = error.get("code")
+    if type(code) is not str or re.fullmatch(r"(?:CHAT|PFT_CHAT_SHORTCUT)_[A-Z0-9_]{1,64}", code) is None:
+        code = "CHAT_UI_ERROR"
+    message = error.get("message")
+    if type(message) is not str or message not in ENGLISH:
+        message = "错误详情已隐藏，请根据错误代码检查连接。"
+    return code + "\n" + tr(message)
 
 
 def show_chat_connection_dialog(app, gui, get_status):
@@ -79,6 +67,7 @@ def show_chat_connection_dialog(app, gui, get_status):
                     event.ignore()
                     return
             self._closed = True
+            self._quick_toolbar.invalidate()
             self._status_timer.stop()
             self._controller.disconnect()
             super().closeEvent(event)
@@ -100,18 +89,61 @@ def show_chat_connection_dialog(app, gui, get_status):
         return widget
 
     def compact_button(title, object_name, icon):
-        button = QtWidgets.QToolButton()
-        button.setObjectName(object_name)
-        button.setText(tr(title))
-        button.setToolTip(tr(title))
-        button.setAccessibleName(tr(title))
-        button.setIcon(QtGui.QIcon(str(Path(__file__).resolve().parent / "Resources" / "icons" / icon)))
-        button.setToolButtonStyle(QtCore.Qt.ToolButtonIconOnly)
-        button.setAutoRaise(True)
-        return button
+        return compact_icon_button(dialog, title, object_name, icon)
 
     dialog = PftChatDock(parent)
     dialog._closed = False
+    # Use real QObject slot receivers, not Qt's generic Python callable context.
+    # Retain senders and receivers for this dock; never reconnect on use.
+    dialog._action_bindings = []
+    dialog._action_receivers = []
+
+    class _PftChatSignalReceiver(QtCore.QObject):
+        def __init__(self, handler, pass_argument, allow_closed):
+            super().__init__(dialog)
+            self._owner, self._handler = dialog, handler
+            self._pass_argument, self._allow_closed = pass_argument, allow_closed
+
+        def _invoke(self, value=None):
+            handler = self._handler
+            if handler is None or (not self._allow_closed and self._owner._closed):
+                return
+            if self._pass_argument:
+                handler(value)
+            else:
+                handler()
+
+        @QtCore.Slot()
+        def trigger(self):
+            self._invoke()
+
+        @QtCore.Slot(bool)
+        def trigger_bool(self, value=False):
+            self._invoke(value)
+
+        @QtCore.Slot(int)
+        def trigger_int(self, value=0):
+            self._invoke(value)
+
+        def invalidate(self):
+            self._handler = self._owner = None
+
+    def connect_action(sender, signal, handler, signature="bool", pass_argument=False, allow_closed=False):
+        receiver = _PftChatSignalReceiver(handler, pass_argument, allow_closed)
+        slot = {"none": receiver.trigger, "bool": receiver.trigger_bool, "int": receiver.trigger_int}[signature]
+        dialog._action_receivers.append(receiver)
+        dialog._action_bindings.append((sender, slot))
+        signal.connect(slot)
+
+    def mark_destroyed(_object=None):
+        dialog._closed = True
+        dialog._quick_toolbar.invalidate()
+        for receiver in dialog._action_receivers:
+            receiver.invalidate()
+        dialog._action_bindings.clear()
+        dialog._action_receivers.clear()
+
+    connect_action(dialog, dialog.destroyed, mark_destroyed, signature="none", allow_closed=True)
     dialog.setObjectName("PhoenixTools_ChatConnectionDialog")
     dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
     dialog.setWindowTitle(tr("Phoenix 聊天"))
@@ -120,37 +152,28 @@ def show_chat_connection_dialog(app, gui, get_status):
     dialog.setMinimumWidth(300)
     content = QtWidgets.QWidget(dialog)
     layout = QtWidgets.QVBoxLayout(content)
-    def run_shortcut(action):
-        try:
-            facade = _shortcut_facade()
-            callbacks = {"document": facade.show_document_tools_dialog,
-                         "axonometric_fit": facade.run_axonometric_fit,
-                         "appearance": facade.show_appearance_dialog}
-            callbacks[action]()
-        except Exception:
-            message = tr("快捷操作失败；未自动保存 CAD 文档。")
-            status.setText(message)
-            printer = getattr(getattr(app, "Console", None), "PrintError", None)
-            if callable(printer):
-                try:
-                    printer("[Phoenix Tools] " + message + "\n")
-                except Exception:
-                    pass  # The panel already displays the fixed failure.
+    shortcut_error = [None]
+    def shortcut_succeeded():
+        shortcut_error[0] = None
+        refresh_status(controller.snapshot)
 
-    toolbar = QtWidgets.QHBoxLayout()
-    for title, suffix, icon, action in (
-        ("当前文档工具", "DocumentTools", "document-tools.svg", "document"),
-        ("轴测并适合窗口", "AxonometricFit", "axonometric-fit.svg", "axonometric_fit"),
-        ("对象外观", "Appearance", "appearance.svg", "appearance"),
-    ):
-        button = compact_button(title, "PhoenixTools_Chat" + suffix + "Action", icon)
-        button.clicked.connect(lambda _checked=False, action=action: run_shortcut(action))
-        toolbar.addWidget(button)
-    toolbar.addStretch(1)
-    settings_toggle = compact_button("聊天与工具设置", "PhoenixTools_ChatSettingsToggle", "gear.svg")
-    settings_toggle.setCheckable(True)
-    toolbar.addWidget(settings_toggle)
-    layout.addLayout(toolbar)
+    def shortcut_failed(diagnostic):
+        message = _error_copy_text(diagnostic)
+        shortcut_error[0] = (controller.snapshot.get("connection_generation"), diagnostic)
+        set_status(message, diagnostic)
+        printer = getattr(getattr(app, "Console", None), "PrintError", None)
+        if callable(printer):
+            try:
+                printer("[Phoenix Tools] " + message + "\n")
+            except Exception:
+                pass  # The panel already displays the fixed failure.
+
+    toolbar = create_quick_toolbar(content, gui, object_prefix="PhoenixTools_Chat",
+        on_error=shortcut_failed, on_success=shortcut_succeeded, settings_title="聊天与工具设置",
+        settings_name="PhoenixTools_ChatSettingsToggle", settings_checkable=True)
+    dialog._quick_toolbar = toolbar
+    settings_toggle = toolbar.buttons["settings"]
+    layout.addWidget(toolbar)
 
     # Keep the first connection/sign-in step visible without exposing all of
     # the connection and tool configuration in the ordinary chat flow.
@@ -167,7 +190,28 @@ def show_chat_connection_dialog(app, gui, get_status):
     for button in (connect, login, reopen_login, copy_login): connection_row.addWidget(button)
     layout.addWidget(connection_actions)
     status = label(tr("尚未连接")); status.setObjectName("PhoenixTools_ChatStatus")
-    layout.addWidget(status)
+    status.setTextInteractionFlags(_qt_enum(QtCore.Qt, "TextInteractionFlag", "TextSelectableByMouse")
+                                   | _qt_enum(QtCore.Qt, "TextInteractionFlag", "TextSelectableByKeyboard"))
+    status_row = QtWidgets.QHBoxLayout()
+    status_row.addWidget(status, 1)
+    copy_error = compact_button("复制错误", "PhoenixTools_ChatCopyError", "copy.svg")
+    copy_error.hide()
+    status_row.addWidget(copy_error)
+    layout.addLayout(status_row)
+    error_clipboard_text = [""]
+
+    def set_status(message, error=None):
+        if error is None:
+            shortcut_error[0] = None
+        status.setText(message)
+        error_clipboard_text[0] = _error_copy_text(error)
+        copy_error.setVisible(bool(error_clipboard_text[0]))
+
+    def copy_status_error():
+        if not dialog._closed and error_clipboard_text[0]:
+            QtWidgets.QApplication.clipboard().setText(error_clipboard_text[0])
+
+    connect_action(copy_error, copy_error.clicked, copy_status_error)
     history_status = label()
     history_status.setObjectName("PhoenixTools_ChatHistoryStatus")
     history_status.hide()
@@ -178,7 +222,7 @@ def show_chat_connection_dialog(app, gui, get_status):
     settings_box = shrink_horizontal(QtWidgets.QWidget(content))
     settings_box.setObjectName("PhoenixTools_ChatSettings")
     settings_layout = QtWidgets.QVBoxLayout(settings_box)
-    note = label(tr("在 FreeCAD 内使用 Codex 聊天，通过 ChatGPT 浏览器登录。使用本窗口的独立会话；可启用 FreeCAD 工具，改名和属性修改需在原生窗口确认。"))
+    note = label(tr("在 FreeCAD 内使用 Codex 聊天，通过 ChatGPT 浏览器登录。使用本窗口的独立会话；可启用 FreeCAD 工具，改名和属性修改需在原生窗口确认。图纸 PDF 需在原生窗口捕获预览、选择路径并确认发布。"))
     settings_layout.addWidget(note)
     settings_layout.addWidget(label(tr("Codex 执行文件")))
     path_row = QtWidgets.QHBoxLayout()
@@ -210,7 +254,7 @@ def show_chat_connection_dialog(app, gui, get_status):
         if not enable_tools.isChecked():
             enable_desk.setChecked(False)
         enable_desk.setEnabled(enable_tools.isEnabled() and enable_tools.isChecked())
-    enable_tools.toggled.connect(lambda _checked: update_desk_option())
+    connect_action(enable_tools, enable_tools.toggled, update_desk_option)
     update_desk_option()
     settings_layout.addWidget(label(tr("聊天模型")))
     model_row = QtWidgets.QHBoxLayout()
@@ -270,7 +314,7 @@ def show_chat_connection_dialog(app, gui, get_status):
         def choose_path(checked=False, target=field, title=title):
             filename, _ = QtWidgets.QFileDialog.getOpenFileName(dialog, tr(title), target.text())
             if filename: target.setText(filename)
-        chooser.clicked.connect(choose_path)
+        connect_action(chooser, chooser.clicked, choose_path)
         row.addWidget(field, 1); row.addWidget(chooser); settings_layout.addLayout(row)
         path_fields.append((field, chooser))
     node, cli = [pair[0] for pair in path_fields]
@@ -286,7 +330,7 @@ def show_chat_connection_dialog(app, gui, get_status):
     try:
         snapshot = get_status()
         running = tr("运行中") if snapshot.get("running") and not snapshot.get("stopping") else tr("已停止")
-        bridge.setText(tr("FreeCAD 桥接：%s") % running + " · " + tr("文档读取、视图和外观工具已开放；改名和属性先预览，再在 FreeCAD 窗口确认。文档仅在请求工具时读取。"))
+        bridge.setText(tr("FreeCAD 桥接：%s") % running + " · " + tr("文档读取、视图和外观工具已开放；改名和属性先预览再确认，图纸 PDF 需原生捕获预览、选择路径并确认发布。文档仅在请求工具时读取。"))
     except Exception:
         bridge.setText(tr("桥接状态读取失败，请查看工作台状态。"))
     settings_layout.addWidget(bridge)
@@ -294,7 +338,7 @@ def show_chat_connection_dialog(app, gui, get_status):
     tool_status.setObjectName("PhoenixTools_ChatToolStatus")
     tool_status.hide()
     settings_layout.addWidget(tool_status)
-    settings_box.hide(); settings_toggle.toggled.connect(settings_box.setVisible)
+    settings_box.hide()
     layout.addWidget(settings_box)
 
     class PftChatTranscript(QtWidgets.QTextBrowser):
@@ -527,7 +571,12 @@ def show_chat_connection_dialog(app, gui, get_status):
             message += " · " + tr("FreeCAD 工具模式")
         if snapshot.get("desk_enabled"):
             message += " · " + tr("Desk 数据工具")
-        status.setText(message)
+        local_error = shortcut_error[0]
+        if local_error is not None and local_error[0] != snapshot.get("connection_generation"):
+            local_error = shortcut_error[0] = None
+        if local_error is not None:
+            message += "\n" + _error_copy_text(local_error[1])
+        set_status(message, local_error[1] if local_error is not None else error)
         status.setToolTip(tooltip)
 
     def changed(snapshot):
@@ -611,10 +660,11 @@ def show_chat_connection_dialog(app, gui, get_status):
         update_registration_availability()
         if not controller.snapshot.get("is_busy") and getattr(process, "has_active_session", False) is not True:
             status_timer.stop()
-    status_timer.timeout.connect(refresh_memory_status)
+    connect_action(status_timer, status_timer.timeout, refresh_memory_status, signature="none")
     dialog._status_timer = status_timer
 
     def connect_client():
+        shortcut_error[0] = None
         registration_activity[0] += 1
         try:
             executable = validate_executable(program.text())
@@ -635,9 +685,9 @@ def show_chat_connection_dialog(app, gui, get_status):
             controller.connect(executable, profile["home"], profile["cwd"], mcp=mcp,
                                model_id=model_choice.currentData() or None, **history_options)
         except (PftChatProfileError, PftChatSettingsError, PftChatSessionStoreError) as error:
-            status.setText(tr(str(error)))
+            set_status(tr(str(error)))
         except Exception:
-            status.setText(tr("无法连接聊天，请核对 Codex 与专属目录。"))
+            set_status(tr("无法连接聊天，请核对 Codex 与专属目录。"))
 
     def save_tool_settings():
         try:
@@ -646,29 +696,29 @@ def show_chat_connection_dialog(app, gui, get_status):
             saved = save_chat_options(app, enable_tools.isChecked(), node.text(), cli.text(),
                                       desk_enabled=enable_desk.isChecked())
             node.setText(saved["node_executable"]); cli.setText(saved["cli_entry"])
-            status.setText(tr("工具设置已保存，下次连接生效。"))
+            set_status(tr("工具设置已保存，下次连接生效。"))
         except PftChatSettingsError as error:
-            status.setText(tr(str(error)))
+            set_status(tr(str(error)))
 
     def save_chat_settings():
         try:
             save_chat_preferences(app, model_choice.currentData() or "", font_choice.currentData(),
                                   retain_history=retain_history.isChecked())
             apply_chat_font()
-            status.setText(tr("聊天设置已保存；字号立即生效，模型在开始聊天前或新连接使用。"))
+            set_status(tr("聊天设置已保存；字号立即生效，模型在开始聊天前或新连接使用。"))
         except PftChatSettingsError as error:
-            status.setText(tr(str(error)))
+            set_status(tr(str(error)))
 
     def choose_model():
         if controller.snapshot.get("can_select_model"):
             controller.select_model(model_choice.currentData() or None)
 
-    save_tools.clicked.connect(save_tool_settings)
-    save_preferences.clicked.connect(save_chat_settings)
-    list_sessions.clicked.connect(list_saved_sessions)
-    model_choice.currentIndexChanged.connect(lambda index: choose_model())
-    refresh_models.clicked.connect(controller.refresh_models)
-    font_choice.currentIndexChanged.connect(lambda index: apply_chat_font())
+    connect_action(save_tools, save_tools.clicked, save_tool_settings)
+    connect_action(save_preferences, save_preferences.clicked, save_chat_settings)
+    connect_action(list_sessions, list_sessions.clicked, list_saved_sessions)
+    connect_action(model_choice, model_choice.currentIndexChanged, choose_model, signature="int")
+    connect_action(refresh_models, refresh_models.clicked, controller.refresh_models)
+    connect_action(font_choice, font_choice.currentIndexChanged, apply_chat_font, signature="int")
     apply_chat_font()
 
     def choose_program():
@@ -682,6 +732,7 @@ def show_chat_connection_dialog(app, gui, get_status):
                 or not snapshot.get("can_send")):
             return
         text = entry.toPlainText()
+        shortcut_error[0] = None
         pending_submission[0] = (text, len(controller.snapshot["transcript"]))
         try:
             controller.send(text)
@@ -689,25 +740,28 @@ def show_chat_connection_dialog(app, gui, get_status):
                 pending_submission[0] = None
         except Exception:
             pending_submission[0] = None
-            status.setText(tr("消息未发送，请检查连接和输入。"))
+            set_status(tr("消息未发送，请检查连接和输入。"))
 
     def copy_pending_login_link():
         if controller.copy_login_link(lambda url: QtWidgets.QApplication.clipboard().setText(url)):
-            status.setText(tr("登录链接已复制，请在浏览器中打开。"))
+            set_status(tr("登录链接已复制，请在浏览器中打开。"))
 
-    browse.clicked.connect(choose_program)
-    connect.clicked.connect(connect_client)
-    login.clicked.connect(controller.login)
-    reopen_login.clicked.connect(controller.reopen_login)
-    copy_login.clicked.connect(copy_pending_login_link)
-    disconnect.clicked.connect(controller.disconnect)
-    check_registration.clicked.connect(check_process_registration)
-    settings_toggle.toggled.connect(lambda _checked: update_registration_availability())
-    send.clicked.connect(send_message)
-    stop.clicked.connect(controller.interrupt)
-    copy.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(tr(PFT_CHAT_PROMPT)))
-    official.clicked.connect(lambda: open_url("https://learn.chatgpt.com/docs/app-server"))
-    close.clicked.connect(dialog.close)
+    connect_action(browse, browse.clicked, choose_program)
+    connect_action(connect, connect.clicked, connect_client)
+    connect_action(login, login.clicked, controller.login)
+    connect_action(reopen_login, reopen_login.clicked, controller.reopen_login)
+    connect_action(copy_login, copy_login.clicked, copy_pending_login_link)
+    connect_action(disconnect, disconnect.clicked, controller.disconnect)
+    connect_action(check_registration, check_registration.clicked, check_process_registration)
+    def toggle_settings(checked):
+        settings_box.setVisible(checked)
+        update_registration_availability()
+    toolbar.bind_settings(toggle_settings, pass_checked=True)
+    connect_action(send, send.clicked, send_message)
+    connect_action(stop, stop.clicked, controller.interrupt)
+    connect_action(copy, copy.clicked, lambda: QtWidgets.QApplication.clipboard().setText(tr(PFT_CHAT_PROMPT)))
+    connect_action(official, official.clicked, lambda: open_url("https://learn.chatgpt.com/docs/app-server"))
+    connect_action(close, close.clicked, dialog.close)
     changed(controller.snapshot)
     scroll = shrink_horizontal(QtWidgets.QScrollArea(dialog))
     scroll.setObjectName("PhoenixTools_ChatScrollArea")

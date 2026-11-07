@@ -241,7 +241,7 @@ def _record(value, expected_id=None):
             or type(value["schema_version"]) is not int or value["schema_version"] != 1
             or type(value["protocol_version"]) is not int or value["protocol_version"] != 1
             or type(value["owner"]) is not str or value["owner"] != "phoenix-freecad-tools"
-            or type(value["addon_version"]) is not str or value["addon_version"] != "0.3.2"
+            or type(value["addon_version"]) is not str or value["addon_version"] != "0.4.1"
             or any(type(value[key]) is not str or not _HEX_ID.fullmatch(value[key]) for key in ("instance_id", "service_id"))
             or type(value["pid"]) is not int or not 1 <= value["pid"] <= 9007199254740991
             or type(value["url"]) is not str):

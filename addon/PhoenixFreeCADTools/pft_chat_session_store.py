@@ -26,6 +26,7 @@ import pft_chat_process_lease as _lease
 REGISTRY_FILENAME = "sessions.json"
 OWNER_PROTOCOL = "phoenix-freecad-chat-sessions-v1"
 CLI_VERSION = "0.160.0"
+_SUPPORTED_CLI_VERSIONS = frozenset((CLI_VERSION, "0.167.0-alpha.3.2"))
 PROVIDER = "openai"
 MAX_SESSIONS = 100
 MAX_REGISTRY_BYTES = 64 * 1024
@@ -122,25 +123,26 @@ def _hex(value):
     return type(value) is str and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
-def _metadata(thread_id, created_at, model, scope_fingerprint, history_mode="paginated"):
+def _metadata(thread_id, created_at, model, scope_fingerprint, history_mode="paginated", *, cli_version=CLI_VERSION):
     _text(thread_id)
     _text(model)
     if (type(created_at) is not int or not 0 <= created_at <= MAX_CREATED_AT
-            or not _hex(scope_fingerprint) or type(history_mode) is not str or history_mode != "paginated"):
+            or not _hex(scope_fingerprint) or type(history_mode) is not str or history_mode != "paginated"
+            or type(cli_version) is not str or cli_version not in _SUPPORTED_CLI_VERSIONS):
         _fail("INVALID")
     return {"thread_id": thread_id, "created_at": created_at, "model": model,
             "scope_fingerprint": scope_fingerprint, "history_mode": history_mode,
-            "cli_version": CLI_VERSION, "provider": PROVIDER}
+            "cli_version": cli_version, "provider": PROVIDER}
 
 
 def _session(record):
     if type(record) is not dict or set(record) != {
             "thread_id", "created_at", "model", "scope_fingerprint", "history_mode", "cli_version", "provider"}:
         _fail("INVALID")
-    if record["cli_version"] != CLI_VERSION or record["provider"] != PROVIDER:
+    if type(record["cli_version"]) is not str or record["cli_version"] not in _SUPPORTED_CLI_VERSIONS or record["provider"] != PROVIDER:
         _fail("INVALID")
     return _metadata(record["thread_id"], record["created_at"], record["model"],
-                     record["scope_fingerprint"], record["history_mode"])
+                     record["scope_fingerprint"], record["history_mode"], cli_version=record["cli_version"])
 
 
 def _profile_identity(identities):
@@ -298,10 +300,10 @@ class PftChatSessionStore:
                 return session
         _fail("NOT_FOUND")
 
-    def register_thread(self, thread_id, created_at, model, scope_fingerprint, history_mode="paginated"):
+    def register_thread(self, thread_id, created_at, model, scope_fingerprint, history_mode="paginated", *, cli_version=CLI_VERSION):
         """Register only the caller's policy-verified official start response."""
         self._ready()
-        session = _metadata(thread_id, created_at, model, scope_fingerprint, history_mode)
+        session = _metadata(thread_id, created_at, model, scope_fingerprint, history_mode, cli_version=cli_version)
         staged, published = None, False
         try:
             with _lease._locked(self._home, self._cwd, self._identities, self._lock_identity,

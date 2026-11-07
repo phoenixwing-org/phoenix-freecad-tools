@@ -15,8 +15,12 @@ if _workbench_base is None:
 import pft_bridge
 import pft_workbench_tools
 import pft_workbench_settings as settings
+import pft_global_menu
 from pft_workbench_i18n import get_language, tr
 from pft_workbench_model import PftToolError
+
+if os.path.realpath(pft_global_menu.__file__) != os.path.realpath(os.path.join(_addon_dir, "pft_global_menu.py")):
+    raise RuntimeError("Global menu module belongs to another addon.")
 
 
 def _feedback(message, error=False):
@@ -184,6 +188,8 @@ class _PftToolbarCommand(_PftCommand, _PftMCPActionCommand):
         _PftMCPActionCommand.__init__(self)
         self.IDENTIFIER, self.icon = identifier, icon
         self.requires_document = requires_document
+        self._invocation_serial = 0
+        self._last_invocation = None
 
     def _toolbutton_style(self):
         return ("ToolButtonIconOnly" if settings.load_toolbar_button_style(App) == "icon"
@@ -206,12 +212,28 @@ class _PftToolbarCommand(_PftCommand, _PftMCPActionCommand):
         return state[1]
 
     def Activated(self):
+        self._invocation_serial += 1
+        outcome = {"serial": self._invocation_serial, "ok": False,
+                   "code": "PFT_CHAT_SHORTCUT_ACTION_FAILED",
+                   "message": "快捷操作失败；请使用工作台同名工具核对当前目标。"}
+        self._last_invocation = None
         try:
-            return self.callback()
+            result = self.callback()
+            outcome.update(ok=True, code=None, message=None)
+            return result
         except PftToolError as error:
+            known = {"当前没有打开的文档。": "PFT_CHAT_SHORTCUT_NO_DOCUMENT",
+                     "没有可确定的活动三维视图，请先激活目标文档的三维视图。": "PFT_CHAT_SHORTCUT_NO_3D_VIEW",
+                     "请明确勾选最多100个不重复的完整对象。": "PFT_CHAT_SHORTCUT_TARGETS_REQUIRED"}
+            if len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in known:
+                outcome.update(code=known[error.args[0]], message=error.args[0])
             _feedback(str(error), error=True)
         except Exception as error:
             _feedback(tr("操作失败（%s）。") % type(error).__name__, error=True)
+        finally:
+            # Native Gui.runCommand discards return values and can catch Python
+            # exceptions. Keep only a bounded, fixed diagnostic for this call.
+            self._last_invocation = outcome
 
 
 class _PftToggleMCPCommand(_PftMCPActionCommand):
@@ -414,7 +436,22 @@ class PftWorkbench(_workbench_base):
     MenuText = "Phoenix Tools"
     ToolTip = "Phoenix 的 FreeCAD 工具入口；通过 MCP 提供聊天控制能力。"
 
-    def Initialize(self):
+    def __init__(self):
+        self._commands = {}
+        self._registered_commands = {}
+        self._global_menu_runtime = None
+        self._initialized = False
+
+    def _register_command(self, identifier, command):
+        if identifier in self._registered_commands:
+            return
+        if Gui.Command.get(identifier) is not None:
+            raise pft_global_menu.PftGlobalMenuError("Phoenix command registration conflicts.")
+        Gui.addCommand(identifier, command)
+        self._registered_commands[identifier] = command
+
+    def _ensure_commands(self, identifiers=None):
+        """Register reusable entry commands without opening panels or a workbench."""
         try:
             settings.load_language(App)
         except settings.PftSettingsError as error:
@@ -437,38 +474,67 @@ class PftWorkbench(_workbench_base):
             "PhoenixTools_DeskTools": "desk-tools.svg", "PhoenixTools_ChatConnection": "chat-connection.svg",
             "PhoenixTools_Help": "help.svg",
         }
-        self._commands = {}
         for identifier, title, tooltip, callback in definitions:
-            self._commands[identifier] = _PftToolbarCommand(
-                identifier, title, tooltip, callback, icons[identifier],
-                requires_document=identifier in {"PhoenixTools_AxonometricFit", "PhoenixTools_Appearance"})
+            if identifiers is not None and identifier not in identifiers:
+                continue
+            if identifier not in self._commands:
+                self._commands[identifier] = _PftToolbarCommand(
+                    identifier, title, tooltip, callback, icons[identifier],
+                    requires_document=identifier in {"PhoenixTools_AxonometricFit", "PhoenixTools_Appearance"})
+            self._register_command(identifier, self._commands[identifier])
+        if identifiers is None or _PftSettingsCommand.IDENTIFIER in identifiers:
+            if not hasattr(self, "_settings_command"):
+                self._settings_command = _PftSettingsCommand(self._show_settings)
+            self._register_command(self._settings_command.IDENTIFIER, self._settings_command)
+        return [definition[0] for definition in definitions]
+
+    def Initialize(self):
+        if self._initialized:
+            return
+        business_commands = self._ensure_commands()
         self._mcp_status_command = _PftMCPStatusCommand()
-        self._settings_command = _PftSettingsCommand(self._show_settings)
         self._mcp_command = _PftToggleMCPCommand(
             self._mcp_status_command, self._settings_command,
             self._commands.values())
-        for command in (self._mcp_status_command, self._mcp_command, self._settings_command):
-            Gui.addCommand(command.IDENTIFIER, command)
-        commands = [self._mcp_status_command.IDENTIFIER, self._mcp_command.IDENTIFIER, self._settings_command.IDENTIFIER]
-        for identifier, command in self._commands.items():
-            Gui.addCommand(identifier, command)
-            commands.append(identifier)
-        self.appendMenu("Phoenix Tools", commands)
+        for command in (self._mcp_status_command, self._mcp_command):
+            self._register_command(command.IDENTIFIER, command)
+        commands = [self._mcp_status_command.IDENTIFIER, self._mcp_command.IDENTIFIER,
+                    self._settings_command.IDENTIFIER] + business_commands
+        self.appendMenu("Phoenix", commands)
         self.appendToolbar("Phoenix Tools", commands)
         self._mcp_command.start_polling()
+        self._initialized = True
 
     def _show_settings(self):
         return pft_workbench_tools.show_settings_dialog(self.refresh_language)
 
+    def run_native_shortcut(self, identifier):
+        command = self._registered_commands.get(identifier)
+        if identifier not in pft_global_menu.QUICK_COMMANDS or command is None or Gui.Command.get(identifier) is None:
+            raise pft_global_menu.PftGlobalMenuError("当前插件缺少此快捷操作；请核对安装是否完整。")
+        if not command.IsActive():
+            raise PftToolError("当前没有打开的文档。")
+        before = command._invocation_serial
+        Gui.runCommand(identifier, 0)
+        outcome = command._last_invocation
+        if (command._invocation_serial != before + 1 or type(outcome) is not dict
+                or outcome.get("serial") != before + 1):
+            raise pft_global_menu.PftGlobalMenuError("快捷操作失败；请使用工作台同名工具核对当前目标。",
+                "PFT_CHAT_SHORTCUT_ACTION_FAILED")
+        if outcome.get("ok") is not True:
+            raise pft_global_menu.PftGlobalMenuError(outcome["message"], outcome["code"])
+
     def refresh_language(self):
         """Refresh existing actions only; keep timers, documents and MCP state."""
         self.ToolTip = tr("Phoenix 的 FreeCAD 工具入口；通过 MCP 提供聊天控制能力。")
+        owned_actions = []
         for identifier, command in self._commands.items():
             try:
                 actions = Gui.Command.get(identifier).getAction()
                 if hasattr(actions, "setText"):
                     actions = [actions]
                 resources = command.GetResources()
+                owned_actions.extend(actions or [])
                 for action in actions or []:
                     action.setText(resources["MenuText"])
                     if callable(getattr(action, "setIconText", None)):
@@ -479,7 +545,14 @@ class PftWorkbench(_workbench_base):
                 # A hidden workbench may not have created actions yet.
                 # GetResources will supply the current language when it does.
                 continue
-        self._mcp_command.refresh_actions(force=True)
+        if self._global_menu_runtime is not None:
+            self._global_menu_runtime.refresh_primary_menu(owned_actions, settings.load_primary_menu_visible(App))
+        if hasattr(self, "_mcp_command"):
+            self._mcp_command.refresh_actions(force=True)
+        elif hasattr(self, "_settings_command"):
+            self._settings_command.refresh_actions(force=True)
+        if self._global_menu_runtime is not None:
+            self._global_menu_runtime.refresh_language()
 
     def Activated(self):
         if hasattr(self, "_mcp_command"):
@@ -492,5 +565,28 @@ class PftWorkbench(_workbench_base):
         return "Gui::PythonWorkbench"
 
 
-Gui.addWorkbench(PftWorkbench())
+_global_menu_runtime = pft_global_menu.get_session_runtime(Gui, _addon_dir)
+if _global_menu_runtime is None:
+    _workbench = PftWorkbench()
+    _global_menu_runtime = pft_global_menu.PftGlobalMenuRuntime(
+        Gui, _workbench, _addon_dir, PftWorkbench.Icon)
+    # Keep the exact owner even if registration fails partway; a retry can only
+    # reuse its own command objects, never replace existing native command IDs.
+    pft_global_menu.retain_session_runtime(Gui, _global_menu_runtime)
+else:
+    _workbench = _global_menu_runtime.workbench
+_workbench._global_menu_runtime = _global_menu_runtime
+_workbench._ensure_commands(pft_global_menu.BOOTSTRAP_COMMANDS)
+_global_menu_runtime.install()
+if not _global_menu_runtime.workbench_registered:
+    Gui.addWorkbench(_workbench)
+    _global_menu_runtime.workbench_registered = True
 _schedule_mcp_autostart()
+
+
+def run_native_shortcut(gui, identifier):
+    """Use the same registered native command as the workbench menu/toolbar."""
+    if gui is not Gui:
+        raise pft_global_menu.PftGlobalMenuError("快捷操作来源与当前插件不一致；请正常退出 FreeCAD 后重新启动。",
+            "PFT_CHAT_SHORTCUT_SOURCE_MISMATCH")
+    return _workbench.run_native_shortcut(identifier)

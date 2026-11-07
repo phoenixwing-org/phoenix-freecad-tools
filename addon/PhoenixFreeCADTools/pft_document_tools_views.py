@@ -5,7 +5,8 @@ import re
 import unicodedata
 
 import pft_document_tools as tools
-from pft_workbench_i18n import tr
+from pft_workbench_i18n import ENGLISH, tr
+from pft_quick_toolbar import create_quick_toolbar
 
 TRANSLATABLE_STRINGS = (
     "Phoenix：当前文档工具", "当前文档工具", "文档", "（跟随活动文档）", "刷新当前内存", "处理", "名称", "显示名称", "类型", "说明",
@@ -47,7 +48,8 @@ def _existing(window):
         pass
     for dialog in candidates:
         try:
-            if dialog is not None and dialog.objectName() == "PhoenixTools_DocumentToolsDock" and dialog.parent() is window:
+            if (dialog is not None and not getattr(dialog, "_closed", False)
+                    and dialog.objectName() == "PhoenixTools_DocumentToolsDock" and dialog.parent() is window):
                 return dialog
         except (RuntimeError, ReferenceError):
             pass
@@ -147,12 +149,7 @@ def _preview_export(core, widgets, parent, plan):
 
 
 
-def _settings_icon():
-    from PySide import QtGui
-    return QtGui.QIcon(str(Path(__file__).parent / "Resources" / "icons" / "gear.svg"))
-
-
-def _choose_property_names(core, widgets, parent, current):
+def _choose_property_names(core, widgets, parent, current, use_user_units=False):
     """Choose an explicit read scope; validation has no native or file access."""
     dialog = widgets.QDialog(parent)
     dialog.setObjectName("PhoenixTools_DocumentPropertySettingsDialog")
@@ -166,6 +163,11 @@ def _choose_property_names(core, widgets, parent, current):
     editor.setMaximumHeight(160)
     editor.setPlainText("\n".join(tools.validate_property_names(current)))
     layout.addWidget(editor)
+    units = widgets.QCheckBox(tr("使用 FreeCAD 显示单位"), dialog)
+    units.setObjectName("PhoenixTools_DocumentUserUnits")
+    units.setChecked(use_user_units)
+    units.setToolTip(tr("仅改变本面板的尺寸和量值显示；内部值保留，不修改 FreeCAD 单位设置。"))
+    layout.addWidget(units)
     defaults = widgets.QPushButton(tr("恢复常用字段"), dialog)
     defaults.setObjectName("PhoenixTools_DocumentPropertiesDefault")
     defaults.clicked.connect(lambda _checked=False: editor.setPlainText("\n".join(tools.validate_property_names(None))))
@@ -179,7 +181,7 @@ def _choose_property_names(core, widgets, parent, current):
     box.setObjectName("PhoenixTools_DocumentPropertySettingsButtons")
     box.button(ok).setDefault(False)
     box.button(cancel).setDefault(True)
-    choice = {"accepted": False, "names": current}
+    choice = {"accepted": False, "names": current, "use_user_units": use_user_units}
 
     def confirm():
         raw = editor.toPlainText()
@@ -191,6 +193,7 @@ def _choose_property_names(core, widgets, parent, current):
             status.setText(tr(error.message))
             return
         choice["names"] = None if names == tools.validate_property_names(None) else names
+        choice["use_user_units"] = bool(units.isChecked())
         choice["accepted"] = True
         dialog.accept()
 
@@ -199,7 +202,7 @@ def _choose_property_names(core, widgets, parent, current):
     layout.addWidget(box)
     execute = getattr(dialog, "exec", None) or dialog.exec_
     accepted = execute() == _enum(widgets.QDialog, "DialogCode", "Accepted") and choice["accepted"]
-    return (bool(accepted), choice["names"] if accepted else current)
+    return (bool(accepted), choice["names"] if accepted else current, choice["use_user_units"] if accepted else use_user_units)
 
 
 def show_document_tools_dialog(app, gui):
@@ -211,7 +214,16 @@ def show_document_tools_dialog(app, gui):
     existing = _existing(window)
     if existing is not None:
         return host.present_panel(existing)
-    dock = widgets.QDockWidget(tr("Phoenix 工具"), window)
+    class PftDocumentDock(widgets.QDockWidget):
+        def closeEvent(self, event):
+            self._closed = True
+            toolbar = getattr(self, "_pft_quick_toolbar", None)
+            if toolbar is not None:
+                toolbar.invalidate()
+            super().closeEvent(event)
+
+    dock = PftDocumentDock(tr("Phoenix 工具"), window)
+    dock._closed = False
     dock.setObjectName("PhoenixTools_DocumentToolsDock")
     dock.setWindowTitle(tr("Phoenix 工具"))
     dock.setToolTip(tr("Phoenix：当前文档工具"))
@@ -221,6 +233,36 @@ def show_document_tools_dialog(app, gui):
         dock.setAttribute(attribute, True)
     content = widgets.QWidget(dock)
     layout = widgets.QVBoxLayout(content)
+
+    shortcut_status = _plain(widgets.QLabel("", content), core)
+    shortcut_status.setObjectName("PhoenixTools_DocumentShortcutStatus")
+    shortcut_status.setVisible(False)
+
+    def shortcut_error(error):
+        if dock._closed:
+            return
+        code, message = "PFT_CHAT_SHORTCUT_ACTION_FAILED", "快捷操作失败；请使用工作台同名工具核对当前目标。"
+        if type(error) is dict:
+            candidate = error.get("code")
+            if type(candidate) is str and re.fullmatch(r"PFT_CHAT_SHORTCUT_[A-Z0-9_]{1,64}", candidate):
+                code = candidate
+            if type(error.get("message")) is str and error["message"] in ENGLISH:
+                message = error["message"]
+        shortcut_status.setText(code + "\n" + tr(message))
+        shortcut_status.setVisible(True)
+
+    def shortcut_success():
+        if not dock._closed:
+            shortcut_status.setText("")
+            shortcut_status.setVisible(False)
+
+    toolbar = create_quick_toolbar(content, gui, object_prefix="PhoenixTools_Document",
+        on_error=shortcut_error, on_success=shortcut_success, show_workbench=True,
+        settings_title="读取属性设置", settings_name="PhoenixTools_DocumentPropertySettings")
+    toolbar.buttons["document"].setObjectName("PhoenixTools_DocumentToolsAction")
+    dock._pft_quick_toolbar = toolbar
+    layout.addWidget(toolbar)
+    layout.addWidget(shortcut_status)
     row = widgets.QHBoxLayout()
     row.addWidget(widgets.QLabel(tr("文档")))
     documents = widgets.QComboBox(content)
@@ -231,15 +273,6 @@ def show_document_tools_dialog(app, gui):
     if adjust is not None:
         documents.setSizeAdjustPolicy(adjust)
     row.addWidget(documents, 1)
-    property_settings = widgets.QToolButton(content)
-    property_settings.setObjectName("PhoenixTools_DocumentPropertySettings")
-    property_settings.setText(tr("属性字段"))
-    property_settings.setToolTip(tr("读取属性设置"))
-    property_settings.setIcon(_settings_icon())
-    icon_only = _enum(core.Qt, "ToolButtonStyle", "ToolButtonIconOnly")
-    if icon_only is not None:
-        property_settings.setToolButtonStyle(icon_only)
-    row.addWidget(property_settings)
     refresh = widgets.QPushButton(tr("刷新当前内存"))
     refresh.setObjectName("PhoenixTools_DocumentRefresh")
     layout.addLayout(row)
@@ -301,7 +334,7 @@ def show_document_tools_dialog(app, gui):
     layout.addLayout(_wrapping_button_row(widgets, buttons["markdown"], buttons["export"]))
     state = {"loading": False, "checks": {}, "snapshot": None, "snapshot_instance": None,
              "target_document": None, "target_instances": {},
-             "section_initialized": False, "property_names": None}
+             "section_initialized": False, "property_names": None, "use_user_units": False}
 
     def set_target_expanded(expanded):
         # Presentation only: never refresh CAD, change checks or run an export.
@@ -369,7 +402,7 @@ def show_document_tools_dialog(app, gui):
         update_target_summary()
         try:
             snapshot = tools.read_document_tools(app, gui, document_name=documents.currentData(), target_names=selected(),
-                                                 property_names=state["property_names"])
+                                                 property_names=state["property_names"], use_user_units=state["use_user_units"])
             display(snapshot)
             return snapshot.get("document") is not None
         except Exception as error:
@@ -390,7 +423,7 @@ def show_document_tools_dialog(app, gui):
                 if current is document:
                     target_names = [name for name, obj in targets if document.getObject(name) is obj]
             snapshot = tools.read_document_tools(app, gui, document_name=documents.currentData(),
-                                                 target_names=target_names, property_names=state["property_names"])
+                                                 target_names=target_names, property_names=state["property_names"], use_user_units=state["use_user_units"])
             document_info = snapshot.get("document")
             target_document = app.getDocument(document_info["Name"]) if document_info else None
             state["loading"] = True
@@ -555,12 +588,12 @@ def show_document_tools_dialog(app, gui):
     def configure_properties():
         if state["loading"]:
             return
-        accepted, names = _choose_property_names(core, widgets, dock, state["property_names"])
-        if accepted and names != state["property_names"]:
-            state["property_names"] = names
+        accepted, names, units = _choose_property_names(core, widgets, dock, state["property_names"], state["use_user_units"])
+        if accepted and (names != state["property_names"] or units != state["use_user_units"]):
+            state["property_names"], state["use_user_units"] = names, units
             render()
 
-    property_settings.clicked.connect(lambda _checked=False: configure_properties())
+    toolbar.bind_settings(configure_properties)
     documents.currentIndexChanged.connect(load_targets)
     refresh.clicked.connect(reload_documents)
     for key in ("information", "dimensions", "markdown"):

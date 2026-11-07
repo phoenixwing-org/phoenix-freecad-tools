@@ -44,6 +44,14 @@ class PftThumbnailViewTests(unittest.TestCase):
         self.widgets.QLabel.clear = clear
         self.widgets.QLabel.setPixmap = set_pixmap
         self.widgets.QLabel.setAlignment = lambda label, value: setattr(label, "alignment", value)
+        class PlainTextEdit(self.widgets.QPlainTextEdit):
+            LineWrapMode = types.SimpleNamespace(WidgetWidth=11)
+            def setLineWrapMode(self, value): self.line_wrap_mode = value
+            def setWordWrapMode(self, value): self.word_wrap_mode = value
+            def setFrameShape(self, value): self.frame = value
+            def setHorizontalScrollBarPolicy(self, value): self.horizontal_scroll_policy = value
+        self.widgets.QPlainTextEdit = PlainTextEdit
+        self.text_option = types.SimpleNamespace(WrapMode=types.SimpleNamespace(WrapAtWordBoundaryOrAnywhere=12))
         class Pixmap:
             def loadFromData(self, data, format):
                 self.data = data
@@ -53,9 +61,9 @@ class PftThumbnailViewTests(unittest.TestCase):
             def height(self): return self.dimensions[1]
             def scaled(self, *args): self.scale_args = args; return self
         self.core = types.SimpleNamespace(Qt=types.SimpleNamespace(PlainText=0, AlignCenter=1,
-            KeepAspectRatio=2, SmoothTransformation=3))
+            KeepAspectRatio=2, SmoothTransformation=3, AlignTop=4, ScrollBarAlwaysOff=5))
         qt_patch = patch.object(views, "_qt", return_value=(self.core,
-            types.SimpleNamespace(QPixmap=Pixmap), self.widgets))
+            types.SimpleNamespace(QPixmap=Pixmap, QTextOption=self.text_option), self.widgets))
         qt_patch.start(); self.addCleanup(qt_patch.stop)
         class CaptureError(RuntimeError):
             def __init__(self, code, message): super().__init__(message); self.code, self.message = code, message
@@ -97,10 +105,10 @@ class PftThumbnailViewTests(unittest.TestCase):
 
     def test_reactivation_clears_stale_prompt_and_enables_capture_without_capturing(self):
         self.widget.set_document(self.target, active=False)
-        self.assertIn("请先手动激活", self.named("Status").text)
+        self.assertIn("请先手动激活", self.named("Status").toPlainText())
         self.assertFalse(self.named("CaptureAction").enabled)
         self.widget.set_document(self.target, active=True)
-        self.assertEqual(self.named("Status").text, "尚未生成缩略图。")
+        self.assertEqual(self.named("Status").toPlainText(), "尚未生成缩略图。")
         self.assertEqual(self.named("Preview").text, "尚未生成缩略图。")
         self.assertTrue(self.named("CaptureAction").enabled)
         self.native_loader.assert_not_called()
@@ -119,7 +127,7 @@ class PftThumbnailViewTests(unittest.TestCase):
         activate.assert_called_once_with(self.target)
         self.assertFalse(self.named("ActivateAction").visible)
         self.assertTrue(self.named("CaptureAction").enabled)
-        self.assertEqual(self.named("Status").text, "尚未生成缩略图。")
+        self.assertEqual(self.named("Status").toPlainText(), "尚未生成缩略图。")
         self.native_loader.assert_not_called()
         self.export_loader.assert_not_called()
         self.assertEqual((self.widgets.exec_calls, self.widgets.save_calls), (0, 0))
@@ -130,12 +138,12 @@ class PftThumbnailViewTests(unittest.TestCase):
                                                     self.get_target, on_activate=activate)
         self.widget.set_document(self.target, active=False)
         self.click("ActivateAction")
-        self.assertEqual(self.named("Status").text, "无法激活此文档，请先在 FreeCAD 中切换。")
+        self.assertEqual(self.named("Status").toPlainText(), "无法激活此文档，请先在 FreeCAD 中切换。")
         self.assertFalse(self.named("CaptureAction").enabled)
         self.assertTrue(self.named("ActivateAction").visible)
         # An unchanged follow poll must preserve the explicit activation error.
         self.widget.set_document(self.target, active=False)
-        self.assertEqual(self.named("Status").text, "无法激活此文档，请先在 FreeCAD 中切换。")
+        self.assertEqual(self.named("Status").toPlainText(), "无法激活此文档，请先在 FreeCAD 中切换。")
         activate.reset_mock()
         self.target = "DifferentTarget"
         self.click("ActivateAction")
@@ -164,8 +172,8 @@ class PftThumbnailViewTests(unittest.TestCase):
                                                              512, 512, "transparent", False)
         self.assertEqual(self.named("Preview").pixmap.data, self.data)
         self.assertEqual(self.named("Preview").pixmap.scale_args, (320, 320, 2, 3))
-        self.assertIn("PublicFixture", self.named("Status").text)
-        self.assertIn("2026-01-01T12:00:00Z", self.named("Status").text)
+        self.assertIn("PublicFixture", self.named("Status").toPlainText())
+        self.assertIn("2026-01-01T12:00:00Z", self.named("Status").toPlainText())
         self.assertTrue(self.named("ExportAction").enabled)
         self.export_loader.assert_not_called()
 
@@ -186,6 +194,67 @@ class PftThumbnailViewTests(unittest.TestCase):
         preview.resize(200, 180)
         self.assertIsNone(preview.pixmap)
         self.assertFalse(self.named("ExportAction").enabled)
+
+    def test_status_is_read_only_plain_editor_that_wraps_long_tokens_and_keeps_preview_shrinkable(self):
+        status = self.named("Status")
+        self.assertIsInstance(status, self.widgets.QPlainTextEdit)
+        self.assertTrue(status.readonly)
+        self.assertEqual(status.line_wrap_mode, self.widgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.assertEqual(status.word_wrap_mode, self.text_option.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.assertEqual(status.horizontal_scroll_policy, self.core.Qt.ScrollBarAlwaysOff)
+        self.assertEqual(status.frame, self.widgets.QFrame.NoFrame)
+        self.assertGreater(status.minimum_height, 0)
+        self.assertGreaterEqual(status.maximum_height, status.minimum_height)
+        self.assertLess(status.maximum_height, self.named("Preview").maximum_height)
+        self.assertEqual(status.sizePolicy().horizontalPolicy(), self.widgets.QSizePolicy.Ignored)
+        self.assertLess(self.named("Preview").minimum_height, 180)
+        self.assertEqual(self.named("Preview").maximum_height, 320)
+        self.native_loader.assert_not_called()
+        self.export_loader.assert_not_called()
+        self.get_target.assert_not_called()
+
+    def test_long_status_retains_all_known_warnings_and_resize_does_not_recapture(self):
+        warnings = (
+            "缩略图包含当前三维视图所有可见对象，不按目标勾选过滤。",
+            "缩略图不包含图纸或整个桌面；请检查预览后再导出或分享。",
+            "窗口隐藏、最小化或未完成渲染时，预览可能为空白。",
+        )
+        self.native.TRANSLATABLE_STRINGS = warnings
+        self.capture_value["warnings"] = [*warnings, "untrusted/detail"]
+        self.target = "NeutralLongUnbrokenDocumentName_" + "0123456789" * 12
+        self.capture_value["document"] = self.target
+        self.generate()
+        status = self.named("Status")
+        expected = status.toPlainText()
+        self.assertIn(self.target, expected)
+        self.assertIn(self.capture_value["captured_at"], expected)
+        for message in warnings:
+            self.assertIn(message, expected)
+        self.assertNotIn("untrusted/detail", expected)
+        self.named("Preview").resize(220, 96)
+        self.assertEqual(status.toPlainText(), expected)
+        self.assertEqual(self.named("Preview").pixmap.data, self.data)
+        self.assertEqual(self.named("Preview").pixmap.scale_args, (220, 96, 2, 3))
+        self.assertEqual(self.native.capture_thumbnail.call_count, 1)
+        self.assertTrue(self.named("ExportAction").enabled)
+        self.export_loader.assert_not_called()
+
+    def test_status_plain_text_API_preserves_literal_markup_and_errors_clear_exportable_preview(self):
+        status = self.named("Status")
+        literal = "<b>Neutral &amp; plain text</b>\n<a href='fixture'>literal</a>"
+        status.setPlainText(literal)
+        self.assertEqual(status.toPlainText(), literal)
+        self.generate()
+        self.assertTrue(self.named("ExportAction").enabled)
+        self.native.capture_thumbnail.side_effect = RuntimeError("untrusted/private/detail")
+        self.generate()
+        self.assertIs(self.named("Status"), status)
+        self.assertEqual(status.toPlainText(), "缩略图生成失败；未保存 CAD 文档。")
+        self.assertNotIn("untrusted", status.toPlainText())
+        self.assertIsNone(self.named("Preview").pixmap)
+        self.assertFalse(self.named("ExportAction").enabled)
+        self.assertEqual(self.native.capture_thumbnail.call_count, 2)
+        self.export_loader.assert_not_called()
 
     def test_same_document_preserves_preview_but_changed_invalid_or_inactive_scope_clears_it(self):
         self.generate()
@@ -238,12 +307,12 @@ class PftThumbnailViewTests(unittest.TestCase):
         panel = self.panel_with_thumbnail()
         self.click("CaptureAction")
         preview = self.named("Preview").pixmap
-        caption = self.named("Status").text
+        caption = self.named("Status").toPlainText()
         panel.doc.Label = "Updated synthetic label"
         panel.widgets.click("PhoenixTools_DocumentRefresh")
         self.assertIn(panel.doc.Label, panel.widgets.named("PhoenixTools_DocumentInformation").toPlainText())
         self.assertIs(self.named("Preview").pixmap, preview)
-        self.assertEqual(self.named("Status").text, caption)
+        self.assertEqual(self.named("Status").toPlainText(), caption)
         self.assertTrue(self.named("ExportAction").enabled)
         self.assertEqual(self.native.capture_thumbnail.call_count, 1)
         self.assertEqual(self.widgets.save_calls, 0)
@@ -261,7 +330,7 @@ class PftThumbnailViewTests(unittest.TestCase):
         self.capture_value["document"] = "AnotherFixture"
         self.click("CaptureAction")
         self.assertFalse(self.named("ExportAction").enabled)
-        self.assertIn("预览数据无效", self.named("Status").text)
+        self.assertIn("预览数据无效", self.named("Status").toPlainText())
 
     def test_capture_detects_reentrant_generation_and_scope_change_during_capture(self):
         self.widget.set_document(self.target, active=True)
@@ -301,7 +370,7 @@ class PftThumbnailViewTests(unittest.TestCase):
         self.assertEqual(plan["data"], self.named("Preview").pixmap.data)
         self.exporter.write_png_export.assert_called_once_with(plan, overwrite=False)
         self.assertEqual(self.native.capture_thumbnail.call_count, 1)
-        self.assertEqual(self.named("Status").text, "PNG 已导出；CAD 文档未保存。")
+        self.assertEqual(self.named("Status").toPlainText(), "PNG 已导出；CAD 文档未保存。")
         self.assertEqual(self.widgets.clipboard_calls, 0)
 
     def test_existing_export_defaults_to_cancel_and_confirmation_passes_fingerprint_plan_unchanged(self):
@@ -335,16 +404,16 @@ class PftThumbnailViewTests(unittest.TestCase):
         self.native.TRANSLATABLE_STRINGS = (warning,)
         self.capture_value["warnings"] = [warning, "private/path/untrusted detail"]
         self.generate()
-        self.assertIn("The preview may be blank", self.named("Status").text)
-        self.assertNotIn("private/path", self.named("Status").text)
+        self.assertIn("The preview may be blank", self.named("Status").toPlainText())
+        self.assertNotIn("private/path", self.named("Status").toPlainText())
         self.assertTrue(self.named("ExportAction").enabled)
 
     def test_errors_are_safe_and_fixed_messages_translate_without_native_calls(self):
         i18n.set_language("en")
         self.native.capture_thumbnail.side_effect = RuntimeError("private/path/credential detail")
         self.generate()
-        self.assertEqual(self.named("Status").text, "Thumbnail capture failed. The CAD document was not saved.")
-        self.assertNotIn("private", self.named("Status").text)
+        self.assertEqual(self.named("Status").toPlainText(), "Thumbnail capture failed. The CAD document was not saved.")
+        self.assertNotIn("private", self.named("Status").toPlainText())
         for key in views.TRANSLATABLE_STRINGS:
             if any("\u4e00" <= char <= "\u9fff" for char in key):
                 self.assertNotEqual(i18n.tr(key), key)

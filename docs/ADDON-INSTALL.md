@@ -1,12 +1,12 @@
 # Phoenix Tools — 手工安装 / Manual installation
 
-本说明用于0.3.2统一候选的纯 Python Addon 分发包 `phoenix-freecad-tools-addon-0.3.2.zip`，也可直接作为包内README阅读。0.3.1后未发布的内部0.4–0.10改进合并到此候选，版本号不表示已完成正式发布或全平台验收。本地构建可以运行 `npm run addon:pack`，产物位于忽略提交的 `artifacts/`。是否已经发布，以 [GitHub Releases](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases) 为准；实际插件版本见同目录 `package.xml`。
+本说明用于纯 Python Addon 分发包 `phoenix-freecad-tools-addon-0.3.2.zip`，也可直接作为包内README阅读。正式0.3.2已经发布；当前源码的后续候选继续沿用0.3.2，尚未发布，不能按相同版本号认定内容相同。0.4–0.10是归并前的内部历史，不代表正式发行。核对具体提交、manifest与摘要；正式资产以 [GitHub Releases](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases) 为准，包内版本见 `package.xml`。本地构建可运行 `npm run addon:pack`，产物位于忽略提交的 `artifacts/`。
 
 Phoenix Tools 提供命名修正、正式零件属性填写、Link 名称同步和中文 / English 设置。这些普通工作台按钮**不需要 Node.js、聊天客户端或 API Key**。通过聊天操作 FreeCAD 时，还需要单独安装 Node MCP 并配置支持 MCP 的聊天客户端。
 
 ## 安装前
 
-- 使用带 GUI 的 FreeCAD。优先适配 FreeCAD 1.1.0；macOS、Windows、Linux及各FreeCAD版本的GUI安装、升级和卸载须分别验收。源码测试不证明平台验收通过，具体支持范围以对应发行说明为准。
+- 使用带 GUI 的 FreeCAD。初始兼容目标为FreeCAD1.1.0，macOS FreeCAD1.1.4的有限候选已有独立原生验收；Windows、Linux及其它FreeCAD构建的GUI安装、升级和卸载仍须分别验证。源码测试不证明平台验收通过，具体支持范围以对应发行说明及[验证记录](VERIFICATION.md)为准。
 - 有对应正式 Release 时从上述页面下载 ZIP 与 `SHA256SUMS`（单独构建时为同名 `.zip.sha256`）。macOS/Linux 可用 `shasum -a 256 phoenix-freecad-tools-addon-0.3.2.zip`，Windows PowerShell 可用 `Get-FileHash .\phoenix-freecad-tools-addon-0.3.2.zip -Algorithm SHA256`，将结果与 `SHA256SUMS` 中的同名条目核对。
 - 先保存所有工作。若 Phoenix MCP 正在运行，停止桥接并等待已有请求结束；超时不代表脚本已经取消。确认结束后正常退出 FreeCAD，再安装文件。不要强制关闭仍有未保存修改的会话。
 
@@ -109,7 +109,7 @@ PhoenixFreeCADTools/
 5. Restart FreeCAD and choose **Phoenix Tools**. Ordinary workbench tools and language settings work without Node. Chat access requires the separately installed Node MCP service and client configuration.
 6. Upgrade by replacing the whole directory, never by merging files. This manual ZIP has no installer ownership marker; the npm installer intentionally refuses to manage it. Do not copy or fabricate a marker.
 
-FreeCAD 1.1.0 is the initial compatibility target. Native installation, upgrade and removal require separate tests on every advertised platform and FreeCAD version. This is a manual addon package, not a claim of Addon Manager listing or one-click ZIP support.
+FreeCAD 1.1.0 is the initial compatibility target; the limited macOS 1.1.4 candidate has separate native verification. Other builds and platforms still need their own installation, upgrade and removal checks. The published 0.3.2 and later unpublished source candidates can share the version string; verify their exact assets and hashes. This manual addon package does not imply Addon Manager listing or one-click ZIP support.
 
 源码与问题反馈：[GitHub 仓库](https://github.com/phoenixwing-org/phoenix-freecad-tools) · [Issues](https://github.com/phoenixwing-org/phoenix-freecad-tools/issues)。许可见包内 `LICENSE`，第三方归属与 Logo 来源见 `NOTICE`；FreeCAD 和 Node.js 不包含在本 ZIP 中。
 

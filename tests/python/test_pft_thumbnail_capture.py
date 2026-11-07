@@ -2,6 +2,8 @@
 """Capture guards, in-place camera restoration, and sanitized PNG handoff."""
 import copy
 import importlib.util
+import itertools
+import math
 from pathlib import Path
 import struct
 import sys
@@ -46,6 +48,7 @@ class Field:
         self.kind, self.value = kind, value
         self.default, self.ignored, self.connected = False, False, False
         self.fail = False
+        self.native32 = False
     def getTypeId(self): return TypeId(self.kind)
     def getValue(self): return Value(*self.value) if isinstance(self.value, tuple) else self.value
     def isConnected(self): return self.connected
@@ -57,6 +60,9 @@ class Field:
         if self.fail: raise RuntimeError('private deleted native object')
         value = value[0] if len(value) == 1 else value
         self.value = value.getValue() if isinstance(value, Value) else value
+        if self.native32 and self.kind != 'SFEnum':
+            convert = lambda number: struct.unpack('!f', struct.pack('!f', number))[0]
+            self.value = tuple(convert(number) for number in self.value) if isinstance(self.value, tuple) else convert(self.value)
         self.default = False
 
 
@@ -67,7 +73,7 @@ class Camera:
                        'orientation': Field('SFRotation', (0.0, 0.0, 0.0, 1.0)), 'nearDistance': Field('SFFloat', 0.1),
                        'farDistance': Field('SFFloat', 100.0), 'aspectRatio': Field('SFFloat', 1.3),
                        'focalDistance': Field('SFFloat', 9.0),
-                       'height' if kind == 'OrthographicCamera' else 'heightAngle': Field('SFFloat', 12.0)}
+                       'height' if kind == 'OrthographicCamera' else 'heightAngle': Field('SFFloat', 12.0 if kind == 'OrthographicCamera' else .6)}
         self.fields['position'].default = True
         self.fields['nearDistance'].ignored = True
         self.fits, self.raise_fit = [], False
@@ -104,6 +110,15 @@ class View:
     def setCamera(self, value): raise AssertionError('camera replacement forbidden')
 
 
+class Box:
+    def __init__(self, empty=False, low=(0., 0., 0.), high=(32., 18., 6.)):
+        self.empty, self.low, self.high = empty, low, high
+    def isEmpty(self): return self.empty
+    def getMin(self): return Value(*self.low)
+    def getMax(self): return Value(*self.high)
+    def hasVolume(self): raise AssertionError('flat and line bounds must not be discarded')
+
+
 class ThumbnailCaptureTests(unittest.TestCase):
     def setUp(self):
         self.doc = types.SimpleNamespace(Name='PublicFixture', save=lambda: self.fail('CAD save forbidden'),
@@ -113,9 +128,26 @@ class ThumbnailCaptureTests(unittest.TestCase):
         self.app = types.SimpleNamespace(ActiveDocument=self.doc, getDocument=lambda name: self.doc if name == self.doc.Name else None,
                                          getActiveTransaction=lambda: self.transaction,
                                          setActiveDocument=lambda *args: self.fail('activation forbidden'))
+        self.backend, self.preference_reads = '', []
+        def parameter(path):
+            self.assertEqual(path, 'User parameter:BaseApp/Preferences/View')
+            def get_string(key, default):
+                self.preference_reads.append((key, default))
+                return self.backend
+            return types.SimpleNamespace(GetString=get_string,
+                                         SetString=lambda *args: self.fail('preference writes forbidden'),
+                                         SetBool=lambda *args: self.fail('preference writes forbidden'))
+        self.app.ParamGet = parameter
         self.gui = types.SimpleNamespace(getDocument=lambda name: self.gui_doc, activeDocument=lambda: self.gui_doc,
                                          runCommand=lambda *args: self.fail('GUI commands forbidden'))
         self.coin = types.SimpleNamespace(SbRotation=Value, SbViewportRegion=lambda width, height: (width, height))
+        self.box, self.bounds_calls, self.bounds_after = Box(), [], None
+        def bounds_action(viewport):
+            def apply(scene):
+                self.bounds_calls.append((scene, viewport))
+                if self.bounds_after: self.bounds_after()
+            return types.SimpleNamespace(apply=apply, getBoundingBox=lambda: self.box)
+        self.coin.SoGetBoundingBoxAction = bounds_action
         self.patcher = patch.dict(sys.modules, {'pivy': types.SimpleNamespace(coin=self.coin)})
         self.patcher.start(); self.addCleanup(self.patcher.stop)
 
@@ -136,7 +168,9 @@ class ThumbnailCaptureTests(unittest.TestCase):
                 result = self.call(width=128, height=96)
                 self.assertIs(self.view.node, node)
                 self.assertEqual(capture._camera_snapshot(node), before)
-                self.assertEqual(node.fits, [(self.view.scene, (128, 96), 1.1)])
+                self.assertEqual(node.fits, [(self.view.scene, (128, 96), 1.1)] if kind == 'OrthographicCamera' else [])
+                if kind == 'PerspectiveCamera':
+                    self.assertEqual(self.bounds_calls, [(self.view.scene, (128, 96))])
                 self.assertEqual(self.view.calls[-1], (128, 96, 'White'))
                 self.assertEqual((result['width'], result['height']), (128, 96))
                 self.assertEqual(result['document'], self.doc.Name)
@@ -261,6 +295,62 @@ class ThumbnailCaptureTests(unittest.TestCase):
         self.assert_error('THUMBNAIL_DOCUMENT_CHANGED', self.call)
         self.assertEqual(capture._camera_snapshot(self.view.node), before)
 
+    def on_position_restore(self, callback):
+        armed = [False]
+        events = []
+        original = self.view.node.fields['position'].setValue
+        def set_position(*value):
+            original(*value)
+            if armed[0]:
+                armed[0] = False
+                events.append('position_restored')
+                callback()
+        self.view.node.fields['position'].setValue = set_position
+        self.view.after = lambda: armed.__setitem__(0, True)
+        return events
+
+    def test_restoration_callback_invalidating_target_or_idle_state_rejects_the_image(self):
+        for kind in ('OrthographicCamera', 'PerspectiveCamera'):
+            for transition in ('active_document', 'gui_document', 'view', 'transaction', 'edit'):
+                with self.subTest(camera=kind, transition=transition):
+                    self.setUp()
+                    original_view = self.view
+                    node = self.view.node = Camera(kind)
+                    before = capture._camera_snapshot(node)
+                    foreign = ('NeutralExternalTransaction', 999)
+                    def change():
+                        if transition == 'active_document': self.app.ActiveDocument = None
+                        elif transition == 'gui_document': self.gui.activeDocument = lambda: None
+                        elif transition == 'view': self.view = View()
+                        elif transition == 'transaction': self.transaction = foreign
+                        else: self.editing = object()
+                    events = self.on_position_restore(change)
+                    code = ('THUMBNAIL_DOCUMENT_BUSY' if transition in ('transaction', 'edit')
+                            else 'THUMBNAIL_DOCUMENT_CHANGED')
+                    self.assert_error(code, lambda: self.call(width=32, height=32))
+                    self.assertEqual(events, ['position_restored'])
+                    self.assertEqual(capture._camera_snapshot(node), before)
+                    self.assertEqual(len(original_view.calls), 1)
+                    self.assertFalse(any(path.exists() or path.parent.exists() for path in original_view.paths))
+                    if transition == 'active_document': self.assertIsNone(self.app.ActiveDocument)
+                    if transition == 'transaction': self.assertIs(self.transaction, foreign)
+
+    def test_original_capture_error_is_preserved_when_restoration_also_changes_context(self):
+        before = capture._camera_snapshot(self.view.node)
+        self.view.failure = True
+        self.on_position_restore(lambda: setattr(self.app, 'ActiveDocument', None))
+        self.assert_error('THUMBNAIL_CAPTURE_FAILED', lambda: self.call(width=32, height=32))
+        self.assertEqual(capture._camera_snapshot(self.view.node), before)
+        self.assertIsNone(self.app.ActiveDocument)
+
+    def test_camera_restore_failure_keeps_priority_over_context_failure(self):
+        def fail_restore_and_context():
+            self.view.node.fields['position'].fail = True
+            self.app.ActiveDocument = None
+        self.view.after = fail_restore_and_context
+        self.assert_error('THUMBNAIL_CAMERA_RESTORE_FAILED', self.call)
+        self.assertIsNone(self.app.ActiveDocument)
+
     def test_background_thread_never_reads_native_state(self):
         errors = []
         def worker():
@@ -268,6 +358,191 @@ class ThumbnailCaptureTests(unittest.TestCase):
             except capture.PftThumbnailCaptureError as error: errors.append(error.code)
         thread = threading.Thread(target=worker); thread.start(); thread.join()
         self.assertEqual(errors, ['MAIN_THREAD_REQUIRED'])
+        self.assertEqual(self.view.calls, [])
+
+    def test_perspective_all_mappings_and_output_shapes_use_native_float32_readback(self):
+        for mapping, aspect, size in itertools.product(range(5), (.3, 1., 2.5), ((96, 96), (192, 64), (64, 192))):
+            with self.subTest(mapping=mapping, aspect=aspect, size=size):
+                node = self.view.node = Camera('PerspectiveCamera')
+                node.fields['viewportMapping'].value = mapping
+                node.fields['aspectRatio'].value = aspect
+                for field in node.fields.values():
+                    field.native32 = True
+                    value, default, ignored = field.value, field.default, field.ignored
+                    field.setValue(Value(*value) if isinstance(value, tuple) else value)
+                    field.default, field.ignored = default, ignored
+                before = capture._camera_snapshot(node)
+                observed = []
+                self.view.after = lambda: observed.append(capture._camera_snapshot(node))
+                result = self.call(width=size[0], height=size[1])
+                self.assertTrue(result['camera_restored'])
+                self.assertEqual(capture._camera_snapshot(node), before)
+                # saveImage's synthetic far-plane mutation happens after the
+                # strict pre-render readback; pose and focal remain observable.
+                self.assertGreater(observed[0]['fields']['focalDistance']['value'], 0.)
+                self.assertEqual(node.fits, [])
+
+    def test_empty_flat_line_and_point_bounds_are_not_confused(self):
+        class EmptyBox(Box):
+            def getMin(self): raise AssertionError('empty extrema must not be read')
+            def getMax(self): raise AssertionError('empty extrema must not be read')
+        for box in (EmptyBox(empty=True), Box(high=(32., 18., 0.)), Box(high=(0., 18., 0.)),
+                    Box(low=(2., 3., 4.), high=(2., 3., 4.))):
+            with self.subTest(box=type(box).__name__, high=box.high):
+                self.view.node = Camera('PerspectiveCamera'); self.box = box
+                before = capture._camera_snapshot(self.view.node)
+                result = self.call(width=64, height=64)
+                self.assertTrue(result['camera_restored'])
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+
+    def test_native_integer_sbbool_accepts_empty_and_nonempty_without_reading_empty_extrema(self):
+        class EmptyBox(Box):
+            def getMin(self): raise AssertionError('empty extrema must not be read')
+            def getMax(self): raise AssertionError('empty extrema must not be read')
+        for box in (Box(empty=0), EmptyBox(empty=1)):
+            with self.subTest(empty=box.empty):
+                self.setUp(); self.view.node = Camera('PerspectiveCamera'); self.box = box
+                before = capture._camera_snapshot(self.view.node)
+                result = self.call(width=64, height=64)
+                self.assertTrue(result['camera_restored'])
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+                self.assertEqual(len(self.view.calls), 1)
+
+    def test_invalid_empty_flag_rejects_without_truthiness_or_image_export(self):
+        class TruthinessTrap:
+            def __bool__(self): raise AssertionError('truthiness must not be called')
+        class IntegerSubclass(int):
+            def __eq__(self, other): raise AssertionError('subclass equality must not be called')
+        class HostileMeta(type):
+            def __eq__(self, other): raise AssertionError('metaclass equality must not be called')
+        class NativeImpostor(metaclass=HostileMeta):
+            def __bool__(self): raise AssertionError('impostor truthiness must not be called')
+            def __eq__(self, other): raise AssertionError('impostor equality must not be called')
+        for flag in (None, -1, 2, 0.0, 1.0, '', '0', [], TruthinessTrap(), IntegerSubclass(1), NativeImpostor()):
+            with self.subTest(flag_type=type(flag).__name__):
+                self.setUp(); self.view.node = Camera('PerspectiveCamera'); self.box = Box(empty=flag)
+                before = capture._camera_snapshot(self.view.node)
+                self.assert_error('THUMBNAIL_CAMERA_UNSUPPORTED', self.call)
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+                self.assertEqual(self.view.calls, [])
+
+    def test_bad_bbox_or_camera_projection_rejects_and_restores_without_export(self):
+        for change in ('mapping', 'angle', 'aspect', 'point_precision', 'invalid_extrema', 'bbox_failure'):
+            with self.subTest(change=change):
+                self.setUp(); self.view.node = Camera('PerspectiveCamera')
+                if change == 'mapping': self.view.node.fields['viewportMapping'].value = 9
+                elif change == 'angle': self.view.node.fields['heightAngle'].value = math.pi
+                elif change == 'aspect': self.view.node.fields['aspectRatio'].value = 0.
+                elif change == 'point_precision': self.box = Box(low=(1e30,)*3, high=(1e30,)*3)
+                elif change == 'invalid_extrema': self.box = Box(low=(1., 0., 0.), high=(0., 1., 1.))
+                else: self.bounds_after = lambda: (_ for _ in ()).throw(RuntimeError('private bbox path'))
+                before = capture._camera_snapshot(self.view.node)
+                self.assert_error('THUMBNAIL_CAPTURE_FAILED' if change == 'bbox_failure' else 'THUMBNAIL_CAMERA_UNSUPPORTED', self.call)
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+                self.assertEqual(self.view.calls, [])
+
+    def test_perspective_readback_and_bbox_callbacks_cannot_change_projection_silently(self):
+        for change in ('native_position', 'projection_during_bounds', 'empty_projection_during_bounds'):
+            with self.subTest(change=change):
+                self.setUp(); self.view.node = Camera('PerspectiveCamera')
+                node = self.view.node; before = capture._camera_snapshot(node)
+                if change == 'native_position':
+                    original = node.fields['position'].setValue
+                    first = [True]
+                    def dropped_position(*args):
+                        if first[0]: first[0] = False
+                        else: original(*args)
+                    node.fields['position'].setValue = dropped_position
+                else:
+                    self.bounds_after = lambda: setattr(node.fields['heightAngle'], 'value', 1.0)
+                    if change == 'empty_projection_during_bounds': self.box = Box(empty=True)
+                self.assert_error('THUMBNAIL_CAMERA_UNSUPPORTED', self.call)
+                self.assertEqual(capture._camera_snapshot(node), before)
+                self.assertEqual(self.view.calls, [])
+
+    def test_framebuffer_backend_fit_is_refused_without_preference_or_camera_writes(self):
+        for kind in ('OrthographicCamera', 'PerspectiveCamera'):
+            self.view.node = Camera(kind); self.backend = 'GrabFramebuffer'
+            before = capture._camera_snapshot(self.view.node)
+            self.assert_error('THUMBNAIL_FIT_BACKEND_UNSUPPORTED', self.call)
+            self.assertEqual(capture._camera_snapshot(self.view.node), before)
+        self.assertEqual(self.preference_reads, [('SavePicture', ''), ('SavePicture', '')])
+        self.assertEqual(self.view.calls, [])
+        # Reading an existing framebuffer remains possible without promising
+        # a new camera render. Every capture still reads the safety policy.
+        self.call(width=32, height=32, axonometric_fit=False)
+        self.assertEqual(self.preference_reads[-1], ('SavePicture', ''))
+        self.view.payload = png(2, 2)
+        self.assert_error('THUMBNAIL_CAPTURE_FAILED', lambda: self.call(width=32, height=32, axonometric_fit=False))
+
+    def test_macos_coin_backend_refuses_both_cameras_and_fit_modes_before_native_or_temp_access(self):
+        self.backend = 'CoinOffscreenRenderer'
+        for kind, fit in itertools.product(('OrthographicCamera', 'PerspectiveCamera'), (True, False)):
+            with self.subTest(camera=kind, fit=fit):
+                self.view.node = Camera(kind)
+                before = capture._camera_snapshot(self.view.node)
+                with (patch.object(capture.sys, 'platform', 'darwin'),
+                      patch.dict(sys.modules, {'pivy': None}),
+                      patch.object(self.view, 'getCameraNode') as camera_read,
+                      patch.object(self.view, 'getSceneGraph') as scene_read,
+                      patch.object(self.view, 'saveImage') as export,
+                      patch.object(capture.tempfile, 'TemporaryDirectory') as temporary):
+                    error = self.assert_error('THUMBNAIL_BACKEND_UNSUPPORTED', lambda: self.call(axonometric_fit=fit))
+                    self.assertEqual(error.message, '当前 macOS 的 Coin 离屏后端存在崩溃风险，未捕获缩略图；请选择默认或 FramebufferObject 后端。')
+                    self.assertIn(error.message, capture.TRANSLATABLE_STRINGS)
+                    for operation in (camera_read, scene_read, export, temporary):
+                        operation.assert_not_called()
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+        self.assertEqual(self.preference_reads, [('SavePicture', '')] * 4)
+        self.assertEqual(self.bounds_calls, [])
+        self.assertEqual(self.view.calls, [])
+
+    def test_non_macos_coin_backend_preserves_native_delegate_for_both_fit_modes(self):
+        self.backend = 'CoinOffscreenRenderer'
+        for platform, kind, fit in itertools.product(('linux', 'win32'), ('OrthographicCamera', 'PerspectiveCamera'), (True, False)):
+            with self.subTest(platform=platform, camera=kind, fit=fit):
+                self.view.node = Camera(kind)
+                before = capture._camera_snapshot(self.view.node)
+                with patch.object(capture.sys, 'platform', platform):
+                    result = self.call(width=32, height=32, axonometric_fit=fit)
+                self.assertTrue(result['camera_restored'])
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+        self.assertEqual(len(self.view.calls), 8)
+
+    def test_macos_default_fbo_and_other_exact_native_values_preserve_delegate(self):
+        for backend, kind, fit in itertools.product(('', 'default', 'FramebufferObject', 'unknown-native-default', 'CoinOffscreenRenderer '),
+                                                    ('OrthographicCamera', 'PerspectiveCamera'), (True, False)):
+            with self.subTest(backend=backend, camera=kind, fit=fit):
+                self.backend = backend; self.view.node = Camera(kind)
+                before = capture._camera_snapshot(self.view.node)
+                with patch.object(capture.sys, 'platform', 'darwin'):
+                    result = self.call(width=32, height=32, axonometric_fit=fit)
+                self.assertTrue(result['camera_restored'])
+                self.assertEqual(capture._camera_snapshot(self.view.node), before)
+        self.assertEqual(len(self.view.calls), 20)
+
+    def test_unreadable_backend_is_unknown_with_or_without_fit_before_camera_or_temp_access(self):
+        parameters = (None, lambda _path: object(), lambda _path: (_ for _ in ()).throw(RuntimeError('private preference')),
+                      lambda _path: types.SimpleNamespace(GetString=lambda *_args: None),
+                      lambda _path: types.SimpleNamespace(GetString=lambda *_args: b'CoinOffscreenRenderer'))
+        for fit, parameter in itertools.product((True, False), parameters):
+            with self.subTest(fit=fit, parameter=parameter):
+                with (patch.object(self.app, 'ParamGet', parameter),
+                      patch.object(self.view, 'getCameraNode') as camera_read,
+                      patch.object(self.view, 'saveImage') as export,
+                      patch.object(capture.tempfile, 'TemporaryDirectory') as temporary):
+                    self.assert_error('THUMBNAIL_STATE_UNKNOWN', lambda: self.call(axonometric_fit=fit))
+                    for operation in (camera_read, export, temporary):
+                        operation.assert_not_called()
+        self.assertEqual(self.view.calls, [])
+
+    def test_backend_read_follows_active_view_and_idle_context_checks(self):
+        with patch.object(self.app, 'ParamGet', side_effect=AssertionError('invalid context must not read backend')):
+            for fit in (True, False):
+                self.app.ActiveDocument = None; self.transaction = False
+                self.assert_error('THUMBNAIL_DOCUMENT_CHANGED', lambda: self.call(axonometric_fit=fit))
+                self.app.ActiveDocument = self.doc; self.transaction = True
+                self.assert_error('THUMBNAIL_DOCUMENT_BUSY', lambda: self.call(axonometric_fit=fit))
         self.assertEqual(self.view.calls, [])
 
 

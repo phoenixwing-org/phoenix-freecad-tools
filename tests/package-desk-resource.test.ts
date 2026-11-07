@@ -35,8 +35,16 @@ test('Desk resource has deterministic complete hashes, managed legal bytes and e
   const manifest = JSON.parse(first.manifest.toString('utf8'));
   assert.deepEqual(Object.keys(manifest).sort(), ['addon_dir', 'files', 'installer_entry', 'mcp_entry', 'plugin_version', 'schema_version']);
   assert.equal(manifest.addon_dir, 'addon/PhoenixFreeCADTools'); assert.equal(manifest.mcp_entry, 'dist/cli.mjs');
-  assert.equal(manifest.plugin_version, '0.3.2'); assert.equal(Object.keys(manifest.files).length, first.files.size);
+  assert.equal(manifest.plugin_version, '0.4.1'); assert.equal(Object.keys(manifest.files).length, first.files.size);
   assert.ok(first.files.size <= 512);
+  for (const name of ['pft_drawing_export.py', 'pft_drawing_export_profile.py', 'pft_drawing_export_views.py',
+    'pft_pdf_contract.py', 'pft_pdf_helper.py', 'pft_pdf_qprocess.py', 'pft_pdf_preview_views.py',
+    'pft_drawing_layout.py', 'pft_drawing_layout_profile.py', 'pft_drawing_layout_plan.py', 'pft_drawing_layout_views.py',
+    'pft_draft_layout.py', 'pft_draft_layout_views.py']) {
+    const relative = 'addon/PhoenixFreeCADTools/' + name;
+    assert.deepEqual(first.files.get(relative), fs.readFileSync(path.join(REPO, relative)));
+    assert.equal(manifest.files[relative], sha(fs.readFileSync(path.join(REPO, relative))));
+  }
   for (const [name, bytes] of first.files) {
     assert.equal(sha(bytes), manifest.files[name]); assert.deepEqual(bytes, second.files.get(name));
     assert.ok(!name.split('/').some(part => part.startsWith('.') || ['node_modules', '__pycache__'].includes(part)));
@@ -55,7 +63,7 @@ test('Desk resource has deterministic complete hashes, managed legal bytes and e
   assert.match(bundle, /adapters\/pft-desk-client\.js/); assert.match(first.files.get('NOTICE')!.toString(), /esbuild 0\.28\.2/);
 });
 
-test('relocated actual bundle speaks SDK full25/chat19/worker4 without node_modules', async t => {
+test('relocated actual bundle speaks SDK full28/chat22/worker4 without node_modules', async t => {
   const folder = temporary(t), root = path.join(folder, 'resource');
   await packageDeskResource({ outputDirectory: root });
   const relocated = path.join(folder, 'relocated'); fs.renameSync(root, relocated);

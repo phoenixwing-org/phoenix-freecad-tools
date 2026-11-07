@@ -847,7 +847,7 @@ class PftDocumentReadTests(unittest.TestCase):
     def test_list_types_never_expand_default_bom_or_read_unsupported_list_getters(self):
         values = {"PartNumber": ["public"], "Links": AssertionError("must not read links"),
                   "Vectors": [],
-                  "Placements": AssertionError("must not read placements"), "Tags": ["explicit only"]}
+                  "Placements": [], "Tags": ["explicit only"]}
         kinds = {"PartNumber": "App::PropertyStringList", "Links": "App::PropertyLinkList",
                  "Vectors": "App::PropertyVectorList", "Placements": "App::PropertyPlacementList",
                  "Tags": "App::PropertyStringList"}
@@ -857,9 +857,9 @@ class PftDocumentReadTests(unittest.TestCase):
         self.assertEqual(row["fields"][0]["status"], "unsupported")
         self.assertEqual(picked.bom_reads, [])
         fields = self.read([picked.Name], ["Links", "Vectors", "Placements", "Tags"])["properties"][0]["fields"]
-        self.assertEqual([field["status"] for field in fields], ["unsupported", "empty", "unsupported", "available"])
+        self.assertEqual([field["status"] for field in fields], ["unsupported", "empty", "empty", "available"])
         self.assertEqual(fields[1]["value"], [])
-        self.assertEqual(picked.bom_reads, ["Vectors", "Tags"])
+        self.assertEqual(picked.bom_reads, ["Vectors", "Placements", "Tags"])
 
     def test_explicit_vector_types_copy_raw_components_and_declare_only_type_supported_units(self):
         values = {"Raw": Vector(0.0, -2.5, 3.25), "Offset": Vector(10.0, 0.0, -4.0),
@@ -981,7 +981,7 @@ class PftDocumentReadTests(unittest.TestCase):
 
     def test_vectors_do_not_expand_default_bom_or_fetch_other_property_families(self):
         values = {"PartNumber": Vector(), "Raw": Vector(), "Point": Vector(), "Points": [],
-                  "Placements": AssertionError("must not get placement lists"), "Matrix": AssertionError("must not get matrices"),
+                  "Placements": [], "Matrix": AssertionError("must not get matrices"),
                   "Links": AssertionError("must not get links"), "Python": AssertionError("must not get arbitrary python")}
         kinds = {"PartNumber": "App::PropertyVector", "Raw": "App::PropertyVector", "Point": "App::PropertyPosition",
                  "Points": "App::PropertyVectorList", "Placements": "App::PropertyPlacementList", "Matrix": "App::PropertyMatrix",
@@ -992,8 +992,8 @@ class PftDocumentReadTests(unittest.TestCase):
         self.assertEqual(row["fields"][0]["status"], "unsupported")
         self.assertEqual(picked.bom_reads, [])
         fields = self.read([picked.Name], ["Raw", "Point", "Points", "Placements", "Matrix", "Links", "Python"])["properties"][0]["fields"]
-        self.assertEqual([field["status"] for field in fields], ["available", "available", "empty"] + ["unsupported"] * 4)
-        self.assertEqual(picked.bom_reads, ["Raw", "Point", "Points"])
+        self.assertEqual([field["status"] for field in fields], ["available", "available", "empty", "empty"] + ["unsupported"] * 3)
+        self.assertEqual(picked.bom_reads, ["Raw", "Point", "Points", "Placements"])
 
     def test_vector_renderers_use_only_frozen_dtos_and_keep_unit_coordinate_provenance_visible(self):
         raw, position, vectors = Vector(0.0, -2.5, 3.0), Vector(4.0, 5.0, 6.0), [Vector()]
@@ -1199,7 +1199,7 @@ class PftDocumentReadTests(unittest.TestCase):
 
     def test_transforms_are_explicit_only_and_never_fetch_unsupported_families_or_other_targets(self):
         values = {"PartNumber": Rotation(), "Orientation": Rotation(), "Placement": Placement(),
-                  "Placements": AssertionError("must not read placement lists"),
+                  "Placements": [Placement()],
                   "Matrix": AssertionError("must not read matrices"), "Reference": AssertionError("must not read links")}
         kinds = {"PartNumber": "App::PropertyRotation", "Orientation": "App::PropertyRotation", "Placement": "App::PropertyPlacement",
                  "Placements": "App::PropertyPlacementList", "Matrix": "App::PropertyMatrix", "Reference": "App::PropertyLink"}
@@ -1212,12 +1212,12 @@ class PftDocumentReadTests(unittest.TestCase):
         self.assertEqual(picked.bom_reads, [])
         self.assertEqual(self.read([picked.Name], [])["properties"], [])
         fields = self.read([picked.Name], ["Orientation", "Placement", "Placements", "Matrix", "Reference"])["properties"][0]["fields"]
-        self.assertEqual([field["status"] for field in fields], ["available", "available", "unsupported", "unsupported", "unsupported"])
-        self.assertEqual(picked.bom_reads, ["Orientation", "Placement"])
+        self.assertEqual([field["status"] for field in fields], ["available", "available", "available", "unsupported", "unsupported"])
+        self.assertEqual(picked.bom_reads, ["Orientation", "Placement", "Placements"])
         self.assertEqual(other.bom_reads, [])
         self.assertEqual(values["PartNumber"].accesses, [])
         self.assertEqual(self.read([], ["Placement"])["properties"], [])
-        self.assertEqual(picked.bom_reads, ["Orientation", "Placement"])
+        self.assertEqual(picked.bom_reads, ["Orientation", "Placement", "Placements"])
         self.assertEqual(self.gui.Selection.records, [])
         self.assertIs(self.app.ActiveDocument, self.doc)
 
@@ -1274,6 +1274,93 @@ class PftDocumentReadTests(unittest.TestCase):
                                {name: "App::PropertyPlacement" for name in names}) for index in range(20)]
         with self.assertRaises(tools.PftDocumentToolsError) as error:
             self.read([obj.Name for obj in objects], names)
+        self.assertEqual(error.exception.code, "BOM_PROPERTIES_TOO_LARGE")
+
+    def test_placement_lists_preserve_order_duplicates_units_empty_and_frozen_formatters(self):
+        first = Placement(Vector(-0.0, 12.5, -3.25), Rotation((0.0, -0.5, 0.0, -0.8660254037844386)))
+        values = [first, Placement(), first]
+        picked = PftBomObject(self.doc, "PlacementSequence", {"Positions": values, "Empty": []},
+                              {name: "App::PropertyPlacementList" for name in ("Positions", "Empty")})
+        snapshot = self.read([picked.Name], ["Positions", "Empty"])
+        fields = snapshot["properties"][0]["fields"]
+        field = fields[0]
+        self.assertEqual((field["kind"], field["status"], field["item_count"]), ("placement_list", "available", 3))
+        self.assertEqual(field["value"][0], field["value"][2])
+        self.assertEqual(field["value"][1]["base"], {"x": 0.0, "y": 0.0, "z": 0.0})
+        self.assertEqual(field["component_units"]["base"]["unit"], "mm")
+        self.assertEqual(field["component_units"]["rotation"]["unit"], "1")
+        self.assertEqual(field["unit_system"], "mixed_components")
+        self.assertFalse(field["placement_applied_by_tool"])
+        self.assertFalse(field["link_source_resolved"])
+        self.assertEqual(field["quaternion_normalization"], "not_checked")
+        self.assertEqual((fields[1]["status"], fields[1]["value"], fields[1]["item_count"]), ("empty", [], 0))
+        frozen = json.loads(json.dumps(snapshot, allow_nan=False))
+        reads = list(picked.bom_reads)
+        first.base_value.y = 99.0
+        first.rotation_value.quaternion = (0.0, 0.0, 0.0, 1.0)
+        values[:] = []
+        picked.bom_values = {name: AssertionError("must not reread list") for name in picked.bom_values}
+        for current in (snapshot, frozen):
+            text, markdown = tools.format_information(current), tools.format_markdown(current)
+            self.assertIn('"value":[{"base":{"x":-0.0,"y":12.5,"z":-3.25}', text)
+            self.assertIn('"component_units":{"base":{"unit":"mm"', text)
+            self.assertIn('"rotation":{"unit":"1"', text)
+            self.assertIn(tools.escape_markdown(tools._property_display(field, lambda value: value)), markdown)
+            self.assertNotIn('99.0', text + markdown)
+        self.assertEqual(picked.bom_reads, reads)
+
+    def test_bad_placement_list_member_does_not_publish_a_valid_prefix(self):
+        bad = [object(), Placement(None), Placement(Vector(), Rotation((0.0, 0.0, 0.0, 0.0))),
+               Placement(Vector(), Rotation(RuntimeError("synthetic private failure"))),
+               Placement(AttributeError("unavailable Base"))]
+        for index, value in enumerate(bad):
+            with self.subTest(index=index):
+                picked = PftBomObject(self.doc, "BrokenPlacementList" + str(index), {"Positions": [Placement(), value]},
+                                      {"Positions": "App::PropertyPlacementList"})
+                field = self.read([picked.Name], ["Positions"])["properties"][0]["fields"][0]
+                self.assertEqual(field["status"], "read_failed" if index == 3 else "unknown")
+                self.assertIsNone(field["value"])
+                self.assertEqual(field["item_count"], 2)
+                self.assertFalse(field["truncated"])
+                self.assertNotIn("synthetic private", str(field))
+
+    def test_placement_list_container_and_limits_are_strict_and_whole(self):
+        class OpaqueList(list):
+            def __iter__(self): raise AssertionError("must not iterate non-native list")
+        for value in ((), OpaqueList(), "[]", {"base": []}):
+            with self.subTest(value_type=type(value).__name__):
+                self.assertEqual(tools._property_placement_list(value), {"value": None, "status": "unsupported"})
+        self.assertEqual(tools._property_placement_list([PftOpaqueValue()] * 101), {
+            "value": None, "status": "unknown", "item_count": 101, "truncated": True, "limit_reason": "item_limit"})
+        values = [Placement(), Placement(Vector(1.2345678901234567, -0.0, sys.float_info.max))]
+        expected = tools._property_placement_list(values)
+        size = len(json.dumps(expected["value"], ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        with patch.object(tools, "PFT_MAX_PROPERTY_BYTES", size):
+            self.assertEqual(tools._property_placement_list(values), expected)
+        with patch.object(tools, "PFT_MAX_PROPERTY_BYTES", size - 1):
+            self.assertEqual(tools._property_placement_list(values), {
+                "value": None, "status": "unknown", "item_count": 2, "truncated": True, "limit_reason": "utf8_budget"})
+        at_count = tools._property_placement_list([Placement()] * 100)
+        self.assertEqual(at_count["item_count"], 100)
+        self.assertEqual(at_count["limit_reason"], "utf8_budget")
+        self.assertIsNone(at_count["value"])
+
+    def test_placement_list_is_explicit_and_aggregate_budget_includes_metadata(self):
+        values = {"PartNumber": AssertionError("default does not get placement lists"), "Positions": [Placement()]}
+        picked = PftBomObject(self.doc, "ExplicitPlacementList", values,
+                              {name: "App::PropertyPlacementList" for name in values}, kind="App::Link")
+        default = self.read([picked.Name])
+        self.assertEqual(default["properties"][0]["fields"][0]["status"], "unsupported")
+        self.assertEqual(picked.bom_reads, [])
+        snapshot = self.read([picked.Name], ["Positions"])
+        self.assertEqual(picked.bom_reads, ["Positions"])
+        self.assertFalse(snapshot["properties"][0]["link_source_resolved"])
+        row = snapshot["properties"][0]
+        exact = 2 + len(json.dumps(row, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        with patch.object(tools, "PFT_MAX_PROPERTIES_BYTES", exact):
+            self.assertEqual(self.read([picked.Name], ["Positions"])["properties"], [row])
+        with patch.object(tools, "PFT_MAX_PROPERTIES_BYTES", exact - 1), self.assertRaises(tools.PftDocumentToolsError) as error:
+            self.read([picked.Name], ["Positions"])
         self.assertEqual(error.exception.code, "BOM_PROPERTIES_TOO_LARGE")
 
     def test_list_item_and_utf8_budgets_never_publish_a_partial_value(self):

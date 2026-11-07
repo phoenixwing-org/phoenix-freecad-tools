@@ -32,7 +32,7 @@ class ProtocolTests(unittest.TestCase):
         status = bridge.process_request({"method": "get_status", "params": {}})
         self.assertTrue(status["ok"])
         self.assertEqual(status["data"]["protocol_version"], 1)
-        self.assertEqual(status["data"]["addon_version"], "0.3.2")
+        self.assertEqual(status["data"]["addon_version"], "0.4.1")
         self.assertFalse(status["data"]["running"])
 
     def test_drawing_capability_is_exact_detached_and_input_dispatch_remains_strict(self):
@@ -123,6 +123,125 @@ class ProtocolTests(unittest.TestCase):
         for body in [b'{"method":"ping","method":"view_fit"}', b'{"x":NaN}', b'{"x":Infinity}', b'\xff']:
             with self.assertRaises((ValueError, UnicodeError)):
                 bridge._decode_json(body)
+
+
+class DrawingExportProtocolTests(unittest.TestCase):
+    """Synthetic protocol orchestration, with no CAD, Qt, files or publishing."""
+    def setUp(self):
+        self.params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "export-example"}
+        self.preparing = {"token": "e" * 32, "request_id": "export-example", "state": "preparing"}
+
+    def test_capability_is_exact_detached_and_does_not_probe_runtime(self):
+        expected = {"version": 1, "formats": ["pdf"], "confirmation": "native_capture_and_publish",
+                    "prepare_method": "prepare_drawing_export", "request_method": "request_drawing_export_approval",
+                    "status_method": "get_drawing_export_status", "storage": "memory_only", "saves_document": False,
+                    "max_pdf_bytes": 8388608, "preview_backend": "macos_coregraphics", "projection_verification": "not_checked"}
+        with patch.object(bridge, "_dispatch_gui", side_effect=AssertionError("GUI access")), \
+             patch.object(Path, "stat", side_effect=AssertionError("Runtime file probe")):
+            first = bridge.get_status()
+            self.assertEqual(first["drawing_export"], expected)
+            self.assertTrue(set(bridge._EXPORT_METHODS).issubset(first["supported_methods"]))
+            first["drawing_export"]["formats"].clear()
+            self.assertEqual(bridge.get_status()["drawing_export"], expected)
+
+    def test_prepare_claim_precedes_only_dispatch_and_replay_is_memory_only(self):
+        prepared = {**self.preparing, "state": "prepared"}
+        events = []
+        def claim(params, Error):
+            events.append("claim")
+            self.assertEqual(params, self.params)
+            return len(events) == 1, self.preparing if len(events) == 1 else prepared
+        def dispatch(method, params):
+            events.append("dispatch")
+            self.assertEqual(events, ["claim", "dispatch"])
+            self.assertEqual((method, params), ("prepare_drawing_export", self.params))
+            return prepared
+        with patch.object(bridge._drawing_export, "claim_prepare", side_effect=claim), \
+             patch.object(bridge, "_dispatch_gui", side_effect=dispatch) as native:
+            first = bridge.process_request({"method": "prepare_drawing_export", "params": self.params})
+            second = bridge.process_request({"method": "prepare_drawing_export", "params": self.params})
+        self.assertEqual(first, second)
+        self.assertEqual(first, {"ok": True, "data": prepared})
+        native.assert_called_once()
+
+    def test_preparing_and_terminal_replays_never_dispatch_or_retry(self):
+        for state in ("preparing", "prepared", "awaiting_confirmation", "publishing", "published", "cancelled", "failed", "expired", "unknown"):
+            snapshot = {**self.preparing, "state": state}
+            with self.subTest(state=state), patch.object(bridge._drawing_export, "claim_prepare", return_value=(False, snapshot)), \
+                 patch.object(bridge, "_dispatch_gui") as dispatch:
+                reply = bridge.process_request({"method": "prepare_drawing_export", "params": self.params})
+            self.assertEqual(reply, {"ok": True, "data": snapshot})
+            dispatch.assert_not_called()
+
+    def test_prepare_dispatch_errors_are_forwarded_without_erasing_claim(self):
+        for code in ("GUI_QUEUE_TIMEOUT", "GUI_TIMEOUT", "SERVER_STOPPING", "SERVER_NOT_RUNNING", "INSTANCE_TARGET_MISMATCH"):
+            error = bridge.PftBridgeError(code, "fixed synthetic failure")
+            with self.subTest(code=code), patch.object(bridge._drawing_export, "claim_prepare", return_value=(True, self.preparing)), \
+                 patch.object(bridge._drawing_export, "dispatch_error") as record_error, \
+                 patch.object(bridge, "_dispatch_gui", side_effect=error):
+                reply = bridge.process_request({"method": "prepare_drawing_export", "params": self.params})
+            self.assertEqual(reply["error"]["code"], code)
+            record_error.assert_called_once_with(self.params["requestId"], error)
+
+    def test_status_uses_only_export_memory_route(self):
+        params = {"token": self.preparing["token"]}
+        with patch.object(bridge._drawing_export, "perform", return_value=self.preparing) as perform, \
+             patch.object(bridge, "_dispatch_gui", side_effect=AssertionError("GUI queue")), \
+             patch.object(bridge, "_perform_gui", side_effect=AssertionError("Native imports")):
+            reply = bridge.process_request({"method": "get_drawing_export_status", "params": params})
+        self.assertEqual(reply, {"ok": True, "data": self.preparing})
+        perform.assert_called_once_with("get_drawing_export_status", params, None, None, bridge.PftBridgeError)
+
+    def test_external_path_confirmation_overwrite_and_unknown_fields_never_claim(self):
+        with patch.object(bridge._drawing_export, "claim_prepare") as claim, patch.object(bridge, "_dispatch_gui") as dispatch:
+            for extra in ({"path": "/synthetic/export.pdf"}, {"confirmed": True}, {"overwrite": True}, {"instance": "another"}, {"format": "svg"}):
+                with self.subTest(extra=extra):
+                    self.assertFalse(bridge.process_request({"method": "prepare_drawing_export", "params": {**self.params, **extra}})["ok"])
+            for method in ("request_drawing_export_approval", "get_drawing_export_status"):
+                self.assertFalse(bridge.process_request({"method": method, "params": {"token": self.preparing["token"], "confirmed": True}})["ok"])
+        claim.assert_not_called(); dispatch.assert_not_called()
+
+    def test_export_perform_is_given_its_own_epoch_and_gui_objects(self):
+        app, gui = object(), object()
+        with patch.dict(sys.modules, {"FreeCAD": app, "FreeCADGui": gui}), \
+             patch.object(bridge._drawing_export, "perform", return_value=self.preparing) as perform:
+            reply = bridge._perform_gui("prepare_drawing_export", self.params, _approval_epoch=73)
+        self.assertEqual(reply, self.preparing)
+        perform.assert_called_once_with("prepare_drawing_export", self.params, app, gui, bridge.PftBridgeError, _approval_epoch=73)
+
+
+class DrawingExportClaimIntegrationTests(unittest.TestCase):
+    """Real bounded export registry with a synthetic queue; no native modules."""
+    def setUp(self):
+        export = bridge._drawing_export
+        for obj, key, value in ((export, "_records", type(export._records)()),
+                                (export, "_requests", {}), (export, "_enabled", True), (export, "_epoch", 7),
+                                (bridge, "_service_identity", None), (bridge, "_dispatcher", None), (bridge, "_server", None)):
+            context = patch.object(obj, key, value); context.start(); self.addCleanup(context.stop)
+
+    def test_real_claim_survives_known_and_unknown_queue_outcomes_without_recapture(self):
+        for code, expected in (("GUI_QUEUE_TIMEOUT", "cancelled"), ("GUI_TIMEOUT", "preparing")):
+            params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "real-export-" + code}
+            with self.subTest(code=code), patch.dict(sys.modules, {"FreeCAD": None, "FreeCADGui": None, "PySide": None}), \
+                 patch.object(bridge, "_dispatch_gui", side_effect=bridge.PftBridgeError(code, "synthetic queue outcome")) as dispatch:
+                first = bridge.process_request({"method": "prepare_drawing_export", "params": params})
+                self.assertEqual(first["error"]["code"], code)
+                replay = bridge.process_request({"method": "prepare_drawing_export", "params": params})
+                token = replay["data"]["token"]
+                status = bridge.process_request({"method": "get_drawing_export_status", "params": {"token": token}})
+            self.assertEqual(replay, status)
+            self.assertEqual(replay["data"]["state"], expected)
+            self.assertEqual(replay["data"]["publication_state"], "not_published")
+            dispatch.assert_called_once()
+
+    def test_real_request_conflict_is_rejected_without_dispatch_or_native_imports(self):
+        params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "real-conflict"}
+        with patch.object(bridge, "_dispatch_gui", side_effect=bridge.PftBridgeError("GUI_TIMEOUT", "unknown")) as dispatch:
+            bridge.process_request({"method": "prepare_drawing_export", "params": params})
+            conflict = bridge.process_request({"method": "prepare_drawing_export", "params": {**params, "pageName": "OtherPage"}})
+        self.assertEqual(conflict["error"]["code"], "DRAWING_EXPORT_REQUEST_CONFLICT")
+        self.assertEqual(len(bridge._drawing_export._requests), 1)
+        dispatch.assert_called_once()
 
 
 
@@ -235,6 +354,67 @@ class InstanceAdmissionTests(unittest.TestCase):
             self.assertTrue(self.request("list_documents",target=False)["ok"])
             self.assertEqual(dispatch.call_args.args[2],(bridge._service_identity,self.dispatcher))
 
+    def test_export_guard_and_unknown_token_reject_before_claim_or_query(self):
+        params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "routed-export"}
+        with patch.object(bridge._drawing_export, "claim_prepare") as claim, \
+             patch.object(bridge._drawing_export, "perform") as perform, patch.object(bridge, "_dispatch_gui") as dispatch:
+            self.assertEqual(self.request("prepare_drawing_export", params, target=False)["error"]["code"], "INSTANCE_TARGET_REQUIRED")
+            for method in ("request_drawing_export_approval", "get_drawing_export_status"):
+                self.assertEqual(self.request(method, {"token": "e" * 32})["error"]["code"], "INSTANCE_AFFINITY_UNKNOWN")
+        claim.assert_not_called(); perform.assert_not_called(); dispatch.assert_not_called()
+
+    def test_export_preparing_token_and_request_are_bound_before_gui_and_survive_timeout(self):
+        params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "routed-export"}
+        snapshot = {"token": "e" * 32, "state": "preparing"}
+        def dispatch(method, actual, admission):
+            self.assertEqual((method, actual, admission), ("prepare_drawing_export", params, self.admission))
+            self.assertEqual(bridge._request_origins[params["requestId"]], ("1" * 32, "2" * 32))
+            self.assertEqual(bridge._token_origins[snapshot["token"]], ("1" * 32, "2" * 32))
+            raise bridge.PftBridgeError("GUI_TIMEOUT", "operation may still run")
+        with patch.object(bridge._drawing_export, "claim_prepare", side_effect=[(True, snapshot), (False, snapshot)]), \
+             patch.object(bridge._drawing_export, "dispatch_error") as record_error, \
+             patch.object(bridge, "_dispatch_gui", side_effect=dispatch) as native:
+            self.assertEqual(self.request("prepare_drawing_export", params)["error"]["code"], "GUI_TIMEOUT")
+            self.assertEqual(self.request("prepare_drawing_export", params), {"ok": True, "data": snapshot})
+        native.assert_called_once(); self.assertEqual(record_error.call_count, 1)
+
+    def test_export_request_and_token_never_migrate_to_restarted_service(self):
+        params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "origin-export"}
+        snapshot = {"token": "e" * 32, "state": "preparing"}
+        with patch.object(bridge._drawing_export, "claim_prepare", return_value=(False, snapshot)) as claim, \
+             patch.object(bridge._drawing_export, "perform") as perform, patch.object(bridge, "_dispatch_gui") as dispatch:
+            self.assertTrue(self.request("prepare_drawing_export", params)["ok"])
+            bridge._service_identity = {**self.identity, "service_id": "3" * 32}; self.target["service_id"] = "3" * 32
+            self.assertEqual(self.request("prepare_drawing_export", params)["error"]["code"], "INSTANCE_AFFINITY_MISMATCH")
+            for method in ("request_drawing_export_approval", "get_drawing_export_status"):
+                self.assertEqual(self.request(method, {"token": snapshot["token"]})["error"]["code"], "INSTANCE_AFFINITY_MISMATCH")
+        claim.assert_called_once(); perform.assert_not_called(); dispatch.assert_not_called()
+
+    def test_full_token_origin_table_still_allows_known_prepare_replay(self):
+        params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "known-export"}
+        snapshot = {"token": "e" * 32, "state": "prepared"}
+        bridge._token_origins[snapshot["token"]] = ("1" * 32, "2" * 32)
+        with patch.object(bridge, "_MAX_ORIGINS", 1), \
+             patch.object(bridge._drawing_export, "claim_prepare", return_value=(False, snapshot)), \
+             patch.object(bridge, "_dispatch_gui") as dispatch:
+            self.assertEqual(self.request("prepare_drawing_export", params), {"ok": True, "data": snapshot})
+        dispatch.assert_not_called()
+
+    def test_failed_preparing_token_reservation_never_dispatches_or_drops_dedup(self):
+        params = {"docName": "Example", "pageName": "Page", "format": "pdf", "requestId": "capacity-export"}
+        snapshot = {"token": "e" * 32, "state": "preparing"}
+        bridge._token_origins["f" * 32] = ("1" * 32, "2" * 32)
+        with patch.object(bridge, "_MAX_ORIGINS", 1), \
+             patch.object(bridge._drawing_export, "claim_prepare", return_value=(True, snapshot)), \
+             patch.object(bridge._drawing_export, "dispatch_error") as record_error, \
+             patch.object(bridge, "_dispatch_gui") as dispatch:
+            self.assertEqual(self.request("prepare_drawing_export", params)["error"]["code"], "INSTANCE_AFFINITY_LIMIT")
+        self.assertEqual(record_error.call_args.args[0], params["requestId"])
+        self.assertEqual(record_error.call_args.args[1].code, "INSTANCE_AFFINITY_LIMIT")
+        self.assertEqual(bridge._request_origins[params["requestId"]], ("1" * 32, "2" * 32))
+        self.assertNotIn(snapshot["token"], bridge._token_origins)
+        dispatch.assert_not_called()
+
 
 class SharedConfigurationIntegrationTests(unittest.TestCase):
     """Every startup dependency is synthetic; no listener/thread/config file."""
@@ -248,6 +428,7 @@ class SharedConfigurationIntegrationTests(unittest.TestCase):
         class Dispatcher:
             def __init__(self):
                 self.approval_epoch = None
+                self.export_approval_epoch = None
                 owner.dispatchers.append(self)
                 owner.events.append("dispatcher")
             def close(self): owner.events.append("dispatcher-close")
@@ -281,6 +462,10 @@ class SharedConfigurationIntegrationTests(unittest.TestCase):
             patch.object(bridge._business, "cancel_pending_approvals",
                          side_effect=lambda: self.events.append("cancel-approval")),
             patch.object(bridge._business, "begin_approval_lifecycle", return_value=42),
+            patch.object(bridge._drawing_export, "cancel_pending_approvals",
+                         side_effect=lambda: self.events.append("cancel-export-approval")),
+            patch.object(bridge._drawing_export, "begin_approval_lifecycle",
+                         side_effect=lambda: self.events.append("begin-export-approval") or 73),
         ]
         for context in self.patches:
             context.start()
@@ -289,6 +474,27 @@ class SharedConfigurationIntegrationTests(unittest.TestCase):
                                        side_effect=AssertionError("Unit test read real configuration"))
         self.read = self.read_patch.start()
         self.addCleanup(self.read_patch.stop)
+
+    def test_export_lifecycle_opens_before_serving_and_stops_independently(self):
+        bridge.start_server(12340)
+        self.assertEqual(self.dispatchers[-1].approval_epoch, 42)
+        self.assertEqual(self.dispatchers[-1].export_approval_epoch, 73)
+        self.assertLess(self.events.index("cancel-export-approval"), self.events.index("dispatcher"))
+        self.assertLess(self.events.index("begin-export-approval"), self.events.index("thread-start"))
+        bridge.stop_server()
+        self.assertEqual(self.events.count("cancel-export-approval"), 2)
+        self.assertEqual(self.events.count("cancel-approval"), 2)
+
+    def test_export_lifecycle_start_failure_closes_both_grants_and_owned_listener(self):
+        with patch.object(bridge._drawing_export, "begin_approval_lifecycle", side_effect=RuntimeError("synthetic initialization failure")):
+            with self.assertRaises(bridge.PftBridgeError) as raised:
+                bridge.start_server(12340)
+        self.assertEqual(raised.exception.code, "START_FAILED")
+        self.assertEqual(self.events.count("cancel-export-approval"), 2)
+        self.assertEqual(self.events.count("cancel-approval"), 2)
+        self.assertIn("server-close", self.events); self.assertIn("dispatcher-close", self.events)
+        self.assertNotIn("thread-start", self.events)
+        self.assertIsNone(bridge._service_identity)
 
     def test_discovery_uses_dynamic_port_publishes_only_after_bind_and_cleans_exact_handle(self):
         self.record["settings"]={"schema_version":2,"bridge":{"preferred_port":12345},"discovery":{"enabled":True}}
@@ -450,8 +656,15 @@ class WorkbenchLoaderTests(unittest.TestCase):
     def test_standard_and_explicit_file_loader_register_without_starting_server(self):
         init_gui = BRIDGE_PATH.with_name("InitGui.py")
         registered = []
-        app = types.SimpleNamespace()
-        gui = types.SimpleNamespace(addWorkbench=registered.append)
+        commands, manipulators = {}, []
+        preferences = types.SimpleNamespace(GetString=lambda key, default="": default)
+        app = types.SimpleNamespace(ParamGet=lambda path: preferences)
+        gui = types.SimpleNamespace(
+            addWorkbench=registered.append,
+            addCommand=lambda identifier, command: commands.setdefault(identifier, command),
+            Command=types.SimpleNamespace(get=lambda identifier: commands.get(identifier)),
+            addWorkbenchManipulator=manipulators.append,
+            removeWorkbenchManipulator=manipulators.remove)
         modules = {"FreeCAD": app, "FreeCADGui": gui, "pft_bridge": bridge}
         initial_path = list(sys.path)
         self.addCleanup(lambda: sys.path.__setitem__(slice(None), initial_path))
@@ -463,7 +676,8 @@ class WorkbenchLoaderTests(unittest.TestCase):
                 exec(compile(init_gui.read_text(), str(init_gui), "exec"), namespace)
                 self.assertEqual(sys.modules["pft_workbench_gui"]._addon_dir, str(BRIDGE_PATH.parent))
             start.assert_not_called()
-        self.assertEqual(len(registered), 2)
+        self.assertEqual(len(registered), 1)
+        self.assertEqual(len(manipulators), 1)
         self.assertEqual(registered[0].MenuText, "Phoenix Tools")
 
 
@@ -648,6 +862,23 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(direct, {"state": "awaiting_confirmation"})
         self.assertEqual(job.result, direct)
         self.assertEqual(calls, [("request_part_change_approval", {"token": "synthetic-token"}, {"_approval_epoch": 41})] * 2)
+
+    def test_export_dispatch_keeps_distinct_epoch_for_direct_and_queued_prepare_and_request(self):
+        self.dispatcher.approval_epoch = 41
+        self.dispatcher.export_approval_epoch = 73
+        for method, params in (("prepare_drawing_export", {"requestId": "synthetic-export"}),
+                               ("request_drawing_export_approval", {"token": "synthetic-token"})):
+            calls = []
+            def perform(actual, values, **kwargs):
+                calls.append((actual, values, kwargs))
+                return {"state": "preparing" if actual == "prepare_drawing_export" else "awaiting_confirmation"}
+            with self.subTest(method=method), patch.object(bridge, "_perform_gui", side_effect=perform):
+                direct = self.dispatcher.dispatch(method, params, 1)
+                job = bridge._PftGuiJob(method, params)
+                self.dispatcher.run(job)
+            self.assertEqual(job.result, direct)
+            self.assertEqual(calls, [(method, params, {"_approval_epoch": 73})] * 2)
+        self.assertEqual(self.dispatcher.approval_epoch, 41)
 
     def test_guarded_queued_job_is_rechecked_before_touching_gui(self):
         identity={"version":1,"instance_id":"1"*32,"service_id":"2"*32,"pid":1234,"guard_required":True}

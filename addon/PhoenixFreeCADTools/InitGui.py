@@ -42,4 +42,4 @@ except Exception:
     raise
 
 if _pft_development is not None:
-    _pft_development.register(_pft_gui_module.App, _pft_gui_module.Gui, _pft_gui_module.PftWorkbench)
+    _pft_development.register(_pft_gui_module.App, _pft_gui_module.Gui, type(_pft_gui_module._workbench))

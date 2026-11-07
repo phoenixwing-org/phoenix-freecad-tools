@@ -217,3 +217,57 @@ finally:
     operation: 'create_drawing' }, { status: async () => status, prepare: async () => output.preview }, PftBridgeError);
   assert.deepEqual(returned, prepared);
 });
+
+import { PFT_DRAWING_DRAFT_LAYOUT_CAPABILITY } from '../src/pft-draft-layout-contract.js';
+import { neutralDraftLayouts } from './helpers/pft-draft-layout-fixture.js';
+function draftPreview(blocked = false) {
+  if (blocked) return { ...preview(true), rows: [{ object: input.objects[0], field: 'TechDraw draft node', old: null, new: null,
+    status: 'blocked', reason: 'Neutral complete no-space result.' }], draft_layout: null, draft_layout_reason: 'DRAWING_DRAFT_LAYOUT_NO_SPACE' as const };
+  return { ...preview(), draft_layout: neutralDraftLayouts().plans[0]!, draft_layout_reason: null };
+}
+
+test('新cap才默认发送内部版本1；缺失cap维持完全旧params/旧preview且旧row不另行收紧', async () => {
+  const calls: unknown[] = [];
+  for (const blocked of [false, true]) {
+    const expected = draftPreview(blocked);
+    assert.deepEqual(await pftPrepareDrawing(input, { status: async () => ({ ...status, drawing_draft_layout: PFT_DRAWING_DRAFT_LAYOUT_CAPABILITY }),
+      prepare: async params => { calls.push(params); return expected; } }, PftBridgeError), expected);
+  }
+  assert.deepEqual(calls, Array(2).fill({ docName: input.document, objectNames: input.objects, operation: input.operation, draftLayoutVersion: 1 }));
+  const legacy = preview(); legacy.rows[0]!.unknown_legacy_detail = 'Retained legacy passthrough behavior.';
+  assert.deepEqual(await pftPrepareDrawing(input, { status: async () => status, prepare: async params => {
+    assert.deepEqual(params, { docName: input.document, objectNames: input.objects, operation: input.operation }); return legacy;
+  } }, PftBridgeError), legacy);
+  for (const key of ['draftLayoutVersion', 'draft_layout', 'drawing_draft_layout']) {
+    let touched = false;
+    await assert.rejects(pftPrepareDrawing({ ...input, [key]: 1 }, { status: async () => { touched = true; return status; },
+      prepare: async () => { touched = true; return preview(); } }, PftBridgeError), { code: 'INVALID_ARGUMENT' });
+    assert.equal(touched, false);
+  }
+});
+
+test('present malformed新cap在业务派发前拒绝，不降级或重试旧模式', async () => {
+  for (const capability of [undefined, null, {}, true, { ...PFT_DRAWING_DRAFT_LAYOUT_CAPABILITY, max_result_bytes: 32768 },
+    { ...PFT_DRAWING_DRAFT_LAYOUT_CAPABILITY, extra: true }, { ...PFT_DRAWING_DRAFT_LAYOUT_CAPABILITY, version: 2 }]) {
+    let calls = 0;
+    await assert.rejects(pftPrepareDrawing(input, { status: async () => ({ ...status, drawing_draft_layout: capability }),
+      prepare: async () => { calls++; return preview(); } }, PftBridgeError), { code: 'INVALID_RESPONSE' });
+    assert.equal(calls, 0);
+  }
+});
+
+test('新cap要求paired fields和完整5row绑定；无cap也不接受未协商的新字段', async () => {
+  const good = draftPreview();
+  for (const response of [preview(), { ...preview(), draft_layout: good.draft_layout },
+    { ...preview(), draft_layout_reason: null }, { ...good, draft_layout_reason: 'DRAWING_DRAFT_LAYOUT_NO_SPACE' },
+    { ...good, rows: good.rows.map((row, index) => index === 2 ? { ...row, extra: 'unknown' } : row) },
+    { ...draftPreview(true), draft_layout_reason: null }, { ...draftPreview(true), draft_layout: good.draft_layout },
+    { ...good, draft_layout: { ...good.draft_layout!, source: 'OtherSource' } },
+    { ...good, draft_layout: { ...good.draft_layout!, page: 'OtherPage' } }]) {
+    let calls = 0;
+    await assert.rejects(pftPrepareDrawing(input, { status: async () => ({ ...status, drawing_draft_layout: PFT_DRAWING_DRAFT_LAYOUT_CAPABILITY }),
+      prepare: async () => { calls++; return response; } }, PftBridgeError), { code: 'INVALID_RESPONSE' });
+    assert.equal(calls, 1);
+  }
+  await assert.rejects(pftPrepareDrawing(input, { status: async () => status, prepare: async () => good }, PftBridgeError), { code: 'INVALID_RESPONSE' });
+});

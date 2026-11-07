@@ -58,6 +58,34 @@ class DevelopmentTests(unittest.TestCase):
             with self.assertRaises(development.PftDevelopmentError):
                 development.reload_ui(self.app, self.gui, self.widgets)
 
+    def test_shared_toolbar_reloads_before_both_passive_host_views(self):
+        modules = development.UI_MODULES
+        self.assertLess(modules.index('pft_quick_toolbar'), modules.index('pft_document_tools_views'))
+        self.assertLess(modules.index('pft_quick_toolbar'), modules.index('pft_chat_views'))
+        self.assertNotIn('pft_workbench_gui', modules)
+        self.assertNotIn('pft_chat_qprocess', modules)
+
+    def test_development_command_joins_existing_phoenix_menu_once(self):
+        registrations = []
+        self.gui.addCommand = lambda identifier, command: registrations.append((identifier, command))
+        class Workbench:
+            def __init__(self): self.menus, self.toolbars, self.initialized = [], [], False
+            def appendMenu(self, title, commands): self.menus.append((title, commands))
+            def appendToolbar(self, title, commands): self.toolbars.append((title, commands))
+            def Initialize(self):
+                if not self.initialized:
+                    self.appendMenu('Phoenix', ['PhoenixTools_Help'])
+                    self.initialized = True
+        with patch.object(development, 'configure_bootstrap'):
+            self.assertTrue(development.register(self.app, self.gui, Workbench))
+            self.assertTrue(development.register(self.app, self.gui, Workbench))
+        workbench = Workbench()
+        workbench.Initialize()
+        workbench.Initialize()
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual(workbench.menus, [('Phoenix', ['PhoenixTools_Help']), ('Phoenix', [development.COMMAND])])
+        self.assertEqual(workbench.toolbars, [('Phoenix 开发', [development.COMMAND])])
+
     def test_transactions_edits_and_previews_refuse_without_closing(self):
         dock = Dock('PhoenixTools_DocumentToolsDock', self.window)
         self.children.append(dock)
@@ -140,7 +168,22 @@ class DevelopmentTests(unittest.TestCase):
         qcore = NS(setOrganizationName=lambda value: identity_calls.append(('organization', value)),
                    setOrganizationDomain=lambda value: identity_calls.append(('domain', value)),
                    setApplicationName=lambda value: identity_calls.append(('application', value)))
-        qt = NS(QtCore=NS(QSettings=settings, QCoreApplication=qcore), QtGui=NS(QGuiApplication=NS(platformName=lambda: 'cocoa')))
+        class QObject:
+            def __init__(self, parent): self.owner = parent
+            def parent(self): return self.owner
+        def slot(*types_):
+            def decorate(method): method.slot_types = types_; return method
+            return decorate
+        title_callbacks = []
+        self.window.windowTitleChanged = NS(connect=title_callbacks.append)
+        self.title = 'FreeCAD'
+        self.window.windowTitle = lambda: self.title
+        def set_title(value):
+            self.title = value
+            for callback in title_callbacks: callback(value)
+        self.window.setWindowTitle = set_title
+        qt = NS(QtCore=NS(QSettings=settings, QCoreApplication=qcore, QObject=QObject, Slot=slot),
+                QtGui=NS(QGuiApplication=NS(platformName=lambda: 'cocoa')))
         self.visible = False
         self.window.showNormal = lambda: setattr(self, 'visible', True)
         self.window.raise_ = lambda: calls.append(('raise',))
@@ -148,12 +191,24 @@ class DevelopmentTests(unittest.TestCase):
         self.window.isVisible = lambda: self.visible
         modules = {name: NS(__file__=str(ADDON / (name + '.py')))
                    for name in ('pft_development', 'pft_workbench_gui', 'pft_bridge')}
+        modules['pft_bridge'].ADDON_VERSION = '9.8.7'
         environment = {'PFT_DEVELOPMENT_PROFILE': str(profile), 'PFT_DEVELOPMENT_OWNER_ID': 'synthetic-owner',
-                       'PFT_DEVELOPMENT_RECEIPT': str(receipt), 'PFT_DEVELOPMENT_PORT': '9877'}
+                       'PFT_DEVELOPMENT_RECEIPT': str(receipt), 'PFT_DEVELOPMENT_PORT': '9877',
+                       'PFT_DEVELOPMENT_PURPOSE': 'Neutral task'}
         with patch.dict(os.environ, environment), patch.dict(sys.modules, {**modules, 'PySide': qt}):
             result = development.write_readiness(self.app, self.gui)
             self.assertEqual(self.activated, 'PftWorkbench')
-            self.assertIn('Phoenix Development', self.title)
+            self.assertEqual(self.title, 'Phoenix 9.8.7 开发｜Neutral task｜9877 — FreeCAD')
+            self.assertEqual(result['addon_version'], '9.8.7')
+            self.assertEqual(result['purpose'], 'Neutral task')
+            self.window.setWindowTitle('Neutral document * — FreeCAD')
+            self.assertEqual(self.title, 'Phoenix 9.8.7 开发｜Neutral task｜9877 — Neutral document * — FreeCAD')
+            self.assertNotIn('Neutral document', receipt.read_text())
+            self.assertEqual(len(title_callbacks), 1)
+            receiver = title_callbacks[0].__self__
+            self.assertIsInstance(receiver, QObject)
+            self.assertIs(receiver.parent(), self.window)
+            self.assertEqual(title_callbacks[0].__func__.slot_types, (str,))
             self.assertIs(result['automatic_service_start'], False)
             self.assertTrue(self.properties['PhoenixTools_AutoStartSuppressed'])
             self.assertIs(result['ready'], True)

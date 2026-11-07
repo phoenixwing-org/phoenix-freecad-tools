@@ -160,12 +160,34 @@ class DrawingReferenceTests(unittest.TestCase):
         result = refs.read_edge(self.view, 'Edge0')
         self.assertEqual(result['curve'], 'circle')
         self.assertEqual(result['radius_mm'], 40.)
-        self.assertEqual(result['center'], [-0., 10., 0.])
+        self.assertEqual(result['center'], [-0., -10., 0.])
         self.assertIsNone(result['start'])
         self.assertIsNone(result['end'])
         self.assertEqual(result['supported_kinds'], ['Radius', 'Diameter'])
         json.dumps(result, allow_nan=False)
         refs.edge_signature(result)
+
+    def test_both_native_getters_normalize_y_once_without_mutation_or_rescale(self):
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                start, end = Vector(-2., 12., 0.), Vector(8., -6., 0.)
+                native = Edge(start=start, end=end)
+                if fallback:
+                    self.view.getEdgeBySelection = None
+                    self.view.getEdgeByIndex = lambda index: native
+                else:
+                    self.view.getEdgeBySelection = lambda name: native
+                result = refs.read_edge(self.view, 'Edge0')
+                self.assertEqual(result['start'], [-2., -12., 0.])
+                self.assertEqual(result['end'], [8., 6., 0.])
+                self.assertEqual(result['length_mm'], 600.)
+                self.assertEqual((start.y, end.y), (12., -6.))
+                end.y = 2.
+                self.assertEqual(result['end'][1], 6.)
+                native = Edge(Circle(5., Vector(-15., -10., 0.)), length=math.tau*5., closed=True)
+                result = refs.read_edge(self.view, 'Edge0')
+                self.assertEqual(result['center'], [-15., 10., 0.])
+                self.assertEqual(native.Curve.Center.y, -10.)
 
     def test_open_circle_and_other_curve_do_not_read_unsupported_fields(self):
         class UnknownCurve:

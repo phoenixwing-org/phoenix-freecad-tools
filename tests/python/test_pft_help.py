@@ -86,7 +86,7 @@ class HelpModelTests(unittest.TestCase):
         rows = re.findall(r'^\| `([^`]+)` \| (是|否) \|', markdown, re.M)
         self.assertEqual([name for name, chat in rows], exported('TOOL_NAMES', server))
         self.assertEqual({name for name, chat in rows if chat == '是'}, set(exported('CHAT_TOOL_NAMES', server)))
-        self.assertEqual((len(rows), sum(chat == '是' for name, chat in rows)), (25, 19))
+        self.assertEqual((len(rows), sum(chat == '是' for name, chat in rows)), (28, 22))
         desk = (ROOT / 'src/pft-desk-tools.ts').read_text()
         self.assertEqual(re.findall(r'^\| `(desk_[^`]+)` \|', markdown, re.M), exported('PFT_DESK_TOOL_NAMES', desk))
         self.assertLess(len(markdown.encode('utf-8')), help_model.MAX_HELP_BYTES)

@@ -7,7 +7,10 @@ import { pftPartApproval, PftPartApprovalCapabilitySchema, type PftPartApprovalD
 import { pftPreparePadLength, PftPadLengthCapabilitySchema, type PftPadLengthInput } from '../pft-pad-length.js';
 import { pftPrepareDrawing, PftDrawingCapabilitySchema, type PftDrawingInput } from '../pft-drawing.js';
 import { pftPrepareDrawingDimensions, PftDrawingDimensionsCapabilitySchema, type PftDrawingDimensionsInput } from '../pft-drawing-dimensions.js';
+import { PftDrawingDimensionLayoutCapabilitySchema } from '../pft-drawing-layout-contract.js';
 import { pftInspectDrawingReferences, PftDrawingReferencesCapabilitySchema } from '../pft-drawing-references.js';
+import { pftDrawingExport, PftDrawingExportCapabilitySchema, type PftDrawingExportData,
+  type PftDrawingExportPrepareInput } from '../pft-drawing-export.js';
 import { PFT_THUMBNAIL_WORKER_RESPONSE_BYTES, PftThumbnailWorkerValidationError, pftDecodeThumbnailJob, pftDecodeThumbnailWorkerStatus,
   pftThumbnailJobInput, pftThumbnailRenderInput, type PftThumbnailJob, type PftThumbnailJobInput, type PftThumbnailRenderInput, type PftThumbnailWorkerStatus } from '../pft-thumbnail-worker.js';
 
@@ -157,8 +160,12 @@ export class PftFreeCadClient {
     }
     if ('drawing_dimensions' in status && !PftDrawingDimensionsCapabilitySchema.safeParse(status.drawing_dimensions).success)
       throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件尺寸能力声明格式无效；未派发预览。');
+    if ('drawing_dimension_layout' in status && !PftDrawingDimensionLayoutCapabilitySchema.safeParse(status.drawing_dimension_layout).success)
+      throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件尺寸布局能力声明格式无效；未派发预览。');
     if ('drawing_references' in status && !PftDrawingReferencesCapabilitySchema.safeParse(status.drawing_references).success)
       throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件投影引用能力声明格式无效；未读取。');
+    if ('drawing_export' in status && !PftDrawingExportCapabilitySchema.safeParse(status.drawing_export).success)
+      throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件图纸导出能力声明格式无效；未派发请求。');
     return status;
   }
 
@@ -306,6 +313,18 @@ export class PftFreeCadClient {
   }
   getPartChangeStatus(token: string): Promise<PftPartApprovalData> {
     return pftPartApproval('get_part_change_status', { token }, { status: () => this.status(),
+      call: (method, params) => this.call(method, params) }, PftBridgeError);
+  }
+  prepareDrawingExport(input: PftDrawingExportPrepareInput): Promise<PftDrawingExportData> {
+    return pftDrawingExport('prepare_drawing_export', input, { status: () => this.status(),
+      call: (method, params) => this.call(method, params) }, PftBridgeError);
+  }
+  requestDrawingExportApproval(token: string): Promise<PftDrawingExportData> {
+    return pftDrawingExport('request_drawing_export_approval', { token }, { status: () => this.status(),
+      call: (method, params) => this.call(method, params) }, PftBridgeError);
+  }
+  getDrawingExportStatus(token: string): Promise<PftDrawingExportData> {
+    return pftDrawingExport('get_drawing_export_status', { token }, { status: () => this.status(),
       call: (method, params) => this.call(method, params) }, PftBridgeError);
   }
   applyPartChanges(token: string): Promise<unknown> {

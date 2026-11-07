@@ -605,7 +605,7 @@ def bootstrap(app, gui):
                     if params != {}:
                         _fail('INVALID_PARAMS', 'This method accepts no parameters.')
                     value = {'pong': True} if method == 'ping' else {
-                        'protocol_version': 1, 'addon_name': 'PhoenixFreeCADTools', 'addon_version': '0.3.2',
+                        'protocol_version': 1, 'addon_name': 'PhoenixFreeCADTools', 'addon_version': '0.4.1',
                         'running': not worker.stopped, 'stopping': worker.stopped, 'host': '127.0.0.1',
                         'port': server.server_address[1], 'supported_methods': sorted(METHODS | {'ping', 'get_status'})}
                 else:
@@ -626,7 +626,7 @@ def bootstrap(app, gui):
         window.setWindowTitle('FreeCAD — Phoenix Thumbnail Worker')
         serving.start()
         data = {'schema_version': 1, 'owner': 'phoenix-thumbnail-worker', 'worker_id': worker_id, 'session_id': session_id,
-                'pid': os.getpid(), 'protocol_version': 1, 'addon_version': '0.3.2',
+                'pid': os.getpid(), 'protocol_version': 1, 'addon_version': '0.4.1',
                 'url': 'http://127.0.0.1:' + str(server.server_address[1]) + '/', 'ready': True}
         with os.fdopen(os.open(str(receipt), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'w') as stream:
             receipt_info = os.fstat(stream.fileno())

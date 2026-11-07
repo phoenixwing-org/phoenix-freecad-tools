@@ -11,16 +11,17 @@ import json
 import math
 from pathlib import Path
 import sys
-_MESSAGES = {'DIMENSION_UNSUPPORTED': '当前原生图纸、来源、投影引用或测量类型不支持本次关联尺寸。', 'DIMENSION_PLAN_STALE': '图纸、来源、视图、投影引用或预定名称已变化，请重新预览。', 'DIMENSION_CREATE_FAILED': '关联尺寸节点、引用、位置或原对象保护未通过核对。', 'DIMENSION_RECOMPUTE_UNVERIFIED': '关联尺寸局部重算未通过核对，不会自动重试。', 'DIMENSION_VALUE_UNVERIFIED': '原生关联尺寸量值与预览引用不一致，请检查投影及撤销记录。', 'DIMENSION_NATIVE_CONFIRMATION_REQUIRED': '关联尺寸只能通过原生确认窗口的人工确认回调创建。', 'DIMENSION_RESULT_INVALID': '关联尺寸结果格式未通过核对。'}
+_MESSAGES = {'DIMENSION_UNSUPPORTED': '当前原生图纸、来源、投影引用或测量类型不支持本次关联尺寸。', 'DIMENSION_PLAN_STALE': '图纸、来源、视图、投影引用或预定名称已变化，请重新预览。', 'DIMENSION_CREATE_FAILED': '关联尺寸节点、引用、位置或原对象保护未通过核对。', 'DIMENSION_RECOMPUTE_UNVERIFIED': '关联尺寸局部重算未通过核对，不会自动重试。', 'DIMENSION_VALUE_UNVERIFIED': '原生关联尺寸量值与预览引用不一致，请检查投影及撤销记录。', 'DIMENSION_NATIVE_CONFIRMATION_REQUIRED': '关联尺寸只能通过原生确认窗口的人工确认回调创建。', 'DIMENSION_RESULT_INVALID': '关联尺寸结果格式未通过核对。', 'DIMENSION_LAYOUT_STYLE_UNVERIFIED': '新建尺寸的实际样式与冻结布局不一致或无法核验；请检查当前修改与撤销记录。'}
 
 class PftDrawingDimensionsError(RuntimeError):
 
-    def __init__(self, code):
+    def __init__(self, code, *, cleanup_state='complete'):
         self.code = code if code in _MESSAGES else 'DIMENSION_UNSUPPORTED'
+        self.cleanup_state = 'complete' if type(cleanup_state) is str and cleanup_state == 'complete' else 'unknown'
         super().__init__(_MESSAGES[self.code])
 
-def _fail(code='DIMENSION_UNSUPPORTED'):
-    raise PftDrawingDimensionsError(code)
+def _fail(code='DIMENSION_UNSUPPORTED', *, cleanup_state='complete'):
+    raise PftDrawingDimensionsError(code, cleanup_state=cleanup_state)
 
 def _sibling(name):
     filename = Path(__file__).resolve().with_name(name + '.py')
@@ -297,6 +298,34 @@ def prepare_plan(app, gui, document, page, view, dimensions, controller):
 def _format(kind):
     return '⌀%.2f' if kind == 'Diameter' else 'R%.2f' if kind == 'Radius' else '%.2f'
 
+def _plan_stamp(plan):
+    """Freeze private plan containers without reading or copying native leaves."""
+    count, active = [0], set()
+    def freeze(value, depth=0):
+        count[0] += 1
+        if depth > 64 or count[0] > 100000:
+            _fail('DIMENSION_PLAN_STALE')
+        kind = type(value)
+        if value is None or kind in (bool, int, float, str):
+            return (kind.__name__, value)
+        if kind not in (tuple, list, dict):
+            return ('native', id(value))
+        if id(value) in active or len(value) > 10000:
+            _fail('DIMENSION_PLAN_STALE')
+        active.add(id(value))
+        try:
+            if kind is dict:
+                if any(type(key) is not str for key in value):
+                    _fail('DIMENSION_PLAN_STALE')
+                return ('dict', tuple((key, freeze(value[key], depth + 1)) for key in sorted(value)))
+            return (kind.__name__, tuple(freeze(item, depth + 1) for item in value))
+        finally:
+            active.remove(id(value))
+    stamp = freeze(plan)
+    if len(json.dumps(stamp, ensure_ascii=False, allow_nan=False).encode('utf8')) > 2 * 1024 * 1024:
+        _fail('DIMENSION_PLAN_STALE')
+    return stamp
+
 def _verify_created(app, gui, document, plan, controller, created, owned=None, allow_template_cleaned=False):
     _verify(app, gui, document, plan, controller, owned, created, allow_template_cleaned)
     views = tuple(plan['page'].Views)
@@ -320,17 +349,110 @@ def _verify_created(app, gui, document, plan, controller, created, owned=None, a
     _verify(app, gui, document, plan, controller, owned, created, allow_template_cleaned)
     return tuple(readings)
 
-def apply_plan(app, gui, document, plan, controller):
+def apply_plan(app, gui, document, plan, controller, layout_plan=None):
+    cleanup_unknown = False
+    def preserve_cleanup(error):
+        nonlocal cleanup_unknown
+        try:
+            state = getattr(error, 'cleanup_state', 'complete')
+            if type(state) is not str or state != 'complete':
+                cleanup_unknown = True
+        except Exception:
+            cleanup_unknown = True
+    layout = None
+    native_stamp = frozen_request = layout_context = None
+    def binding():
+        if layout_plan is None:
+            return
+        try:
+            if (type(plan) is not dict or type(layout_plan) is not dict
+                    or layout_plan.get('native_context') is not layout_context
+                    or type(layout_context) is not dict
+                    or layout_context.get('document') is not document
+                    or layout_context.get('page') is not plan['page']
+                    or layout_context.get('view') is not plan['view']
+                    or _plan_stamp(plan) != native_stamp):
+                _fail('DIMENSION_PLAN_STALE')
+            contract = _sibling('pft_drawing_dimensions_contract')
+            if (contract.validate_request(plan['request']) != frozen_request
+                    or contract.validate_request(layout_plan['request']) != frozen_request):
+                _fail('DIMENSION_PLAN_STALE')
+        except PftDrawingDimensionsError:
+            raise
+        except Exception:
+            _fail('DIMENSION_PLAN_STALE')
+    def before_write(owned):
+        owned(before_write=True)
+        binding()
+    def layout_check(owned=None, *, defaults_only=False, styled=()):
+        if layout is None:
+            return
+        if owned is not None:
+            owned()
+        binding()
+        try:
+            layout.verify(app, gui, layout_plan, controller, defaults_only=defaults_only)
+        except Exception as error:
+            preserve_cleanup(error)
+            _fail('DIMENSION_PLAN_STALE', cleanup_state='unknown' if cleanup_unknown else 'complete')
+        binding()
+        if owned is not None:
+            owned()
+        binding()
+        if styled:
+            try:
+                layout.verify_created(app, gui, layout_plan, tuple(styled), controller)
+            except Exception as error:
+                preserve_cleanup(error)
+                _fail('DIMENSION_LAYOUT_STYLE_UNVERIFIED', cleanup_state='unknown' if cleanup_unknown else 'complete')
+            binding()
+            if owned is not None:
+                owned()
+            binding()
+            # Style getters can expose a callback that changes an original
+            # rendering input. Recheck scoped layout inputs after the new ones.
+            try:
+                layout.verify(app, gui, layout_plan, controller, defaults_only=defaults_only)
+            except Exception as error:
+                preserve_cleanup(error)
+                _fail('DIMENSION_PLAN_STALE', cleanup_state='unknown' if cleanup_unknown else 'complete')
+            binding()
+            if owned is not None:
+                owned()
+            binding()
     try:
+        if layout_plan is not None:
+            # Bind identities before entering any native context from the
+            # private layout plan; a similarly named document is insufficient.
+            if type(layout_plan) is not dict or type(layout_plan.get('native_context')) is not dict:
+                _fail('DIMENSION_PLAN_STALE')
+            context = layout_plan['native_context']
+            if (context.get('document') is not document or context.get('page') is not plan['page']
+                    or context.get('view') is not plan['view'] or type(layout_plan.get('request')) is not dict
+                    or layout_plan['request'] != plan['request']):
+                _fail('DIMENSION_PLAN_STALE')
+            frozen_request = _sibling('pft_drawing_dimensions_contract').validate_request(plan['request'])
+            layout_context = context
+            native_stamp = _plan_stamp(plan)
+            layout = _sibling('pft_drawing_layout_plan')
         verify_plan(app, gui, document, plan, controller)
+        if layout is not None:
+            binding()
+            layout_check()
+            # The full GUI/default verification is itself a native read
+            # boundary; keep the established source/edge capture current too.
+            verify_plan(app, gui, document, plan, controller)
+            binding()
         nodes, measured = [], []
+        styled_nodes = []
         recompute_verified = False
 
         def write(owned):
             nonlocal recompute_verified
             for name, item in zip(plan['names'], plan['request']['dimensions']):
                 _verify(app, gui, document, plan, controller, owned, nodes)
-                owned(before_write=True)
+                layout_check(owned, defaults_only=True, styled=styled_nodes)
+                before_write(owned)
                 dim = document.addObject('TechDraw::DrawViewDimension', name)
                 nodes.append(dim)
                 owned(require_pending=True)
@@ -338,16 +460,33 @@ def apply_plan(app, gui, document, plan, controller):
                     _fail('DIMENSION_CREATE_FAILED')
                 for field, value in (('Type', item['kind']), ('MeasureType', 'Projected'), ('Arbitrary', False), ('References3D', []), ('References2D', [(plan['view'], (item['edge'],))]), ('FormatSpec', _format(item['kind']))):
                     owned()
+                    layout_check(owned, defaults_only=True, styled=styled_nodes)
+                    if layout is not None:
+                        before_write(owned)
                     setattr(dim, field, value)
                     owned(require_pending=True)
                 owned()
+                layout_check(owned, defaults_only=True, styled=styled_nodes)
+                if layout is not None:
+                    before_write(owned)
                 plan['page'].addView(dim)
                 owned(require_pending=True)
+                styled_nodes.append(dim)
+                layout_check(owned, defaults_only=True, styled=styled_nodes)
+                if layout is not None:
+                    before_write(owned)
                 dim.X = item['x_mm']
                 owned()
+                layout_check(owned, defaults_only=True, styled=styled_nodes)
+                if layout is not None:
+                    before_write(owned)
                 dim.Y = item['y_mm']
                 owned()
                 _verify(app, gui, document, plan, controller, owned, nodes)
+                layout_check(owned, defaults_only=True, styled=styled_nodes)
+            layout_check(owned, defaults_only=True, styled=styled_nodes)
+            if layout is not None:
+                before_write(owned)
             try:
                 count = document.recompute([plan['page'], *nodes], False, True)
             except Exception:
@@ -359,17 +498,24 @@ def apply_plan(app, gui, document, plan, controller):
             recompute_verified = True
             _verify_created(app, gui, document, plan, controller, nodes, owned,
                             allow_template_cleaned=recompute_verified)
+            layout_check(owned, defaults_only=True, styled=styled_nodes)
 
         def rollback():
             _verify(app, gui, document, plan, controller)
+            layout_check()
 
         def committed():
             measured[:] = _verify_created(app, gui, document, plan, controller, nodes,
                                           allow_template_cleaned=recompute_verified)
+            layout_check(defaults_only=True, styled=styled_nodes)
         controller._run_transaction(app, document, 'Phoenix: add projected drawing dimensions', write, rollback, committed)
         result = {'kind': 'drawing_dimensions', 'page': plan['page'].Name, 'view': plan['view'].Name, 'dimensions': [{'name': name, **item, 'value_mm': value} for name, item, value in zip(plan['names'], plan['request']['dimensions'], measured)], 'measurement_verification': 'native_reference_and_value_checked', 'projection_verification': 'not_checked', 'manual_review_required': True}
         return _sibling('pft_drawing_dimensions_contract').validate_result(result, plan['request'])
-    except (PftDrawingDimensionsError, controller.PftWriteError):
+    except (PftDrawingDimensionsError, controller.PftWriteError) as error:
+        preserve_cleanup(error)
+        if cleanup_unknown:
+            error.cleanup_state = 'unknown'
         raise
-    except Exception:
-        _fail('DIMENSION_CREATE_FAILED')
+    except Exception as error:
+        preserve_cleanup(error)
+        _fail('DIMENSION_CREATE_FAILED', cleanup_state='unknown' if cleanup_unknown else 'complete')

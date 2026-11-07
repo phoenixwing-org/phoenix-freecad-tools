@@ -412,6 +412,10 @@ def show_settings_dialog(app, gui, on_applied=None, bridge_snapshot=None):
         toolbar_choices.setCurrentIndex(1 if options.get("toolbar_button_style") == "icon" else 0)
         toolbar_row.addWidget(toolbar_choices)
         layout.addLayout(toolbar_row)
+        show_primary_menu = widgets.QCheckBox(tr("显示 Phoenix 一级菜单"))
+        show_primary_menu.setObjectName("PhoenixTools_ShowPrimaryMenu")
+        show_primary_menu.setChecked(options["show_primary_menu"])
+        layout.addWidget(show_primary_menu)
         auto_start = widgets.QCheckBox(tr("FreeCAD 启动后自动启动 MCP 桥接"))
         auto_start.setChecked(options["auto_start_mcp"])
         layout.addWidget(auto_start)
@@ -442,7 +446,8 @@ def show_settings_dialog(app, gui, on_applied=None, bridge_snapshot=None):
         layout.addWidget(buttons)
         if _dialog_exec(dialog) != widgets.QDialog.Accepted:
             return
-        settings.save_options(app, choices.currentData(), auto_start.isChecked(), toolbar_choices.currentData())
+        settings.save_options(app, choices.currentData(), auto_start.isChecked(), toolbar_choices.currentData(),
+                              show_primary_menu=show_primary_menu.isChecked())
         if on_applied is not None:
             on_applied()
         _report(gui, tr("工作台设置已更新。"))

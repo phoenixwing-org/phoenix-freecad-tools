@@ -272,7 +272,7 @@ class InterfaceLanguageTests(unittest.TestCase):
 
     def test_native_chat_and_document_tools_fixed_messages_have_real_translations(self):
         filenames = ('pft_chat_views.py', 'pft_chat_settings.py', 'pft_chat_profile.py', 'pft_chat_process_lease.py', 'pft_chat_session_store.py', 'pft_chat_history.py', 'pft_chat_controller.py', 'pft_chat_qprocess.py',
-                     'pft_document_tools.py', 'pft_document_tools_views.py', 'pft_panel_host.py',
+                     'pft_document_tools.py', 'pft_document_tools_views.py', 'pft_panel_host.py', 'pft_pdf_preview_views.py', 'pft_drawing_export_views.py',
                      'pft_visual_tools.py', 'pft_appearance_views.py', 'pft_appearance_controls.py', 'pft_thumbnail.py',
                      'pft_thumbnail_capture.py', 'pft_thumbnail_views.py', 'pft_mcp_settings_views.py')
         for filename in filenames:
@@ -297,6 +297,13 @@ class InterfaceLanguageTests(unittest.TestCase):
                             self.assertIn(message, i18n.ENGLISH, (filename, message))
                         else:
                             self.assertEqual(i18n.tr(message), message)
+
+    def test_draft_plan_fixed_interface_messages_have_english_translations(self):
+        tree = ast.parse((ADDON / 'pft_draft_layout_views.py').read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and type(node.value) is str and re.search('[\u3400-\u9fff]', node.value):
+                self.assertTrue(node.value in i18n.ENGLISH, node.value)
+                self.assertNotRegex(i18n.ENGLISH[node.value], '[\u3400-\u9fff]')
 
     def test_native_chat_translation_does_not_rewrite_input_paths_models_or_ids(self):
         i18n.set_language('en')
@@ -357,8 +364,9 @@ class SettingsDialogTests(unittest.TestCase):
 
     def test_settings_default_flags_cancel_and_restart_notice(self):
         views.show_settings_dialog(self.app, self.gui)
-        self.assertEqual([check.checked for check in self.widgets.checks], [False])
-        self.assertEqual(len(self.widgets.checks), 1)
+        self.assertEqual([check.checked for check in self.widgets.checks], [False, False])
+        self.assertEqual(len(self.widgets.checks), 2)
+        self.assertEqual(self.widgets.checks[0].text, '显示 Phoenix 一级菜单')
         self.assertNotIn('停止 MCP 桥接前确认', [check.text for check in self.widgets.checks])
         self.assertTrue(any('下次 FreeCAD 启动' in label.text for label in self.widgets.labels))
         self.assertEqual(self.preferences.values, {})
@@ -372,7 +380,7 @@ class SettingsDialogTests(unittest.TestCase):
         self.assertIn('桥接地址：127.0.0.1:12345', labels)
         self.assertIn('已加载插件版本：loaded-fixture', labels)
         self.assertEqual(len(self.widgets.combos), 2)
-        self.assertEqual(len(self.widgets.checks), 1)
+        self.assertEqual(len(self.widgets.checks), 2)
         self.assertEqual(self.preferences.writes, [])
 
     def test_settings_confirm_saves_flags_and_language_without_documents_or_mcp(self):
@@ -381,10 +389,11 @@ class SettingsDialogTests(unittest.TestCase):
             self.choose_english()
             self.widgets.combos[1].setCurrentIndex(1)
             self.widgets.checks[0].setChecked(True)
+            self.widgets.checks[1].setChecked(True)
         self.widgets.QDialog.on_exec = choose
         views.show_settings_dialog(self.app, self.gui, lambda: self.refreshed.append(True))
         self.assertEqual(self.preferences.values, {'Language': 'en', 'ToolbarButtonStyle': 'icon'})
-        self.assertEqual(self.preferences.bools, {'AutoStartMCP': True})
+        self.assertEqual(self.preferences.bools, {'AutoStartMCP': True, 'ShowPrimaryMenu': True})
         self.assertEqual(self.refreshed, [True])
 
     def test_settings_dialog_uses_compact_defaults_and_wrapped_shrinkable_labels(self):
@@ -419,7 +428,15 @@ class SettingsDialogTests(unittest.TestCase):
             lambda: self.refreshed.append(settings.load_toolbar_button_style(self.app)))
         self.assertEqual(self.preferences.values["ToolbarButtonStyle"], "icon_text")
         self.assertEqual(self.refreshed, ["icon_text"])
-        self.assertEqual(self.preferences.bools, {"AutoStartMCP": False})
+        self.assertEqual(self.preferences.bools, {"AutoStartMCP": False, "ShowPrimaryMenu": False})
+
+    def test_primary_menu_choice_is_applied_only_after_successful_persistence(self):
+        self.widgets.QDialog.result = 1
+        self.widgets.QDialog.on_exec = lambda: self.widgets.checks[0].setChecked(True)
+        views.show_settings_dialog(self.app, self.gui,
+            lambda: self.refreshed.append(settings.load_primary_menu_visible(self.app)))
+        self.assertEqual(self.refreshed, [True])
+        self.assertIs(self.preferences.bools[settings.SHOW_PRIMARY_MENU_KEY], True)
 
     def test_status_dialog_uses_supplied_snapshot_and_explains_chat_connection_boundary(self):
         snapshot = {'running': True, 'stopping': True, 'host': '127.0.0.1', 'port': 12345,

@@ -19,7 +19,7 @@ function fixture(t: TestContext) {
   t.after(()=>rmSync(directory,{recursive:true,force:true}));return directory;
 }
 function record(instance_id=A,service_id=S,url='http://127.0.0.1:9988/') {
-  return {schema_version:1,owner:'phoenix-freecad-tools',instance_id,service_id,pid:123,url,protocol_version:1,addon_version:'0.3.2'};
+  return {schema_version:1,owner:'phoenix-freecad-tools',instance_id,service_id,pid:123,url,protocol_version:1,addon_version:'0.4.1'};
 }
 function publish(directory:string,value=record(),raw?:string) {
   const path=join(directory,value.instance_id+'.json');writeFileSync(path,raw??JSON.stringify(value),{mode:0o600});chmodSync(path,0o600);return path;
@@ -27,7 +27,7 @@ function publish(directory:string,value=record(),raw?:string) {
 async function bridge(t:TestContext,id=A,service=S) {
   const calls:Array<{method:string;params:Record<string,unknown>;target?:unknown}>=[];
   let seenDocument!:()=>void;const documentStarted=new Promise<void>(resolve=>{seenDocument=resolve;});
-  const state={service,guard:true,guardStatus:false,routing:true,hold:false,addon:'0.3.2',release:()=>{}, statusId:id};
+  const state={service,guard:true,guardStatus:false,routing:true,hold:false,addon:'0.4.1',release:()=>{}, statusId:id};
   const server=httpServer(async(req,res)=>{
     let text='';for await(const chunk of req)text+=chunk;const body=JSON.parse(text);calls.push(body);
     res.setHeader('Content-Type','application/json');
@@ -75,7 +75,8 @@ test('registry rejects duplicate decoded fields, float integer literals and arbi
   const dir=fixture(t),base=JSON.stringify(record());
   const bad=[base.replace('{','{"\\u0075rl":"http://127.0.0.1:9988/",'),base.replace('"pid":123','"pid":1.23e2'),base.replace('"schema_version":1','"schema_version":1.0'),
     base.replace('"pid":123','"pid":true'),base.replace('"pid":123','"pid":9007199254740992'),base.replace('"url":"http://127.0.0.1:9988/"','"url":"http://localhost:9988/"'),
-    base.replace('"owner":"phoenix-freecad-tools"','"owner":"other"'),base.replace('"addon_version":"0.3.2"','"addon_version":"9.0.0"'),base.replace('}',',"private":"not accepted"}'),'{"nested":{}}'];
+    base.replace('"owner":"phoenix-freecad-tools"','"owner":"other"'),base.replace('"addon_version":"0.4.1"','"addon_version":"9.0.0"'),
+    base.replace('"addon_version":"0.4.1"','"addon_version":"0.3.2"'),base.replace('"addon_version":"0.4.1"','"addon_version":"0.4.0"'),base.replace('}',',"private":"not accepted"}'),'{"nested":{}}'];
   for(const raw of bad){publish(dir,record(),raw);assert.throws(()=>pftReadInstanceRegistry({directory:dir}),{code:'INSTANCE_REGISTRY_INVALID'});}
 });
 test('registry refuses symlinks hardlinks nonprivate modes unknown entries oversized files and bounded counts',t=>{
@@ -125,10 +126,10 @@ test('router lists only exact registered endpoints and classifies incompatible a
   const bRequest=b.calls[0]!;assert.deepEqual(bRequest.target,{instance_id:B,service_id:T});
   assert.ok(a.calls.every(c=>c.method==='get_status'));assert.ok(b.calls.every(c=>c.method==='get_status'));
 });
-test('MCP discovery advertises 27 tools offline, requires selection, routes scripts and blocks affinity migration',async t=>{
+test('MCP discovery advertises 30 tools offline, requires selection, routes scripts and blocks affinity migration',async t=>{
   const dir=fixture(t),a=await bridge(t),b=await bridge(t,B,T);publish(dir,record(A,S,a.url));publish(dir,record(B,T,b.url));
   const client=await mcp(t,{freecadUrl:'http://127.0.0.1:1/',timeoutMs:300,instanceDiscovery:{runtimeDirectory:dir}});
-  const tools=await client.listTools();assert.equal(tools.tools.length,27);assert.ok(tools.tools.some(v=>v.name==='select_freecad_instance'));
+  const tools=await client.listTools();assert.equal(tools.tools.length,30);assert.ok(tools.tools.some(v=>v.name==='select_freecad_instance'));
   const capabilities=data(await client.callTool({name:'get_capabilities',arguments:{}}));assert.equal(a.calls.length+b.calls.length,0);assert.equal(capabilities.structuredContent.ok,true);
   const ambiguous=data(await client.callTool({name:'list_documents',arguments:{}}));assert.equal(ambiguous.structuredContent.error?.code,'INSTANCE_SELECTION_REQUIRED');
   await client.callTool({name:'select_freecad_instance',arguments:{instanceId:A,serviceId:S}});
@@ -137,10 +138,10 @@ test('MCP discovery advertises 27 tools offline, requires selection, routes scri
   const mismatch=data(await client.callTool({name:'get_script_status',arguments:{requestId:'fixture-request'}}));assert.equal(mismatch.structuredContent.error?.code,'INSTANCE_AFFINITY_MISMATCH');
   assert.equal(b.calls.filter(c=>c.method==='get_script_status').length,0);
 });
-test('MCP legacy surfaces stay 25/19/4 and programmatic chat/worker discovery is rejected',async t=>{
-  for(const scope of ['full','chat','worker'] as const){const client=await mcp(t,{freecadUrl:'http://127.0.0.1:1/',timeoutMs:100,toolScope:scope});const list=await client.listTools();assert.equal(list.tools.length,scope==='full'?25:scope==='chat'?19:4);}
+test('MCP legacy surfaces stay 28/22/4 and programmatic chat/worker discovery is rejected',async t=>{
+  for(const scope of ['full','chat','worker'] as const){const client=await mcp(t,{freecadUrl:'http://127.0.0.1:1/',timeoutMs:100,toolScope:scope});const list=await client.listTools();assert.equal(list.tools.length,scope==='full'?28:scope==='chat'?22:4);}
   for(const toolScope of ['chat','worker'] as const)assert.throws(()=>createServer({freecadUrl:'http://127.0.0.1:1/',timeoutMs:100,toolScope,instanceDiscovery:{runtimeDirectory:'/not-read'}}),{code:'INSTANCE_SCOPE_UNSUPPORTED'});
-  assert.equal(TOOL_NAMES.length,25);assert.equal(CHAT_TOOL_NAMES.length,19);
+  assert.equal(TOOL_NAMES.length,28);assert.equal(CHAT_TOOL_NAMES.length,22);
 });
 
 
@@ -179,10 +180,10 @@ test('resolver and registry refuse symlink ancestors and do not follow unsafe ex
   assert.throws(()=>pftReadInstanceRegistry({directory:join(linked,'missing')}),{code:'INSTANCE_REGISTRY_INVALID'});
   assert.throws(()=>pftReadInstanceRegistry({directory:home+'/./'}),{code:'INSTANCE_REGISTRY_INVALID'});
 });
-test('full discovery plus optional Desk advertises 32 tools without registry or Desk IO',async t=>{
+test('full discovery plus optional Desk advertises 35 tools without registry or Desk IO',async t=>{
   const client=await mcp(t,{freecadUrl:'http://127.0.0.1:1/',timeoutMs:100,instanceDiscovery:{runtimeDirectory:'/must-not-be-read'},
     desk:{nodeExecutable:'/fixture/node',cliEntry:'/fixture/desk.mjs',stateDir:'/fixture/state'}});
-  assert.equal((await client.listTools()).tools.length,32);const manifest=data(await client.callTool({name:'get_capabilities',arguments:{}}));assert.equal(manifest.structuredContent.ok,true);
+  assert.equal((await client.listTools()).tools.length,35);const manifest=data(await client.callTool({name:'get_capabilities',arguments:{}}));assert.equal(manifest.structuredContent.ok,true);
 });
 
 

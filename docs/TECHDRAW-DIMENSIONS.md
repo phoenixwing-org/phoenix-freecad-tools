@@ -1,6 +1,6 @@
 # TechDraw 关联尺寸与投影引用
 
-当前候选保持0.3.2。完整与聊天模式使用同一条原生确认链；默认完整/聊天工具数量仍为25/19。`add_drawing_dimensions` 是 `prepare_part_changes` 的新操作，和基础 `create_drawing` 分开，不在预览时创建临时对象。
+正式0.3.2的基础完整/聊天工具为25/19；后续未发布源码候选沿用0.3.2版本号，新增独立PDF导出入口后为28/22。尺寸创建在完整与聊天模式使用同一条原生确认链；`add_drawing_dimensions` 是 `prepare_part_changes` 的操作，和基础 `create_drawing` 分开，不在预览时创建临时对象。
 
 ## 先读取真实引用
 
@@ -15,6 +15,8 @@
 `projected_geometry.items`逐项返回原生投影索引：**TechDraw从Edge0开始**，与三维 `Shape.Edge1` 不同。窗口最多50项，索引范围0–2047；缺边、读取失败、不支持曲线分别表达。过滤后的 `getVisibleEdges()`列表顺序不是Edge编号，不能自行enumerate后拼名称。窗口没有可确认总数，`total_count:null/enumeration_complete:false`不表示完整枚举。
 
 可用直线返回未缩放端点及长度，闭圆返回中心、半径和周长；单位mm，坐标是视图局部、未缩放的Qt Y向下投影坐标，不是全局三维位置。线长或圆直径是**投影**测量，不承诺斜视图中的数值等于三维制造尺寸。不得再次乘除图纸Scale。
+
+原生`getEdgeBySelection/getEdgeByIndex`实际先翻转显示缓存Y并除以比例，返回Y向上的值；读取适配在复制DTO时统一翻Y一次，保持上述公开v1坐标合同，不改原生边或向量。不要把原生getter值直接当此DTO，也不要根据旧源码注释重复旋转、居中或施加父Placement。[原生转换](https://github.com/FreeCAD/FreeCAD/blob/1.1.4/src/Mod/TechDraw/App/DrawViewPartPyImp.cpp#L851-L928)、[翻转实现](https://github.com/FreeCAD/FreeCAD/blob/1.1.4/src/Mod/TechDraw/App/ShapeUtils.cpp#L225-L255)。
 
 显式view查询还给受支持的既有尺寸返回`native_measurement`：原生`getRawValue()`的缓存mm值、类型和状态。只读五种Projected尺寸且Arbitrary=False；零、非有限或未知状态不伪装成有效量值，角度、真实三维测量和人为显示值覆盖暂不支持。调用量值getter前先核对所有引用属于该文档的注册实例；跨文档、未注册或不支持引用不读量值。它不读取屏幕标签，也不证明投影已更新。
 
@@ -38,7 +40,7 @@
 
 图框须为本页独占、无表达式的原生SVG Template，身份、原生文件/嵌入引用、文本、宽高和方向均冻结，不额外打开模板文件。首次打开图页可能因FreeCAD回填图框属性而产生`Touched`；允许保留这个标记，不清状态或自动更新整个文档。确认前图框内容或状态变化仍使旧计划失效；只在本次受控局部重算后，允许其他冻结值完全相同时由原生清除图框的`Touched`。这不证明投影已完成，其他对象的原有状态检查保持。
 
-`xMm/yMm`是FreeCAD尺寸对象相对视图中心的**纸面mm偏移**，沿用原生X/Y方向，和未缩放投影端点不同。位置须有限且在±1000 mm内，不自动布局或避让。重复的(edge,kind)拒绝；预定新名已存在也拒绝，不修改已有尺寸来凑成功。
+`xMm/yMm`是FreeCAD尺寸对象相对视图中心的**纸面mm偏移**，沿用原生X/Y方向，和未缩放投影端点不同。位置须有限且在±1000 mm内；显式行不参与位置改写。开发候选可另用严格`{edge,kind,placement:"auto"}`并独立协商[布局能力](TECHDRAW-LAYOUT-PLAN.md)，正式0.3.2及旧插件不支持这个自动行。重复的(edge,kind)拒绝；预定新名已存在也拒绝，不修改已有尺寸来凑成功。
 
 预览列出每个新节点、原投影引用、类型、缓存几何估算值和偏移。完整预览展示给用户后，用原token调用`request_part_change_approval`，等待用户亲自在FreeCAD确认。外部`apply_part_changes`始终拒绝此操作，包括已成功token的重放；等待或请求已接受不表示写入。
 
@@ -52,6 +54,8 @@
 
 独立自建Body/Pad/Pocket在Scale 1、0.5、0.1和0.05下，通过正式SDK/stdio→HTTP→GUI主线程、完整预览和原生按钮自动化创建五类尺寸，首次打开图页后，回读真实引用/数值/格式，并检查取消、单次撤销/重做、成功后禁止外部apply、过期视图及化妆边拒绝。已有原生尺寸的页面再追加另一类尺寸也已检查。源模型保持，CAD未保存。另一个独立Part::Feature的关联尺寸在QA明确修改来源后，由原生异步投影从600更新为800；没有重发创建或伪造数值；同一正式MCP检查接口读回800，旧摘要路由仍不读取量值。图框和五类符号已在QA导出图像中目视检查，该图像未进入源码包。验收按钮自动化不代替实际用户批准。
 
-FreeCAD Python没有公开完整HLR pending状态；非空边、Up-to-date或两次相同缓存都不能证明当前投影完成。这里不泵GUI事件、不嵌套等待投影或自动重试未知写入。新增尺寸后的人工检查、标注完整性、关联拓扑在编辑后的稳定性、图纸布局、孔槽/螺纹、公差、导出和各平台仍分别验收。批量PDF/DXF不在本操作内。
+FreeCAD Python没有公开完整HLR pending状态；非空边、Up-to-date或两次相同缓存都不能证明当前投影完成。这里不泵GUI事件、不嵌套等待投影或自动重试未知写入。新增尺寸后的人工检查、标注完整性、关联拓扑在编辑后的稳定性、孔槽/螺纹、公差及更多平台仍分别验收。尺寸位置建议的有限开发候选已通过Part/Body预先安排页面的正式MCP、原生确认、五类auto/混合写入及单次撤销重做，计112项检查。随后独立验证了[默认新草稿留白](TECHDRAW-DRAFT.md)：中性Part和Sketch→Pad→Pocket Body不手调视图位置或比例，完成两次原生确认及五类自动尺寸，共147项检查。两阶段证据分别记录，不证明任意模型或制造图完整性。
+
+单页PDF已有独立的未发布[导出候选](TECHDRAW-EXPORT-PLAN.md)：macOS FreeCAD1.1.4受限Part::Feature/Body、三视图及五类尺寸已验证正式MCP、冻结预览、Qt文件选择信号和明确最终发布。文件选择在默认Cocoa配置下由QA预填并调用Qt `accept()`，系统保存面板的Save/Cancel动作及原生完成回调仍待独立验收。该证据不替代用户手工验收、官方模型聊天调用、任意图纸保真或制造审签，具体范围及保留失败见[验证记录](VERIFICATION.md)。SVG产品导出与跨平台仍待验；批量PDF/DXF不在本操作内。
 
 依据：[投影边索引与缩放](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/TechDraw/App/DrawViewPartPyImp.cpp#L786-L857)、[原生关联尺寸](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/TechDraw/App/DrawViewDimension.cpp#L462-L594)、[原生量值接口](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/TechDraw/App/DrawViewDimensionPyImp.cpp#L36-L45)、[化妆边/中心线加入缓存](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/TechDraw/App/CosmeticExtension.cpp)、[首次绘制解析图框](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/TechDraw/Gui/QGISVGTemplate.cpp#L199-L209)、[图框宽高和方向回填](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/TechDraw/App/DrawSVGTemplate.cpp#L164-L189)。

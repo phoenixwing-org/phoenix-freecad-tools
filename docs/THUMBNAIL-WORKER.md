@@ -41,6 +41,8 @@ ready 回执不代表已渲染、CAD 已验证或 Desk 缓存已登记。已有�
 
 渲染固定为白底、轴测Fit，复用完整相机恢复和反验。有GUI状态时沿用保存的材质与可见性；无GUI材质状态时由FreeCAD原生ViewProvider使用默认材质，只恢复明确记录的可见性，不伪称读取过保存的GUI材质。全部明确隐藏的文件仍可生成白图；格式正确和任务done都不证明视觉内容合格。尺寸1–1024且最多1048576像素，净化 PNG 最多4 MiB；结果附`input_revision`、图像SHA256/尺寸/字节数、`camera_restored=true`、`documents_closed=true`、`saved_cad=false`与`worker_reusable=true`。不接受脚本、任意输出目录、材质覆盖或保存开关。Node 重新验证PNG、CRC、压缩数据、元数据净化与摘要；worker控制响应预算6 MiB，PNG Base64只出现在structuredContent一份，文本只含摘要。
 
+共享捕获器已修正透视构图的裁切并兼容Pivy的原生SbBool整数；默认图像后端在独立内存样件通过三种画幅与五种mapping的图像检查，另有隐藏、点线面、恢复回调及`FramebufferObject`的有限补验，详细范围见[验证记录](VERIFICATION.md#透视缩略图构图与原生布尔兼容)。`GrabFramebuffer`的轴测Fit明确拒绝；macOS显式选择`CoinOffscreenRenderer`时，无论Fit开关均在捕获前拒绝，避免已观察到的原生退出，不自动换后端。这批是直接捕获及预览按钮验收，不把它外推为更新后的worker实际批次、其它平台或Coin渲染已通过。
+
 成功必须发生在源反验、关闭任务文档和清理副本之后。创建文档观察器在打开前安装；打开异常也只能关闭仍匹配任务副本与对象身份的文档。未知文档、编辑/事务、身份丢失或清理失败使 worker 隔离，不执行close-all，不关闭外来文档，不继续下一文件。
 
 Desk 接收成功PNG后，另行原子发布外部缓存并登记来源。缓存生成不调用旧`regenerateThumbnail()`写回包装器；FCStd内嵌缩略图与CAD保存是另一项明确授权的写盘操作。这里没有缓存数据库或工作空间导航能力。

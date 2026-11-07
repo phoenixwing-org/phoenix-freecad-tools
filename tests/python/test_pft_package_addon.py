@@ -37,7 +37,7 @@ class AddonPackageTests(unittest.TestCase):
 
     def archive(self):
         version, data = packager.build_archive(self.root)
-        self.assertEqual(version, "0.3.2")
+        self.assertEqual(version, "0.4.1")
         return data, zipfile.ZipFile(BytesIO(data))
 
     def test_archive_covers_every_shipped_module_and_contains_verifiable_legal_files(self):
@@ -50,7 +50,8 @@ class AddonPackageTests(unittest.TestCase):
             self.assertTrue(all(name.startswith("PhoenixFreeCADTools/") for name in names))
             self.assertEqual(len(names), len(set(names)))
             manifest = json.loads(archive.read("PhoenixFreeCADTools/MANIFEST.json"))
-            self.assertEqual(manifest["version"], "0.3.2")
+            self.assertEqual(manifest["version"], "0.4.1")
+            self.assertIn("pft_quick_toolbar.py", manifest["files"])
             self.assertEqual(set(names), {"PhoenixFreeCADTools/" + name for name in manifest["files"]} | {"PhoenixFreeCADTools/MANIFEST.json"})
             for name, digest in manifest["files"].items():
                 self.assertEqual(sha256(archive.read("PhoenixFreeCADTools/" + name)).hexdigest(), digest)
@@ -94,7 +95,7 @@ class AddonPackageTests(unittest.TestCase):
     def test_missing_module_and_version_drift_prevent_packaging(self):
         version_file = self.root / "addon/PhoenixFreeCADTools/package.xml"
         content = version_file.read_text()
-        version_file.write_text(content.replace("0.3.2", "0.1.0"))
+        version_file.write_text(content.replace("<version>0.4.1</version>", "<version>0.1.0</version>"))
         with self.assertRaisesRegex(ValueError, "versions must agree"):
             packager.build_archive(self.root)
         version_file.write_text(content)
@@ -123,16 +124,27 @@ from pathlib import Path
 import sys, types
 addon = Path(sys.argv[1])
 registered = []
-sys.modules['FreeCAD'] = types.SimpleNamespace()
-sys.modules['FreeCADGui'] = types.SimpleNamespace(addWorkbench=registered.append)
+commands, manipulators = {}, []
+preferences = types.SimpleNamespace(GetString=lambda key, default='': default)
+sys.modules['FreeCAD'] = types.SimpleNamespace(ParamGet=lambda path: preferences)
+sys.modules['FreeCADGui'] = types.SimpleNamespace(
+    addWorkbench=registered.append,
+    addCommand=lambda identifier, command: commands.setdefault(identifier, command),
+    Command=types.SimpleNamespace(get=lambda identifier: commands.get(identifier)),
+    addWorkbenchManipulator=manipulators.append,
+    removeWorkbenchManipulator=manipulators.remove)
 bootstrap = addon / 'InitGui.py'
 exec(compile(bootstrap.read_text(), str(bootstrap), 'exec'), {'__name__': 'FreeCADLoader'}, {'Workbench': type('WorkbenchBase', (), {})})
 assert len(registered) == 1
+assert len(manipulators) == 1
+assert set(commands) == {'PhoenixTools_ChatConnection', 'PhoenixTools_DocumentTools',
+    'PhoenixTools_Settings', 'PhoenixTools_DeskTools', 'PhoenixTools_Help', 'PhoenixTools_GlobalMenu',
+    'PhoenixTools_AxonometricFit', 'PhoenixTools_Appearance'}
 assert registered[0].MenuText == 'Phoenix Tools'
 assert Path(registered[0].Icon).is_file()
 import pft_bridge as bridge
 assert bridge.get_status()['running'] is False
-assert bridge.get_status()['addon_version'] == '0.3.2'
+assert bridge.get_status()['addon_version'] == '0.4.1'
 ''', str(addon)], capture_output=True, text=True, timeout=15, cwd=mod)
         self.assertEqual(result.returncode, 0, result.stderr)
 

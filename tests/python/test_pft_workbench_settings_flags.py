@@ -105,7 +105,7 @@ class WorkbenchSettingsFlagsTests(unittest.TestCase):
 
     def test_unset_full_options_have_safe_defaults_and_do_not_write(self):
         self.assertEqual(settings.load_options(self.app), {
-            "language": "zh", "toolbar_button_style": "icon_text", "auto_start_mcp": False})
+            "language": "zh", "toolbar_button_style": "icon_text", "show_primary_menu": False, "auto_start_mcp": False})
         self.assertEqual(self.preferences.writes, [])
         self.assertEqual(self.preferences.strings, {})
         self.assertEqual(self.preferences.bools, {})
@@ -115,7 +115,7 @@ class WorkbenchSettingsFlagsTests(unittest.TestCase):
         self.preferences.strings[settings.LANGUAGE_KEY] = "en"
         self.preferences.bools[settings.AUTO_START_KEY] = True
         self.assertEqual(settings.load_options(self.app), {
-            "language": "en", "toolbar_button_style": "icon_text", "auto_start_mcp": True})
+            "language": "en", "toolbar_button_style": "icon_text", "show_primary_menu": False, "auto_start_mcp": True})
         self.assertEqual(i18n.get_language(), "en")
         self.assertEqual(self.preferences.writes, [])
 
@@ -310,15 +310,62 @@ class WorkbenchSettingsFlagsTests(unittest.TestCase):
                     "auto_start_mcp": True})
                 self.assertEqual(i18n.get_language(), "zh")
                 self.assertEqual(settings.load_options(app), {
-                    "language": "en", "toolbar_button_style": "icon_text", "auto_start_mcp": True})
+                    "language": "en", "toolbar_button_style": "icon_text", "show_primary_menu": False, "auto_start_mcp": True})
                 self.assertEqual(i18n.get_language(), "en")
                 self.assertIs(preferences.bools[legacy_key], value)
                 self.assertEqual(set(preferences.reads), {
                     ("Bool", settings.AUTO_START_KEY),
+                    ("Bool", settings.SHOW_PRIMARY_MENU_KEY),
                     ("String", settings.LANGUAGE_KEY),
                     ("String", settings.TOOLBAR_BUTTON_STYLE_KEY)})
                 self.assertEqual(preferences.writes, [])
                 self.assertEqual(preferences.removals, [])
+
+    def test_primary_menu_defaults_hidden_and_reader_has_no_other_effect(self):
+        i18n.set_language("en")
+        for stored, expected in ((None, False), (False, False), (True, True), (1, False), ("true", False)):
+            preferences = Preferences(bools={} if stored is None else {settings.SHOW_PRIMARY_MENU_KEY: stored})
+            self.assertIs(settings.load_primary_menu_visible(App(preferences)), expected)
+            self.assertEqual(preferences.reads, [("Bool", settings.SHOW_PRIMARY_MENU_KEY)])
+            self.assertEqual(preferences.writes, [])
+            self.assertEqual(i18n.get_language(), "en")
+        self.assertIs(settings.load_primary_menu_visible(object()), False)
+
+    def test_primary_menu_is_persisted_in_same_batch_and_legacy_save_preserves_it(self):
+        settings.save_options(self.app, "en", False, "icon", show_primary_menu=True)
+        self.assertEqual(self.app.persist_calls, ["User parameter"])
+        self.assertIs(settings.load_options(self.app)["show_primary_menu"], True)
+        self.assertIs(self.app.disk_bools[settings.SHOW_PRIMARY_MENU_KEY], True)
+        self.preferences.writes.clear()
+        settings.save_options(self.app, "zh", False)
+        self.assertIs(self.preferences.bools[settings.SHOW_PRIMARY_MENU_KEY], True)
+        self.assertNotIn((settings.SHOW_PRIMARY_MENU_KEY, True), self.preferences.writes)
+
+    def test_primary_menu_write_failure_restores_all_choices_and_exact_key_absence(self):
+        for original in (None, False, True):
+            for failure in ("fail_key", "ignore_key"):
+                initial = {settings.AUTO_START_KEY: False}
+                if original is not None:
+                    initial[settings.SHOW_PRIMARY_MENU_KEY] = original
+                preferences = Preferences(strings={settings.LANGUAGE_KEY: "zh"}, bools=initial)
+                setattr(preferences, failure, settings.SHOW_PRIMARY_MENU_KEY)
+                app = App(preferences)
+                i18n.set_language("zh")
+                with self.subTest(original=original, failure=failure):
+                    with self.assertRaises(settings.PftSettingsError):
+                        settings.save_options(app, "en", True, "icon", show_primary_menu=not bool(original))
+                    self.assertEqual(preferences.strings, {settings.LANGUAGE_KEY: "zh"})
+                    self.assertEqual(preferences.bools, initial)
+                    self.assertEqual(app.disk_bools, initial)
+                    self.assertEqual(i18n.get_language(), "zh")
+
+    def test_invalid_requested_menu_visibility_never_reads_or_writes_preferences(self):
+        for value in (None, 0, 1, "true", []):
+            with self.subTest(value=value), self.assertRaises(settings.PftSettingsError):
+                settings.save_options(self.app, "en", True, show_primary_menu=value)
+        self.assertEqual(self.app.groups, [])
+        self.assertEqual(self.preferences.writes, [])
+        self.assertEqual(i18n.get_language(), "zh")
 
     def test_retired_confirmation_preference_survives_saving_and_rollback(self):
         legacy_key = "ConfirmStopMCP"
@@ -366,7 +413,7 @@ class WorkbenchSettingsFlagsTests(unittest.TestCase):
                 raise RuntimeError("/Users/synthetic-private/native/fixture-only.py")
         self.app.saveParameter = failing_first_save
         with self.assertRaises(settings.PftSettingsError) as failure:
-            settings.save_options(self.app, "en", True, "icon")
+            settings.save_options(self.app, "en", True, "icon", show_primary_menu=True)
         self.assertEqual(failure.exception.code, "PREFERENCE_PERSIST_FAILED")
         self.assertNotIn("synthetic-private", str(failure.exception))
         self.assertEqual(self.app.persist_calls, ["User parameter", "User parameter"])

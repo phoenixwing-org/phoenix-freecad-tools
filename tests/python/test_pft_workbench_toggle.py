@@ -9,10 +9,13 @@ INIT_GUI = Path(__file__).resolve().parents[2] / "addon" / "PhoenixFreeCADTools"
 
 
 class Action:
-    def __init__(self):
+    def __init__(self, command_name=None):
+        self.command_name = command_name
         self.text = ""
         self.icon = ""
         self.enabled = True
+        self.visible = True
+        self.visibility_writes = []
         self.icon_text = ""
         self.widgets = []
         self.objects = []
@@ -25,6 +28,10 @@ class Action:
     def setStatusTip(self, value): self.status_tip = value
     def setIcon(self, value): self.icon = value
     def setEnabled(self, value): self.enabled = value
+    def property(self, name): return self.command_name if name == "CommandName" else None
+    def setVisible(self, value):
+        self.visible = value
+        self.visibility_writes.append(value)
 
 
 class ToolButton:
@@ -95,11 +102,14 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.status = {"running": False, "stopping": False, "port": 9876}
         self.calls = []
         self.commands = {}
+        self.command_registrations = []
+        self.manipulators = []
         self.actions = {}
         self.command_queries = []
         self.registered = []
         self.status_dialogs, self.confirmations, self.single_shots = [], [], []
         self.visual_calls = []
+        self.native_calls = []
         self.confirm_stop = lambda: True
         self.window = types.SimpleNamespace(timers=[], buttons=[])
         self.window_properties = {}
@@ -128,8 +138,11 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.gui = types.SimpleNamespace(
             addWorkbench=self.registered.append,
             addCommand=self.add_command,
+            addWorkbenchManipulator=self.manipulators.append,
+            removeWorkbenchManipulator=self.manipulators.remove,
             getMainWindow=lambda: self.window,
             Command=types.SimpleNamespace(get=self.get_command),
+            runCommand=self.run_command,
         )
         self.qt = types.SimpleNamespace(ToolButtonIconOnly="icons-only", ToolButtonTextBesideIcon="text-beside-icon", ToolButtonStyle=types.SimpleNamespace(ToolButtonIconOnly="icons-only", ToolButtonTextBesideIcon="text-beside-icon"))
         Timer.singleShot = staticmethod(lambda delay, callback: self.single_shots.append((delay, callback)))
@@ -142,6 +155,7 @@ class WorkbenchToggleTests(unittest.TestCase):
             "pft_workbench_tools": types.SimpleNamespace(show_rename_dialog=lambda: None, show_properties_dialog=lambda: None, show_link_labels_dialog=lambda: None, show_desk_dialog=lambda: None, show_document_tools_dialog=lambda: None,
             show_chat_connection_dialog=lambda: None,
             show_help_dialog=lambda: self.visual_calls.append("help"),
+            show_settings_dialog=lambda on_applied: on_applied(),
             run_axonometric_fit=lambda: self.visual_calls.append("axonometric_fit"),
             show_appearance_dialog=lambda: self.visual_calls.append("appearance"),
                 show_mcp_status_dialog=lambda snapshot: self.status_dialogs.append(snapshot), confirm_mcp_stop=confirm),
@@ -158,19 +172,32 @@ class WorkbenchToggleTests(unittest.TestCase):
         set_language("zh")
 
         class Workbench:
-            def appendMenu(self, name, commands): self.menu_commands = list(commands)
-            def appendToolbar(self, name, commands): self.toolbar_commands = list(commands)
+            def appendMenu(self, name, commands): self.menu_name, self.menu_commands = name, list(commands)
+            def appendToolbar(self, name, commands): self.toolbar_name, self.toolbar_commands = name, list(commands)
         self.namespace = {"__file__": str(INIT_GUI), "__name__": "PhoenixToggleUITest", "_bootstrap_workbench_base": Workbench}
         exec(compile(INIT_GUI.read_text(), str(INIT_GUI), "exec"), self.namespace)
 
     def add_command(self, name, command):
+        self.command_registrations.append(name)
+        if name in self.commands:
+            raise AssertionError("Native command IDs must not be registered twice")
         self.commands[name] = command
+        if hasattr(command, "GetCommands"):
+            self.actions[name] = [Action(identifier.encode("ascii")) for identifier in command.GetCommands()]
+            return
         self.actions[name] = Action()
         self.window.buttons.append(ToolButton(self.actions[name]))
 
     def get_command(self, name):
         self.command_queries.append(name)
-        return types.SimpleNamespace(getAction=lambda: [self.actions[name]])
+        if name not in self.commands:
+            return None
+        return types.SimpleNamespace(getAction=lambda: self.actions[name] if isinstance(self.actions[name], list) else [self.actions[name]])
+
+    def run_command(self, identifier, argument):
+        self.native_calls.append((identifier, argument))
+        if self.commands[identifier].IsActive():
+            self.commands[identifier].Activated()
 
     def start(self):
         self.calls.append("start")
@@ -192,8 +219,12 @@ class WorkbenchToggleTests(unittest.TestCase):
         toolbar = ["PhoenixTools_MCPStatus", "PhoenixTools_ToggleMCP", "PhoenixTools_Settings", "PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance", "PhoenixTools_NormalizeNames", "PhoenixTools_SyncLinkLabels", "PhoenixTools_EditPartProperties", "PhoenixTools_DeskTools", "PhoenixTools_ChatConnection", "PhoenixTools_Help"]
         expected = toolbar
         self.assertEqual(workbench.menu_commands, expected)
+        self.assertEqual(workbench.menu_name, "Phoenix")
+        self.assertEqual(workbench.toolbar_name, "Phoenix Tools")
+        self.assertEqual(workbench.MenuText, "Phoenix Tools")
         self.assertEqual(workbench.toolbar_commands, toolbar)
-        self.assertEqual(list(self.commands), expected)
+        self.assertEqual(set(self.commands), set(expected) | {"PhoenixTools_GlobalMenu"})
+        self.assertEqual(len(self.command_registrations), len(self.commands))
         self.assertEqual(self.calls, [])
         self.assertEqual(action.text, "启动 MCP · 已停止")
         self.assertTrue(action.icon.endswith("mcp-start.svg"))
@@ -211,6 +242,8 @@ class WorkbenchToggleTests(unittest.TestCase):
             self.status["running"] = running
             command.refresh_actions(force=True)
             for identifier, registered in self.commands.items():
+                if identifier == "PhoenixTools_GlobalMenu":
+                    continue
                 with self.subTest(identifier=identifier, running=running):
                     resources = registered.GetResources()
                     self.assertEqual(resources["CmdType"], "NoTransaction")
@@ -314,19 +347,23 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.assertTrue(action.icon.endswith("mcp-start.svg"))
         self.assertFalse(self.status["running"])
 
-    def test_reinitialization_retires_only_own_timer(self):
+    def test_reinitialization_reuses_commands_and_timer(self):
         workbench, command, _ = self.initialize()
         previous = command._timer
+        registrations = list(self.command_registrations)
         workbench.Initialize()
-        self.assertTrue(previous.stopped)
-        self.assertTrue(previous.deleted)
-        self.assertIsNot(workbench._mcp_command._timer, previous)
+        self.assertFalse(previous.stopped)
+        self.assertFalse(previous.deleted)
+        self.assertIs(workbench._mcp_command._timer, previous)
+        self.assertEqual(self.command_registrations, registrations)
         self.assertEqual(len([timer for timer in self.window.timers if not timer.deleted]), 1)
 
     def test_toolbar_defaults_business_icons_and_text_and_three_compact_controls(self):
         workbench, command, action = self.initialize()
         controls = {"PhoenixTools_MCPStatus", "PhoenixTools_ToggleMCP", "PhoenixTools_Settings"}
         for name, own_action in self.actions.items():
+            if name == "PhoenixTools_GlobalMenu":
+                continue
             button = next(button for button in self.window.buttons if button.action is own_action)
             self.assertEqual(button.style, "icons-only" if name in controls else "text-beside-icon")
             self.assertEqual(button.accessible_name, own_action.text)
@@ -350,6 +387,8 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.preferences.values["ToolbarButtonStyle"] = "icon_text"
         command._timer.callback()
         for name, own_action in self.actions.items():
+            if name == "PhoenixTools_GlobalMenu":
+                continue
             button = next(button for button in self.window.buttons if button.action is own_action)
             self.assertEqual(button.style, "icons-only" if name in command.TOOLBAR_COMMANDS[:3] else "text-beside-icon")
         self.assertEqual(unrelated.style_writes, [])
@@ -386,12 +425,13 @@ class WorkbenchToggleTests(unittest.TestCase):
         _, command, action = self.initialize()
         own = next(button for button in self.window.buttons if button.action is action)
         unrelated = next(button for button in self.window.buttons if button.action is not action)
+        unrelated_style = unrelated.style
         action.widgets = [Container([own, unrelated])]
         own.style = "text-beside-icon"
         self.window.findChildren = lambda kind: (_ for _ in ()).throw(AssertionError("must prefer associated widgets"))
         self.namespace["_PftMCPActionCommand"].refresh_actions(command, force=True)
         self.assertEqual(own.style, "icons-only")
-        self.assertEqual(unrelated.style, "icons-only")
+        self.assertEqual(unrelated.style, unrelated_style)
 
     def test_qt6_associated_objects_and_scoped_enum_hide_only_own_text(self):
         _, command, action = self.initialize()
@@ -436,6 +476,46 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.assertEqual(action.text, "Start MCP · Stopped")
         self.assertEqual(self.commands["PhoenixTools_NormalizeNames"].GetResources()["MenuText"], "Normalize labels")
         self.assertEqual(self.commands["PhoenixTools_Settings"].GetResources()["ToolTip"], "Choose the Phoenix Tools interface language and bridge startup options.")
+        self.assertEqual(self.calls, [])
+
+    def test_language_refresh_shortens_only_the_menu_containing_own_actions(self):
+        workbench, command, action = self.initialize()
+        class Menu:
+            def __init__(self, title, actions):
+                self.value, self.items, self.menu_action = title, actions, Action()
+                self.menu_action.menu = lambda: self
+            def title(self): return self.value
+            def actions(self): return self.items
+            def setTitle(self, value): self.value = value
+            def menuAction(self): return self.menu_action
+        own = Menu("&Phoenix Tools", [self.actions["PhoenixTools_DocumentTools"]])
+        foreign = Menu("Phoenix Tools", [Action()])
+        foreign_exact = Menu("Phoenix", [Action()])
+        tools = Menu("Tools", self.actions["PhoenixTools_GlobalMenu"])
+        self.window.menuBar = lambda: types.SimpleNamespace(actions=lambda: [
+            own.menu_action, foreign.menu_action, foreign_exact.menu_action, tools.menu_action])
+        for language in ("en", "zh"):
+            self.namespace["settings"].save_language(self.app, language)
+            workbench.refresh_language()
+            self.assertEqual(own.title(), "Phoenix")
+            self.assertEqual(foreign.title(), "Phoenix Tools")
+            self.assertEqual(workbench.MenuText, "Phoenix Tools")
+            self.assertFalse(own.menu_action.visible)
+            self.assertTrue(foreign.menu_action.visible)
+            self.assertTrue(foreign_exact.menu_action.visible)
+            self.assertTrue(tools.menu_action.visible)
+        timer = command._timer
+        self.namespace["settings"].save_options(self.app, "zh", False, show_primary_menu=True)
+        workbench.refresh_language()
+        self.assertTrue(own.menu_action.visible)
+        self.namespace["settings"].save_options(self.app, "zh", False, show_primary_menu=False)
+        workbench.Activated()
+        self.assertFalse(own.menu_action.visible)
+        self.assertIs(command._timer, timer)
+        self.assertEqual(foreign_exact.menu_action.visibility_writes, [])
+        self.assertEqual(tools.menu_action.visibility_writes, [])
+        self.assertTrue(all(item.visible and not item.visibility_writes
+                            for item in self.actions["PhoenixTools_GlobalMenu"]))
         self.assertEqual(self.calls, [])
 
     def test_action_icons_are_neutral_gray_and_status_icons_are_colored_circles(self):
@@ -500,6 +580,81 @@ class WorkbenchToggleTests(unittest.TestCase):
     def reload_gui(self):
         exec(compile(INIT_GUI.read_text(), str(INIT_GUI), "exec"), self.namespace)
 
+    def test_bootstrap_registers_global_entries_without_opening_ui_or_initializing_mcp(self):
+        entries = {"PhoenixTools_ChatConnection", "PhoenixTools_DocumentTools",
+                   "PhoenixTools_Settings", "PhoenixTools_DeskTools", "PhoenixTools_Help",
+                   "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance"}
+        self.assertEqual(set(self.commands), entries | {"PhoenixTools_GlobalMenu"})
+        workbench = self.registered[0]
+        self.assertFalse(workbench._initialized)
+        self.assertFalse(hasattr(workbench, "_mcp_command"))
+        self.assertEqual(self.window.timers, [])
+        self.assertEqual(self.visual_calls + self.calls + self.single_shots, [])
+        self.assertEqual(len(self.manipulators), 1)
+        self.assertEqual(self.manipulators[0].modifyMenuBar(),
+                         [{"insert": "PhoenixTools_GlobalMenu", "menuItem": "Std_Measure"}])
+
+    def test_initialize_and_bootstrap_reload_reuse_exact_global_entry_objects(self):
+        entries = dict(self.commands)
+        runtime = self.namespace["_global_menu_runtime"]
+        workbench, _, _ = self.initialize()
+        self.reload_gui()
+        self.assertIs(self.namespace["_global_menu_runtime"], runtime)
+        self.assertIs(self.namespace["_workbench"], workbench)
+        self.assertEqual(len(self.registered), 1)
+        self.assertEqual(len(self.manipulators), 1)
+        self.assertEqual(len(self.command_registrations), len(self.commands))
+        for identifier, command in entries.items():
+            self.assertIs(self.commands[identifier], command)
+
+    def test_global_settings_refreshes_copied_actions_before_phoenix_initialization(self):
+        from pft_workbench_i18n import set_language
+        set_language("en")
+        self.commands["PhoenixTools_Settings"].Activated()
+        self.assertEqual(self.actions["PhoenixTools_Settings"].text, "Settings")
+        group_actions = self.actions["PhoenixTools_GlobalMenu"]
+        self.assertEqual(group_actions[0].text, "AI chat")
+        self.assertEqual(group_actions[2].text, "Settings")
+        self.assertFalse(hasattr(self.registered[0], "_mcp_command"))
+        self.assertEqual(self.window.timers, [])
+        self.assertEqual(self.calls + self.visual_calls + self.single_shots, [])
+
+    def test_native_shortcuts_use_registered_commands_before_workbench_initialization(self):
+        workbench = self.registered[0]
+        for identifier in ("PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance"):
+            self.namespace["run_native_shortcut"](self.gui, identifier)
+            self.assertEqual(self.commands[identifier]._last_invocation,
+                {"serial": 1, "ok": True, "code": None, "message": None})
+        self.assertEqual(self.native_calls, [(identifier, 0) for identifier in (
+            "PhoenixTools_DocumentTools", "PhoenixTools_AxonometricFit", "PhoenixTools_Appearance")])
+        self.assertFalse(workbench._initialized)
+        self.assertEqual(self.window.timers, [])
+        self.assertEqual(self.calls, [])
+
+    def test_native_shortcuts_reject_no_document_and_unexecuted_or_swallowed_failure(self):
+        error_type = self.namespace["pft_global_menu"].PftGlobalMenuError
+        workbench = self.registered[0]
+        command = self.commands["PhoenixTools_Appearance"]
+        self.app.ActiveDocument = None
+        with self.assertRaisesRegex(self.namespace["PftToolError"], "当前没有打开的文档"):
+            workbench.run_native_shortcut(command.IDENTIFIER)
+        self.assertEqual(self.native_calls, [])
+        self.app.ActiveDocument = object()
+        command.callback = lambda: (_ for _ in ()).throw(self.namespace["PftToolError"](
+            "没有可确定的活动三维视图，请先激活目标文档的三维视图。"))
+        with self.assertRaises(error_type) as failure:
+            workbench.run_native_shortcut(command.IDENTIFIER)
+        self.assertEqual(failure.exception.code, "PFT_CHAT_SHORTCUT_NO_3D_VIEW")
+        command.callback = lambda: (_ for _ in ()).throw(RuntimeError("SYNTHETIC_PRIVATE_DETAIL"))
+        with self.assertRaises(error_type) as failure:
+            workbench.run_native_shortcut(command.IDENTIFIER)
+        self.assertEqual(failure.exception.code, "PFT_CHAT_SHORTCUT_ACTION_FAILED")
+        self.assertNotIn("PRIVATE", repr(command._last_invocation))
+        before = command._last_invocation.copy()
+        self.gui.runCommand = lambda *args: None
+        with self.assertRaises(error_type): workbench.run_native_shortcut(command.IDENTIFIER)
+        self.assertEqual(command._last_invocation, before)
+
     def test_auto_start_is_opt_in_delayed_and_not_repeated_on_reload_or_activation(self):
         self.preferences.bools["AutoStartMCP"] = True
         self.window_properties.clear()  # Simulate the next FreeCAD process/window.
@@ -537,7 +692,7 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.assertFalse(self.status["running"])
         self.reload_gui()
         self.assertEqual(len(self.single_shots), 1)
-        self.assertGreaterEqual(len(self.registered), 3)
+        self.assertEqual(len(self.registered), 1)
 
     def test_already_running_or_stopping_startup_does_not_schedule_start(self):
         self.preferences.bools["AutoStartMCP"] = True

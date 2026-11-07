@@ -35,12 +35,21 @@ DRAWING_CREATE_CAPABILITIES = {"version": 1, "operation": "create_drawing", "con
     "status_method": "get_part_change_status", "paper": "A4_landscape", "projection": "first_angle",
     "views": ["front", "top", "axonometric"], "source_scope": "single_native_solid", "saves_document": False,
     "projection_verification": "not_checked"}
+DRAWING_DRAFT_LAYOUT_CAPABILITIES = {"version": 1, "operation": "create_drawing", "algorithm": "annotation_slots_v1",
+    "profile": "freecad_1_1_4_a4_mm_v1", "confirmation": "native_gui_only", "preview_field": "draft_layout",
+    "max_input_bytes": 4096, "max_result_bytes": 16384, "saves_document": False,
+    "layout_verification": "estimated_geometry_only"}
 DRAWING_DIMENSIONS_CAPABILITIES = {"version": 1, "operation": "add_drawing_dimensions", "confirmation": "native_gui_only",
     "preview_method": "prepare_part_changes", "request_method": "request_part_change_approval",
     "status_method": "get_part_change_status", "kinds": ["Distance", "DistanceX", "DistanceY", "Diameter", "Radius"],
     "max_dimensions": 8, "edge_index_base": 0, "maximum_edge_index": 2047,
     "position_scope": "view_relative_paper_mm", "measurement_unit": "mm", "saves_document": False,
     "projection_verification": "not_checked"}
+DRAWING_DIMENSION_LAYOUT_CAPABILITIES = {"version": 1, "operation": "add_drawing_dimensions", "algorithm": "paper_lanes_v1",
+    "profile": "freecad_1_1_4_a4_mm_v1", "confirmation": "native_gui_only", "max_dimensions": 8,
+    "max_input_bytes": 65536, "max_result_bytes": 32768, "max_plan_bytes": 114688,
+    "max_candidates_per_dimension": 64, "max_search_attempts": 8192, "max_geometry_checks": 131072,
+    "layout_verification": "suggested_only", "saves_document": False}
 APPROVAL_CAPABILITIES = {"version": 1, "request_method": "request_part_change_approval",
     "status_method": "get_part_change_status", "confirmation": "native_gui_only", "max_pending": 1,
     "storage": "memory_only", "ttl_seconds": TTL_SECONDS, "max_status_bytes": MAX_STATUS_BYTES}
@@ -52,8 +61,11 @@ _FIXED_ERRORS = frozenset({"PART_CHANGE_FAILED", "PART_APPROVAL_UI_UNAVAILABLE",
     "PAD_PARAMETER_VERIFY_FAILED", "PAD_GEOMETRY_VERIFY_FAILED", "PAD_RECOMPUTE_UNVERIFIED", "PAD_NATIVE_CONFIRMATION_REQUIRED",
     "DRAWING_UNSUPPORTED", "DRAWING_PLAN_STALE", "DRAWING_TEMPLATE_UNAVAILABLE", "DRAWING_CREATE_FAILED",
     "DRAWING_RECOMPUTE_UNVERIFIED", "DRAWING_PROJECTION_UNAVAILABLE", "DRAWING_NATIVE_CONFIRMATION_REQUIRED", "DRAWING_RESULT_INVALID",
+    "DRAWING_DRAFT_LAYOUT_UNAVAILABLE", "DRAWING_DRAFT_LAYOUT_NO_SPACE", "DRAWING_DRAFT_LAYOUT_STALE",
     "DIMENSION_UNSUPPORTED", "DIMENSION_PLAN_STALE", "DIMENSION_CREATE_FAILED", "DIMENSION_RECOMPUTE_UNVERIFIED",
-    "DIMENSION_VALUE_UNVERIFIED", "DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "DIMENSION_RESULT_INVALID"})
+    "DIMENSION_VALUE_UNVERIFIED", "DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "DIMENSION_RESULT_INVALID",
+    "DIMENSION_LAYOUT_UNAVAILABLE", "DIMENSION_LAYOUT_STALE", "DIMENSION_LAYOUT_STYLE_UNVERIFIED",
+    "DIMENSION_LAYOUT_CLEANUP_UNVERIFIED"})
 _approval_epoch = 0
 _approvals_enabled = False
 _plans = OrderedDict()
@@ -84,7 +96,7 @@ def validate(method, params, Error):
         if set(params) != {"token"} or not isinstance(params["token"], str) or not _TOKEN.fullmatch(params["token"]):
             raise Error("INVALID_PARAMS", "该操作仅接受预览返回的 token。")
         return True
-    if set(params) - {"docName", "objectNames", "operation", "values", "bodyName", "lengthMm", "viewName", "dimensions"}:
+    if set(params) - {"docName", "objectNames", "operation", "values", "bodyName", "lengthMm", "viewName", "dimensions", "draftLayoutVersion"}:
         raise Error("INVALID_PARAMS", "预览参数包含未开放字段。")
     if not _valid_name(params.get("docName")):
         raise Error("INVALID_PARAMS", "docName 必须是已打开文档的内部名称。")
@@ -96,12 +108,15 @@ def validate(method, params, Error):
     operation = params.get("operation")
     if not isinstance(operation, str) or operation not in OPERATIONS:
         raise Error("INVALID_PARAMS", "operation 不是已开放的零件操作。")
+    if "draftLayoutVersion" in params and (operation != "create_drawing"
+            or type(params["draftLayoutVersion"]) is not int or params["draftLayoutVersion"] != 1):
+        raise Error("INVALID_PARAMS", "图纸留白版本只供 create_drawing 的已协商版本1使用。")
     if operation == "add_drawing_dimensions":
         if (set(params) != {"docName", "objectNames", "operation", "viewName", "dimensions"} or len(names) != 1
                 or any(unicodedata.category(char) == "Cf" for char in params["docName"])):
             raise Error("INVALID_PARAMS", "尺寸预览只接受明确文档、一张图页、视图及1至8项投影引用。")
         try:
-            _load_sibling("pft_drawing_dimensions_contract").validate_request({"page": names[0],
+            _load_sibling("pft_drawing_dimensions_contract").validate_intent({"page": names[0],
                 "view": params["viewName"], "dimensions": params["dimensions"]})
         except ValueError:
             raise Error("INVALID_PARAMS", "尺寸引用、类型或纸面偏移格式无效，未创建预览。") from None
@@ -109,7 +124,7 @@ def validate(method, params, Error):
     if "viewName" in params or "dimensions" in params:
         raise Error("INVALID_PARAMS", "只有 add_drawing_dimensions 可以指定尺寸视图和引用。")
     if operation == "create_drawing":
-        if (set(params) != {"docName", "objectNames", "operation"} or len(names) != 1
+        if (set(params) - {"docName", "objectNames", "operation", "draftLayoutVersion"} or len(names) != 1
                 or any(unicodedata.category(char) == "Cf" for char in params["docName"])):
             raise Error("INVALID_PARAMS", "图纸草稿预览只接受文档、一个明确来源对象和 create_drawing 操作。")
         try:
@@ -186,11 +201,39 @@ def _drawing():
     return module
 
 
+def _draft_layout():
+    module = _load_sibling("pft_draft_layout")
+    if getattr(module, "CAPABILITIES", None) != DRAWING_DRAFT_LAYOUT_CAPABILITIES:
+        raise RuntimeError("Drawing draft layout belongs to an incompatible contract")
+    return module
+
+
 def _dimensions():
     module = _load_sibling("pft_drawing_dimensions")
     if getattr(module, "CAPABILITIES", None) != DRAWING_DIMENSIONS_CAPABILITIES:
         raise RuntimeError("Drawing dimensions module belongs to an incompatible contract")
     return module
+
+
+def _layout():
+    module = _load_sibling("pft_drawing_layout_plan")
+    if getattr(module, "CAPABILITIES", None) != DRAWING_DIMENSION_LAYOUT_CAPABILITIES:
+        raise RuntimeError("Drawing layout module belongs to an incompatible contract")
+    return module
+
+
+def _layout_failure(error, Error):
+    """Keep an uncertain native cleanup explicit through the business boundary."""
+    try:
+        state = getattr(error, "cleanup_state", "complete")
+        complete = type(state) is str and state == "complete"
+    except Exception:
+        complete = False
+    code = _fixed_error(error) if complete else "DIMENSION_LAYOUT_CLEANUP_UNVERIFIED"
+    result = Error(code, "尺寸布局核验未完成，请检查当前文档后重新预览；不会自动重试。" if complete else
+                   "尺寸布局资源的清理状态无法确认；请检查FreeCAD状态，不要自动重试。")
+    result.cleanup_state = "complete" if complete else "unknown"
+    return result
 
 
 def _display(value):
@@ -590,6 +633,93 @@ def _dimension_status_budget(document_name, request, rows, Error):
     return budget
 
 
+def _prepare_dimension_layout(app, gui, document, page, view, intent, controller, Error):
+    layout, dimensions = _layout(), _dimensions()
+    try:
+        frozen = layout.prepare(app, gui, document, page, view, deepcopy(intent), controller)
+        public = layout.preview(frozen)
+        request = deepcopy(frozen["request"])
+        if request is None:
+            return {}, None, [{"object": page.Name, "field": "TechDraw dimension", "old": None, "new": None,
+                "status": "blocked", "reason": "整批尺寸未找到可验证的位置；请查看布局冲突原因，调整后重新预览。"}], public
+        native, rows = dimensions.prepare_plan(app, gui, document, page, view,
+                                              deepcopy(request["dimensions"]), controller)
+        contract = _load_sibling("pft_drawing_dimensions_contract")
+        try:
+            actual = contract.validate_resolution(intent, native["request"])
+            if actual != request:
+                raise ValueError()
+            _dimension_status_budget(document.Name, request, rows, Error)
+        except (KeyError, TypeError, ValueError):
+            raise Error("DIMENSION_RESULT_INVALID", "尺寸布局的完整解未通过核对，未创建 token。") from None
+        # The native dimension reader can invoke host callbacks too. It must
+        # not silently replace or reflow the already shown layout suggestion.
+        layout.verify(app, gui, frozen, controller)
+        if layout.preview(frozen) != public or frozen["request"] != request:
+            raise Error("DIMENSION_LAYOUT_STALE", "尺寸布局已变化，未创建 token；请重新预览。")
+        return {"dimensions_plan": native, "dimensions_input": request, "dimensions_rows": deepcopy(rows),
+                "layout_plan": frozen}, request, rows, public
+    except (layout.PftDrawingLayoutPlanError, dimensions.PftDrawingDimensionsError) as error:
+        failure = _layout_failure(error, Error)
+        if failure.cleanup_state != "complete":
+            raise failure from None
+        return {}, None, [{"object": page.Name, "field": "TechDraw dimension", "old": None, "new": None,
+            "status": "blocked", "reason": "尺寸布局输入无法完整核验，请检查图页及样式后重新预览。"}], layout.unavailable_preview(intent, error)
+
+
+def _verify_layout_binding(record, layout):
+    """Bind public graphics and both native plans without any new search."""
+    plan, public = record["plan"], record["public_preview"]
+    frozen = plan["layout_plan"]
+    current = layout.preview(frozen)
+    if (record.get("layout_required") is not True
+            or layout.validate_preview(public["layout"], public["design_request"], can_apply=public["can_apply"]) != current
+            or current["intent"] != frozen["intent"] or current["graphics"]["result"]["can_apply"] is not True
+            or public["design_request"] != plan["dimensions_input"] or frozen["request"] != plan["dimensions_input"]):
+        raise layout.PftDrawingLayoutPlanError(stale=True)
+    contract = _load_sibling("pft_drawing_dimensions_contract")
+    request = contract.validate_resolution(current["intent"], plan["dimensions_plan"]["request"])
+    if request != plan["dimensions_input"]:
+        raise layout.PftDrawingLayoutPlanError(stale=True)
+    # A complete response must still show precisely the positions that the
+    # native writer will use, even if a host callback replaced an inner dict.
+    result = _dimension_preview_result(request, public["rows"])
+    native = plan["dimensions_plan"]
+    if (public["rows"] != plan["dimensions_rows"]
+            or type(native["names"]) is not tuple or type(native["values"]) is not tuple
+            or tuple(row["name"] for row in result["dimensions"]) != native["names"]
+            or tuple(row["value_mm"] for row in result["dimensions"]) != native["values"]
+            or any(type(value) not in (int, float) for value in native["values"])):
+        raise layout.PftDrawingLayoutPlanError(stale=True)
+
+
+def _verify_draft_layout_binding(record, Error):
+    """Recheck the complete shown draft against its frozen native plan, purely."""
+    try:
+        layout = _draft_layout()
+        plan, public = record["plan"], record["public_preview"]
+        native = plan["drawing_plan"]
+        pair = {key: public[key] for key in ("draft_layout", "draft_layout_reason")}
+        checked = layout.validate_preview(pair, public["design_request"], public["rows"], can_apply=True)
+        if (record.get("draft_layout_required") is not True or record["operation"] != "create_drawing"
+                or public["operation"] != "create_drawing" or public["document"] != record["document"]
+                or public["can_apply"] is not True or type(public["changed_count"]) is not int
+                or public["changed_count"] != 5 or record["can_apply"] is not True
+                or type(record["changed_count"]) is not int or record["changed_count"] != 5
+                or checked != plan["draft_layout_public"]
+                or public["design_request"] != plan["drawing_input"]
+                or native["request"] != plan["drawing_input"]
+                or native["draft_layout"] != checked["draft_layout"]
+                or public["rows"] != plan["drawing_rows"]
+                or type(native["names"]) is not tuple
+                or native["names"] != tuple(row["object"] for row in public["rows"])
+                or type(native["scale"]) not in (int, float)
+                or native["scale"] != checked["draft_layout"]["scale"]):
+            raise ValueError()
+    except Exception:
+        raise Error("DRAWING_DRAFT_LAYOUT_STALE", "新建图纸的完整布局计划已变化，请重新预览。") from None
+
+
 def _prepare(params, app, gui, Error):
     model, controller = _mvc()
     try:
@@ -605,30 +735,40 @@ def _prepare(params, app, gui, Error):
     operation = params["operation"]
     snapshots = [] if operation in {"set_pad_length", "create_drawing", "add_drawing_dimensions"} else [model._snapshot(obj) for obj in objects]
     plan, link_states = {}, []
-    drawing_request = None
+    drawing_request, layout_public, draft_public = None, None, None
     if operation == "add_drawing_dimensions":
         dimensions = _dimensions()
-        dimension_request = _load_sibling("pft_drawing_dimensions_contract").validate_request({
+        intent = _load_sibling("pft_drawing_dimensions_contract").validate_intent({
             "page": objects[0].Name, "view": params["viewName"], "dimensions": params["dimensions"]})
-        try:
-            design_plan, rows = dimensions.prepare_plan(app, gui, document, objects[0],
-                _objects(document, [params["viewName"]], Error)[0], deepcopy(dimension_request["dimensions"]), controller)
+        if any(row.get("placement") == "auto" for row in intent["dimensions"]):
+            plan, dimension_request, rows, layout_public = _prepare_dimension_layout(app, gui, document, objects[0],
+                _objects(document, [params["viewName"]], Error)[0], intent, controller, Error)
+        else:
+            dimension_request = intent
             try:
-                actual = _load_sibling("pft_drawing_dimensions_contract").validate_request(design_plan["request"])
-                if actual != dimension_request:
-                    raise ValueError()
-                _dimension_status_budget(document.Name, dimension_request, rows, Error)
-            except (KeyError, TypeError, ValueError):
-                raise Error("DIMENSION_RESULT_INVALID", "尺寸预览格式未通过核对，未创建 token。") from None
-            plan = {"dimensions_plan": design_plan, "dimensions_input": dimension_request}
-        except dimensions.PftDrawingDimensionsError as error:
-            rows = [{"object": objects[0].Name, "field": "TechDraw dimension", "old": None, "new": None,
-                     "status": "blocked", "reason": "尺寸预览不可用（%s），请在 FreeCAD 中检查后重新预览。" % _fixed_error(error)}]
+                design_plan, rows = dimensions.prepare_plan(app, gui, document, objects[0],
+                    _objects(document, [params["viewName"]], Error)[0], deepcopy(dimension_request["dimensions"]), controller)
+                try:
+                    actual = _load_sibling("pft_drawing_dimensions_contract").validate_request(design_plan["request"])
+                    if actual != dimension_request:
+                        raise ValueError()
+                    _dimension_status_budget(document.Name, dimension_request, rows, Error)
+                except (KeyError, TypeError, ValueError):
+                    raise Error("DIMENSION_RESULT_INVALID", "尺寸预览格式未通过核对，未创建 token。") from None
+                plan = {"dimensions_plan": design_plan, "dimensions_input": dimension_request}
+            except dimensions.PftDrawingDimensionsError as error:
+                rows = [{"object": objects[0].Name, "field": "TechDraw dimension", "old": None, "new": None,
+                         "status": "blocked", "reason": "尺寸预览不可用（%s），请在 FreeCAD 中检查后重新预览。" % _fixed_error(error)}]
     elif operation == "create_drawing":
         drawing = _drawing()
+        wants_draft_layout = params.get("draftLayoutVersion") == 1
+        draft_layout = _draft_layout() if wants_draft_layout else None
         drawing_request = {"source": objects[0].Name, "page": None}
         try:
-            design_plan, rows = drawing.prepare_plan(app, gui, document, objects[0], controller)
+            if wants_draft_layout:
+                design_plan, rows = drawing.prepare_plan(app, gui, document, objects[0], controller, draft_layout=True)
+            else:
+                design_plan, rows = drawing.prepare_plan(app, gui, document, objects[0], controller)
             try:
                 drawing_request = _load_sibling("pft_drawing_contract").validate_design_request(design_plan["request"])
                 if (drawing_request["source"] != objects[0].Name or type(rows) is not list or len(rows) != 5
@@ -638,9 +778,22 @@ def _prepare(params, app, gui, Error):
             except (KeyError, TypeError, ValueError):
                 raise Error("DRAWING_RESULT_INVALID", "图纸草稿预览格式未通过核对，未创建 token。") from None
             plan = {"drawing_plan": design_plan, "drawing_input": drawing_request}
+            if wants_draft_layout:
+                try:
+                    draft_public = draft_layout.validate_preview({"draft_layout": design_plan["draft_layout"],
+                        "draft_layout_reason": None}, drawing_request, rows, can_apply=True)
+                except Exception:
+                    raise Error("DRAWING_RESULT_INVALID", "图纸留白的完整计划未通过核对，未创建 token。") from None
+                plan.update(draft_layout_public=deepcopy(draft_public), drawing_rows=deepcopy(rows))
         except drawing.PftDrawingError as error:
             rows = [{"object": objects[0].Name, "field": "TechDraw draft node", "old": None, "new": None,
                      "status": "blocked", "reason": "图纸草稿预览不可用（%s），请在 FreeCAD 中检查后重新预览。" % _fixed_error(error)}]
+            if wants_draft_layout:
+                code = _fixed_error(error)
+                if code not in {"DRAWING_DRAFT_LAYOUT_UNAVAILABLE", "DRAWING_DRAFT_LAYOUT_NO_SPACE", "DRAWING_DRAFT_LAYOUT_STALE"}:
+                    code = "DRAWING_DRAFT_LAYOUT_STALE" if code == "DRAWING_PLAN_STALE" else "DRAWING_DRAFT_LAYOUT_UNAVAILABLE"
+                draft_public = draft_layout.validate_preview({"draft_layout": None, "draft_layout_reason": code},
+                    drawing_request, rows, can_apply=False)
     elif operation == "set_pad_length":
         pad = _pad()
         try:
@@ -663,20 +816,35 @@ def _prepare(params, app, gui, Error):
     record = {"state": "prepared", "document": document.Name, "document_ref": document, "operation": operation,
               "objects": objects, "snapshots": snapshots, "plan": plan, "link_states": link_states,
               "deadline": time.monotonic() + TTL_SECONDS, "can_apply": can_apply, "changed_count": changed,
-              "native_confirmation": False}
+              "native_confirmation": False, "layout_required": layout_public is not None,
+              "draft_layout_required": draft_public is not None}
     response = {"document": document.Name, "operation": operation, "token": "x" * 32, "state": "prepared", "can_apply": can_apply,
             "expires_at": expires_at, "ttl_seconds": TTL_SECONDS, "changed_count": changed, "rows": rows,
             "requires_confirmation": True, "saves_document": False, "storage": "memory_only"}
     if operation == "add_drawing_dimensions":
         response["design_request"] = deepcopy(dimension_request)
+        if layout_public is not None:
+            response["layout"] = deepcopy(layout_public)
     elif operation == "create_drawing":
         response["design_request"] = dict(drawing_request)
+        if draft_public is not None:
+            response.update(deepcopy(draft_public))
     elif operation == "set_pad_length":
         response["design_request"] = {"body": params["bodyName"], "pad": objects[0].Name, "length_mm": params["lengthMm"]}
         for row in rows:
             row.update(body=params["bodyName"], unit="mm", recompute_roots=[params["bodyName"]])
     if len(json.dumps(response, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")) > MAX_PREVIEW_BYTES:
         raise Error("PART_PREVIEW_TOO_LARGE", "完整预览超过 128 KiB，请减少本批对象或字段；未创建 token，也未修改对象。")
+    if draft_public is not None and can_apply:
+        record["public_preview"] = deepcopy(response)
+        _verify_draft_layout_binding(record, Error)
+        # Preparing the native plan may invoke host callbacks too. Preserve
+        # the exact public diagram and all five rows after the last read.
+        try:
+            drawing.verify_plan(app, gui, document, plan["drawing_plan"], controller)
+        except drawing.PftDrawingError as error:
+            raise Error(error.code, str(error)) from None
+        _verify_draft_layout_binding(record, Error)
     with _lock:
         response["token"] = _store(record, Error)
         record["public_preview"] = deepcopy(response)
@@ -689,15 +857,44 @@ def _binding(record, model, controller, app, gui, Error):
         raise Error("PART_PLAN_STALE", "文档已关闭或重开，请重新预览。")
     if record["operation"] == "add_drawing_dimensions":
         dimensions = _dimensions()
+        uses_layout = (record.get("layout_required") is True or "layout_plan" in record["plan"]
+                       or "layout" in record.get("public_preview", {}))
+        layout = _layout() if uses_layout else None
         try:
+            if uses_layout:
+                if record.get("layout_required") is not True:
+                    raise layout.PftDrawingLayoutPlanError(stale=True)
+                _verify_layout_binding(record, layout)
+                layout.verify(app, gui, record["plan"]["layout_plan"], controller)
             dimensions.verify_plan(app, gui, document, record["plan"]["dimensions_plan"], controller)
+            if uses_layout:
+                _verify_layout_binding(record, layout)
+                layout.verify(app, gui, record["plan"]["layout_plan"], controller)
+                _verify_layout_binding(record, layout)
         except dimensions.PftDrawingDimensionsError as error:
-            raise Error(error.code, str(error)) from None
+            raise (_layout_failure(error, Error) if uses_layout else Error(error.code, str(error))) from None
+        except Exception as error:
+            if not uses_layout:
+                raise
+            if not isinstance(error, layout.PftDrawingLayoutPlanError):
+                failure = _layout_failure(error, Error)
+                if failure.cleanup_state != "complete":
+                    raise failure from None
+                error = layout.PftDrawingLayoutPlanError(stale=True)
+            raise _layout_failure(error, Error) from None
         return document
     if record["operation"] == "create_drawing":
         drawing = _drawing()
+        uses_draft = (record.get("draft_layout_required") is True
+            or "draft_layout_public" in record["plan"]
+            or "draft_layout" in record["plan"]["drawing_plan"]
+            or any(key in record.get("public_preview", {}) for key in ("draft_layout", "draft_layout_reason")))
         try:
+            if uses_draft:
+                _verify_draft_layout_binding(record, Error)
             drawing.verify_plan(app, gui, document, record["plan"]["drawing_plan"], controller)
+            if uses_draft:
+                _verify_draft_layout_binding(record, Error)
         except drawing.PftDrawingError as error:
             raise Error(error.code, str(error)) from None
         return document
@@ -750,11 +947,15 @@ def _apply(params, app, gui, Error, _native_grant=None):
             raise Error("PART_TOKEN_USED", "token 已消费或正在处理，不会再次执行；请重新预览。")
         record["state"] = "applying"
     controller = None
+    uses_layout = record.get("layout_required") is True
+    uses_draft_layout = record.get("draft_layout_required") is True
     try:
         if not record["can_apply"]:
             raise Error("PART_PREVIEW_BLOCKED", "预览存在冲突或不可安全显示的值，未修改对象；请重新预览。")
         model, controller = _mvc()
         controller._ensure_main_thread()
+        frozen_layout = record["plan"].get("layout_plan") if uses_layout else None
+        frozen_draft = record["plan"].get("drawing_plan") if uses_draft_layout else None
         document = _binding(record, model, controller, app, gui, Error)
         objects, snapshots, plan = record["objects"], record["snapshots"], record["plan"]
         operation = record["operation"]
@@ -762,9 +963,16 @@ def _apply(params, app, gui, Error, _native_grant=None):
         if operation == "add_drawing_dimensions":
             dimensions = _dimensions()
             try:
-                design_result = dimensions.apply_plan(app, gui, document, plan["dimensions_plan"], controller)
+                if uses_layout:
+                    if frozen_layout is not plan["layout_plan"]:
+                        raise Error("DIMENSION_LAYOUT_STALE", "尺寸布局计划身份已变化，请重新预览。")
+                    design_result = dimensions.apply_plan(app, gui, document, plan["dimensions_plan"], controller,
+                                                          layout_plan=frozen_layout)
+                else:
+                    design_result = dimensions.apply_plan(app, gui, document, plan["dimensions_plan"], controller)
             except dimensions.PftDrawingDimensionsError as error:
-                raise Error(error.code, str(error)) from None
+                raise (_layout_failure(error, Error) if uses_layout
+                       else Error(error.code, str(error))) from None
             try:
                 design_result = _load_sibling("pft_drawing_dimensions_contract").validate_result(design_result, plan["dimensions_input"])
             except ValueError:
@@ -772,12 +980,25 @@ def _apply(params, app, gui, Error, _native_grant=None):
             changed = len(design_result["dimensions"])
         elif operation == "create_drawing":
             drawing = _drawing()
+            draft_expected = None
+            if uses_draft_layout:
+                _verify_draft_layout_binding(record, Error)
+                if frozen_draft is not plan["drawing_plan"]:
+                    raise Error("DRAWING_DRAFT_LAYOUT_STALE", "图纸布局计划身份已变化，请重新预览。")
+                draft_expected = deepcopy(plan["draft_layout_public"]["draft_layout"])
             try:
                 design_result = drawing.apply_plan(app, gui, document, plan["drawing_plan"], controller)
             except drawing.PftDrawingError as error:
                 raise Error(error.code, str(error)) from None
             try:
                 design_result = _load_sibling("pft_drawing_contract").validate_design_result(design_result, plan["drawing_input"])
+                if uses_draft_layout:
+                    _verify_draft_layout_binding(record, Error)
+                    if (design_result["scale"] != draft_expected["scale"]
+                            or design_result["template"] != plan["drawing_rows"][1]["object"]
+                            or design_result["views"] != [{"name": row["name"], "kind": row["kind"]}
+                                                          for row in draft_expected["views"]]):
+                        raise ValueError()
             except ValueError:
                 raise Error("DRAWING_RESULT_INVALID", "图纸草稿结果格式未通过核对；不会重试，请检查文档和撤销记录。") from None
             changed = 5
@@ -808,10 +1029,14 @@ def _apply(params, app, gui, Error, _native_grant=None):
             _drop_private(record)
         return dict(result)
     except Exception as error:
+        if uses_layout:
+            failure = _layout_failure(error, Error)
+            if failure.cleanup_state != "complete":
+                error = failure
         with _lock:
             _fail(record, _fixed_error(error))
         if isinstance(error, Error):
-            raise
+            raise error from None
         if controller is not None and isinstance(error, controller.PftWriteError) and error.code in {
                 "PART_TRANSACTION_STATE_UNAVAILABLE", "PART_TRANSACTION_OPEN_UNVERIFIED",
                 "PART_TRANSACTION_CHANGED", "PART_COMMIT_UNVERIFIED", "PART_ROLLBACK_UNVERIFIED",
