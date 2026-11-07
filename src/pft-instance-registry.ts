@@ -10,7 +10,7 @@ export class PftInstanceError extends Error {
 }
 function fail(code = 'INSTANCE_REGISTRY_INVALID'): never { throw new PftInstanceError(code, 'FreeCAD instance registry is unavailable, unsafe or invalid; no target was selected.'); }
 export type PftInstanceRecord = Readonly<{ schema_version: 1; owner: 'phoenix-freecad-tools'; instance_id: string;
-  service_id: string; pid: number; url: string; protocol_version: 1; addon_version: '0.3.2' }>;
+  service_id: string; pid: number; url: string; protocol_version: 1; addon_version: '0.4.1' }>;
 export type PftRegisteredInstance = Readonly<PftInstanceRecord & { fingerprint: string }>;
 export type PftInstanceDirectoryOptions = { home?: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv };
 const idPattern = /^[0-9a-f]{32}(?![\s\S])/u;
@@ -110,7 +110,7 @@ function record(value: unknown, filename: string): PftInstanceRecord {
   if (Object.keys(v).sort().join(',') !== 'addon_version,instance_id,owner,pid,protocol_version,schema_version,service_id,url'
       || v.schema_version !== 1 || v.owner !== 'phoenix-freecad-tools' || !pftInstanceIdValid(v.instance_id)
       || !pftInstanceIdValid(v.service_id) || filename !== v.instance_id + '.json' || v.protocol_version !== 1
-      || v.addon_version !== '0.3.2' || !Number.isSafeInteger(v.pid) || (v.pid as number) <= 0
+      || v.addon_version !== '0.4.1' || !Number.isSafeInteger(v.pid) || (v.pid as number) <= 0
       || typeof v.url !== 'string' || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}\/$/u.test(v.url)) fail();
   const url = new URL(v.url as string); if (url.href !== v.url || Number(url.port) < 1024 || Number(url.port) > 65535) fail();
   return Object.freeze({ ...v }) as PftInstanceRecord;

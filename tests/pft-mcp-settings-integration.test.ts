@@ -152,7 +152,7 @@ for (const toolScope of ['full', 'chat'] as const) {
   test(`official SDK ${entryKind} stdio ${toolScope} uses shared diagnostics and pins its resolved target`, { skip: posixOnly, timeout: 30000 }, async (t) => {
     const f = fixture(t), first = await bridge(t, 'first'), second = await bridge(t, 'second'); f.setPort(first.port);
     const { client, stderr } = await session(t, f, toolScope);
-    const tools = await client.listTools(); assert.equal(tools.tools.length, toolScope === 'full' ? 25 : 19);
+    const tools = await client.listTools(); assert.equal(tools.tools.length, toolScope === 'full' ? 28 : 22);
     const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
     assert.equal(record(capabilities.structuredContent).connection_checked, false);
     assert.deepEqual(first.calls, []); assert.deepEqual(second.calls, []);
@@ -177,7 +177,7 @@ for (const toolScope of ['full', 'chat'] as const) {
 test(`official SDK ${entryKind} stdio missing settings keeps offline discovery side-effect free`, { skip: posixOnly, timeout: 20000 }, async (t) => {
   const f = fixture(t); assert.equal(existsSync(f.product), false);
   const { client, stderr } = await session(t, f);
-  assert.equal((await client.listTools()).tools.length, 25);
+  assert.equal((await client.listTools()).tools.length, 28);
   const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
   assert.equal(record(capabilities.structuredContent).connection_checked, false);
   // Do not call status: an absent setting uses 9876, which might be a user's live bridge.

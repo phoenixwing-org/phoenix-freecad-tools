@@ -1,8 +1,8 @@
 # 开发与发布计划
 
-当前源码版本为0.3.2，npm源码已采用`@phoenix-wing/phoenix-freecad-mcp`；实际发行以GitHub Release与npm Registry各自的回执为准。能力与待验范围见[TODO](TODO.md)；验证方法见[验证与验收](VERIFICATION.md)。源码实现、运行中模块、实际归档和正式发行分别核对，不继承旧运行回执作为新候选证据。
+当前源码候选为 **0.4.1（待发布）**，最后已发布版本仍为0.3.2，npm源码采用`@phoenix-wing/phoenix-freecad-mcp`；实际发行以GitHub Release与npm Registry各自的回执为准。能力与待验范围见[TODO](TODO.md)；验证方法见[验证与验收](VERIFICATION.md)。源码实现、运行中模块、实际归档和正式发行分别核对，不继承旧运行回执作为新候选证据。
 
-个人维护者的具体操作见 [FreeCAD 发布步骤](FREECAD-RELEASE-STEPS.md)，覆盖账号与元数据、实际打包、GitHub Release、npm 和 Addon Manager 收录。
+每版先执行 [发布点检表](RELEASE-CHECKLIST.md)。具体操作见 [FreeCAD 发布步骤](FREECAD-RELEASE-STEPS.md)，覆盖账号与元数据、实际打包、GitHub Release、npm 和 Addon Manager 收录。
 
 本轮基础稳定交付以 MCP 接入和常用工作台按钮为范围。复杂 Desk Tools 接入按实验能力单独标注，不作为这批基础发布的阻塞项。
 
@@ -54,7 +54,7 @@ Addon ZIP只含固定Python/图标/元数据/法律文件与自足说明；Node 
 
 - [release.yml](../.github/workflows/release.yml) 在 `codex/npm-release` 分支运行候选构建、测试及清单校验，上传 Actions 候选附件，不创建或发布 Release。现有 [package.yml](../.github/workflows/package.yml) 保持手动构建用途。
 - 为受审提交创建并推送 `v*` 标签是明确的发布动作。标签必须等于源码版本的 `v` 前缀形式，并解析到同一受审提交；不能把标签触发当作无发布副作用的试运行。
-- [`.github/releases/0.3.2.json`](../.github/releases/0.3.2.json) 随源码审查，保存两个真实候选包的预期 SHA-256。进入制品的源码或文档变化后，先重建并审定新摘要，再冻结来源提交；不能把失败产物摘要直接当作新的批准值。
+- 每版的 `.github/releases/<版本>.json` 随源码审查，保存两个真实候选包的预期 SHA-256；[0.3.2清单](../.github/releases/0.3.2.json)只作历史范例。进入制品的源码或文档变化后，先重建并审定新摘要，再冻结来源提交；不能把失败产物摘要直接当作新的批准值。
 - 标签工作流构建和校验两个包，发布作业再次验证后创建草稿。仅上传 Addon ZIP、组织 Node tgz 及 `SHA256SUMS`；核对新草稿和附件身份，重新下载并验证字节，最后复核标签提交再正式发布。
 - 既有 Release、标签和附件不覆盖；失败草稿保留供审查，不自动接管续写。自动流程启用后，不并行手动创建同一发行。手动发布仍可作为本次明确选定的替代路径，同样通过受审提交、资产清单和下载校验门槛。
 

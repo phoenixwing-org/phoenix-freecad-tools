@@ -4,11 +4,13 @@
 from datetime import datetime, timezone
 import math
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import unicodedata
 
 from pft_thumbnail import sanitize_png
+from pft_thumbnail_framing import PftThumbnailFramingError, plan_perspective, verify_perspective
 
 PFT_MAX_THUMBNAIL_BYTES = 4 * 1024 * 1024
 PFT_MAX_THUMBNAIL_PIXELS = 1024 * 1024
@@ -24,6 +26,8 @@ TRANSLATABLE_STRINGS = (
     "当前活动文档或三维视图已变化，请刷新后重试。", "无法确认文档事务或编辑状态，未捕获缩略图。",
     "当前文档正在编辑或已有未完成事务，请先完成或取消。",
     "当前视图没有可完整读取的正交或透视相机，未捕获缩略图。",
+    "当前图像后端只能读取旧帧缓冲，无法确认重新构图；请切换图像后端后重试。",
+    "当前 macOS 的 Coin 离屏后端存在崩溃风险，未捕获缩略图；请选择默认或 FramebufferObject 后端。",
     "缩略图 PNG 超过4 MiB限制，请降低尺寸。", "缩略图捕获失败；未保存 CAD。",
     "相机恢复无法确认，请检查当前视图；未保存 CAD。",
     "缩略图包含当前三维视图所有可见对象，不按目标勾选过滤。",
@@ -132,6 +136,65 @@ def _restore_camera(node, snapshot, coin):
         raise RuntimeError("Camera restoration could not be completed")
 
 
+def _perspective_values(snapshot, width, height):
+    if snapshot["type"] != "PerspectiveCamera":
+        raise PftThumbnailFramingError()
+    return {**{name: state["value"] for name, state in snapshot["fields"].items()},
+            "width": width, "height": height}
+
+
+def _capture_backend(app, axonometric_fit):
+    try:
+        # This is the same parameter group used by native saveImage. ParamGet
+        # can lazily create the group; no preference value is written here.
+        backend = app.ParamGet("User parameter:BaseApp/Preferences/View").GetString("SavePicture", "")
+        if type(backend) is not str:
+            raise ValueError()
+    except Exception:
+        raise _error("THUMBNAIL_STATE_UNKNOWN", "无法确认文档事务或编辑状态，未捕获缩略图。") from None
+    if sys.platform == "darwin" and backend == "CoinOffscreenRenderer":
+        raise _error("THUMBNAIL_BACKEND_UNSUPPORTED",
+                     "当前 macOS 的 Coin 离屏后端存在崩溃风险，未捕获缩略图；请选择默认或 FramebufferObject 后端。")
+    if axonometric_fit and backend == "GrabFramebuffer":
+        raise _error("THUMBNAIL_FIT_BACKEND_UNSUPPORTED",
+                     "当前图像后端只能读取旧帧缓冲，无法确认重新构图；请切换图像后端后重试。")
+
+
+def _fit_perspective(node, scene, viewport, width, height, coin):
+    """Fit the same render scene, then check the values Coin actually stored.
+
+    This follows the existing camera/scene coordinate convention of viewAll;
+    it does not introduce support for transformed camera ancestors.
+    """
+    try:
+        values = _perspective_values(_camera_snapshot(node), width, height)
+        # Validate the camera before invoking a scene traversal.
+        plan_perspective(None, values)
+        action = coin.SoGetBoundingBoxAction(viewport)
+        action.apply(scene)
+        box = action.getBoundingBox()
+        empty = box.isEmpty()
+        # Coin's SbBool is int; Pivy versions may expose exact 0/1 rather
+        # than Python bool. Never accept arbitrary truthy native values.
+        if (type(empty) is not bool and type(empty) is not int) or empty not in (0, 1):
+            raise PftThumbnailFramingError()
+        empty = bool(empty)
+        bounds = None if empty else (tuple(box.getMin().getValue()), tuple(box.getMax().getValue()))
+        plan = plan_perspective(bounds, values)
+        if plan is None:
+            if _perspective_values(_camera_snapshot(node), width, height) != values:
+                raise PftThumbnailFramingError()
+            return
+        for name, value in plan["settings"].items():
+            if name == "position":
+                node.getField(name).setValue(*value)
+            else:
+                node.getField(name).setValue(value)
+        verify_perspective(plan, _perspective_values(_camera_snapshot(node), width, height))
+    except PftThumbnailFramingError:
+        raise _error("THUMBNAIL_CAMERA_UNSUPPORTED", "当前视图没有可完整读取的正交或透视相机，未捕获缩略图。") from None
+
+
 def capture_thumbnail(app, gui, document_name, width=512, height=512, background="white", axonometric_fit=True):
     """Return sanitized PNG bytes only after the original camera is verified."""
     if threading.current_thread() is not threading.main_thread():
@@ -145,6 +208,7 @@ def capture_thumbnail(app, gui, document_name, width=512, height=512, background
     if not isinstance(background, str) or background not in _BACKGROUNDS or type(axonometric_fit) is not bool:
         raise _error("THUMBNAIL_OPTIONS_INVALID", "缩略图背景或视角选项无效。")
     document, gui_document, view = _context(app, gui, document_name)
+    _capture_backend(app, axonometric_fit)
     try:
         from pivy import coin
         node = view.getCameraNode()
@@ -156,7 +220,11 @@ def capture_thumbnail(app, gui, document_name, width=512, height=512, background
     try:
         if axonometric_fit:
             node.getField("orientation").setValue(coin.SbRotation(*_ISOMETRIC))
-            node.viewAll(view.getSceneGraph(), coin.SbViewportRegion(width, height), 1.1)
+            scene, viewport = view.getSceneGraph(), coin.SbViewportRegion(width, height)
+            if before["type"] == "PerspectiveCamera":
+                _fit_perspective(node, scene, viewport, width, height, coin)
+            else:
+                node.viewAll(scene, viewport, 1.1)
         with tempfile.TemporaryDirectory(prefix="pft-thumbnail-") as temporary:
             path = Path(temporary) / "view.png"
             view.saveImage(str(path), width, height, _BACKGROUNDS[background])
@@ -181,6 +249,12 @@ def capture_thumbnail(app, gui, document_name, width=512, height=512, background
                 raise ValueError()
         except Exception:
             raise _error("THUMBNAIL_CAMERA_RESTORE_FAILED", "相机恢复无法确认，请检查当前视图；未保存 CAD。") from None
+    # Restoring Coin fields can synchronously notify immediate sensors. Verify
+    # the target and idle state again after those setters, without switching
+    # documents or closing a transaction introduced by a callback.
+    current_document, current_gui, current_view = _context(app, gui, document_name)
+    if current_document is not document or current_gui is not gui_document or current_view is not view:
+        raise _error("THUMBNAIL_DOCUMENT_CHANGED", "当前活动文档或三维视图已变化，请刷新后重试。")
     return {"png": png, "document": document_name, "width": width, "height": height,
             "captured_at": datetime.now(timezone.utc).isoformat(), "source_kind": "live_freecad_gui",
             "camera_restored": True, "saved_cad": False,

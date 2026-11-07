@@ -134,7 +134,8 @@ class PftChatProcess:
                    "lease": lease, "lease_release_attempted": False, "spawn_invoked": False,
                    "exit_confirmed": False, "pid": None, "running_kill_sent": False,
                    "timeout_generation": 0, "timeout_deadline": None, "timeout_callback": None,
-                   "timeout_handler": None, "timeout_connection": None}
+                   "timeout_handler": None, "timeout_connection": None,
+                   "receiver": None, "signal_connections": []}
         self._session = session
 
         def current():
@@ -175,6 +176,9 @@ class PftChatProcess:
             stop_timer()
             session["pending"].clear()
             session["stdout"].clear()
+            receiver = session["receiver"]
+            if receiver is not None:
+                receiver.invalidate()
             if self._session is session:
                 self._session = None
             try:
@@ -358,22 +362,71 @@ class PftChatProcess:
             except Exception:
                 failed("CHAT_TIMEOUT_CALLBACK_FAILED", "聊天超时处理失败，连接已停止；不会自动重试。")
 
-        # One stable slot for the lifetime of this exact owned session. Repeated
-        # arms change only deadline/state; they never reconnect Python closures.
-        session["timeout_handler"] = timed_out
         try:
-            connection = timer.timeout.connect(timed_out)
-            if not connection:
-                raise RuntimeError("timeout connection unavailable")
-            session["timeout_connection"] = connection
-            process.readyReadStandardOutput.connect(drain_stdout)
-            process.readyReadStandardError.connect(drain_stderr)
-            process.finished.connect(finished)
-            process.errorOccurred.connect(process_error)
-            process.started.connect(started)
-            destroyed = getattr(process, "destroyed", None)
-            if destroyed is not None:
-                destroyed.connect(lambda *_args: object_gone())
+            class _PftChatProcessReceiver(core.QObject):
+                """Keep Qt's signal context on the owned process, not a dialog."""
+                def __init__(self, parent, callbacks):
+                    super().__init__(parent)
+                    self._callbacks = callbacks
+
+                def invalidate(self):
+                    self._callbacks = {}
+
+                def _dispatch(self, name, *args):
+                    callback = self._callbacks.get(name)
+                    if callback is not None:
+                        callback(*args)
+
+                @core.Slot()
+                def read_stdout(self):
+                    self._dispatch("stdout")
+
+                @core.Slot()
+                def read_stderr(self):
+                    self._dispatch("stderr")
+
+                @core.Slot(int, core.QProcess.ExitStatus)
+                def process_finished(self, code, status):
+                    self._dispatch("finished", code, status)
+
+                @core.Slot(core.QProcess.ProcessError)
+                def process_error(self, error):
+                    self._dispatch("error", error)
+
+                @core.Slot()
+                def process_started(self):
+                    self._dispatch("started")
+
+                @core.Slot(core.QObject)
+                def process_destroyed(self, _object=None):
+                    # QObject emits destroyed before deleting its children, so
+                    # this process-owned receiver still handles that boundary.
+                    self._dispatch("destroyed")
+
+                @core.Slot()
+                def timed_out(self):
+                    self._dispatch("timeout")
+
+            receiver = _PftChatProcessReceiver(process, {
+                "stdout": drain_stdout, "stderr": drain_stderr, "finished": finished,
+                "error": process_error, "started": started, "destroyed": object_gone,
+                "timeout": timed_out})
+            session["receiver"] = receiver
+            # One stable QObject slot per signal for this exact session. Arms
+            # update only deadline/state, never the connection or its context.
+            session["timeout_handler"] = receiver.timed_out
+            for signal, slot in ((timer.timeout, session["timeout_handler"]),
+                                 (process.readyReadStandardOutput, receiver.read_stdout),
+                                 (process.readyReadStandardError, receiver.read_stderr),
+                                 (process.finished, receiver.process_finished),
+                                 (process.errorOccurred, receiver.process_error),
+                                 (process.started, receiver.process_started),
+                                 (process.destroyed, receiver.process_destroyed)):
+                connection = signal.connect(slot)
+                if not connection:
+                    raise RuntimeError("process signal connection unavailable")
+                session["signal_connections"].append(connection)
+            session["timeout_connection"] = session["signal_connections"][0]
             environment = core.QProcessEnvironment()
             for key, value in env.items():
                 if key in _PFT_ENVIRONMENT and isinstance(value, str):

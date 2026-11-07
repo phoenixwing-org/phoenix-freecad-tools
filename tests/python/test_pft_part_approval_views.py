@@ -86,7 +86,7 @@ class QtDouble:
         class Layout:
             def __init__(self, *args): self.children = []
             def setContentsMargins(self, *args): self.margins = args
-            def addWidget(self, item): self.children.append(item)
+            def addWidget(self, item, *args): self.children.append(item)
             def addLayout(self, item): self.children.append(item)
             def addStretch(self, *args): pass
         class Table(Base):
@@ -307,6 +307,244 @@ class PartApprovalViewTests(unittest.TestCase):
         result = self.dto("applied")
         result["result"]["design_result"] = dimension_result(self.preview["design_request"], self.preview["rows"])
         return result
+
+    def layout_preview(self, mixed=False):
+        plan = views._layout_sibling("pft_drawing_layout_plan")
+        core = plan._sibling("pft_drawing_layout")
+        source = {"version": 1,
+            "paper": {"width_mm": 297, "height_mm": 210, "margin_mm": 10, "reserved_rects": [[10, 10, 287, 80]]},
+            "view": {"name": "Front", "origin_mm": [120, 130], "bounds_mm": [100, 110, 140, 140]},
+            "obstacles": {"rects": [], "segments": []},
+            "spacing": {"clearance_mm": 1, "offset_mm": 6, "lane_mm": 8},
+            "dimensions": [{"edge": "Edge0", "kind": "DistanceX", "placement": "auto",
+                "geometry": {"curve": "line", "start_mm": [100, 110], "end_mm": [140, 110]},
+                "text": "40.00", "label_size_mm": [14, 5]}]}
+        intent = {"page": "Page", "view": "Front", "dimensions": [{"edge": "Edge0", "kind": "DistanceX", "placement": "auto"}]}
+        if mixed:
+            source["dimensions"].append({"edge": "Edge1", "kind": "DistanceY", "placement": "explicit",
+                "geometry": {"curve": "line", "start_mm": [100, 110], "end_mm": [100, 140]},
+                "text": "30.00", "label_size_mm": [14, 5], "x_mm": -36, "y_mm": 0})
+            intent["dimensions"].append({"edge": "Edge1", "kind": "DistanceY", "x_mm": -36, "y_mm": 0})
+        result = core.suggest_layout(source)
+        self.assertTrue(result["can_apply"])
+        request = {"page": "Page", "view": "Front", "dimensions": [
+            {key: row[key] for key in ("edge", "kind", "x_mm", "y_mm")} for row in result["dimensions"]]}
+        rows = [{"object": "Dimension%d" % index, "field": "TechDraw dimension", "old": None,
+            "new": 40. if index == 0 else 30., "status": "change", **row,
+            "value_mm": 40. if index == 0 else 30., "source": "native_cached_projected_geometry",
+            "note": "Native cached mm; view relative paper mm offsets; manual review."}
+            for index, row in enumerate(request["dimensions"])]
+        self.preview.update(operation="add_drawing_dimensions", changed_count=len(rows), design_request=request, rows=rows,
+            layout={"version": 1, "layout_verification": "suggested_only", "intent": intent,
+                "graphics": {"version": 1, "input": source, "result": result}, "reason_code": None})
+        self.status = self.dto()
+
+    def fake_layout(self, draft=False):
+        widgets = []
+        def create(parent=None, translate=None):
+            widget = self.qt.widgets.QLabel("layout notice", parent)
+            widget.set_plan = Mock(side_effect=lambda value: setattr(widget, "plan", deepcopy(value)))
+            widget.clear_plan = Mock(side_effect=lambda: setattr(widget, "plan", None))
+            widget.translate = translate
+            widgets.append(widget)
+            return widget
+        factory = Mock(side_effect=create)
+        sibling = views._layout_sibling
+        module = "pft_draft_layout_views" if draft else "pft_drawing_layout_views"
+        entry = "create_draft_layout_widget" if draft else "create_drawing_layout_widget"
+        guard = patch.object(views, "_layout_sibling", side_effect=lambda name:
+            types.SimpleNamespace(**{entry: factory}) if name == module else sibling(name))
+        guard.start(); self.addCleanup(guard.stop)
+        return widgets, factory
+
+    def draft_preview(self):
+        self.drawing_preview()
+        request = self.preview["design_request"]
+        names = [row["object"] for row in self.preview["rows"]]
+        for row in self.preview["rows"]: row["reason"] = ""
+        value = views._layout_sibling("pft_draft_layout").plan(request["source"], request["page"], names[2:], [70., 50., 8.])
+        self.preview.update(draft_layout=value, draft_layout_reason=None)
+        self.status = self.dto()
+
+    def test_legacy_drawing_never_loads_draft_layout_and_keeps_original_window(self):
+        self.drawing_preview()
+        with patch.object(views, "_layout_sibling", side_effect=AssertionError("legacy must not import layout")):
+            handle = self.open()
+        self.assertIsNone(handle.layout_widget)
+        self.assertEqual(handle.dialog.size, (720, 420))
+        self.assertEqual(handle.table.rows, 5)
+        self.confirm.assert_not_called()
+
+    def test_draft_pair_embeds_frozen_standalone_plan_and_only_existing_confirm(self):
+        self.draft_preview(); widgets, factory = self.fake_layout(draft=True)
+        handle = self.open(); widget = widgets[0]
+        self.assertEqual(handle.dialog.size, (720, 780))
+        self.assertEqual(handle.table.rows, 5)
+        self.assertIs(widget.parent, handle.dialog)
+        self.assertEqual(widget.plan, self.preview["draft_layout"])
+        self.preview["draft_layout"]["views"][0]["center_mm"][0] += 1
+        self.assertNotEqual(widget.plan, self.preview["draft_layout"])
+        self.assertEqual(len([x for x in self.qt.objects if type(x) is self.qt.widgets.QPushButton]), 2)
+        self.confirm.assert_not_called()
+        self.confirm.side_effect = self.drawing_applied
+        handle.confirm_button.clicked.emit(False)
+        self.assertTrue(handle._closed)
+        self.confirm.assert_called_once_with(); self.cancel.assert_not_called()
+        widget.clear_plan.assert_called_once_with()
+
+    def test_draft_pair_and_bound_names_geometry_are_required_before_qt(self):
+        self.draft_preview()
+        for mode in ("missing_layout", "missing_reason", "reason", "null", "source", "page", "row", "view", "center", "padding", "partial", "dimension_operation"):
+            bad = deepcopy(self.preview)
+            if mode == "missing_layout": del bad["draft_layout"]
+            elif mode == "missing_reason": del bad["draft_layout_reason"]
+            elif mode == "reason": bad["draft_layout_reason"] = "DRAWING_DRAFT_LAYOUT_NO_SPACE"
+            elif mode == "null": bad["draft_layout"] = None
+            elif mode == "source": bad["draft_layout"]["source"] = "OtherSource"
+            elif mode == "page": bad["draft_layout"]["page"] = "OtherPage"
+            elif mode == "row": bad["rows"][2]["object"] = "OtherView"
+            elif mode == "view": bad["draft_layout"]["views"][1]["name"] = "OtherView"
+            elif mode == "center": bad["draft_layout"]["views"][0]["center_mm"][0] += 1
+            elif mode == "padding": bad["draft_layout"]["annotation"]["margin_mm"] = 1
+            elif mode == "partial": bad["draft_layout"]["views"].pop()
+            else: bad["operation"] = "set_properties"
+            with self.subTest(mode=mode), patch.object(views, "_qt") as qt:
+                with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"):
+                    views.open_part_approval(self.qt.gui, bad, self.confirm, self.cancel, self.read)
+                qt.assert_not_called()
+
+    def test_draft_cancel_keys_and_layout_stale_cannot_confirm(self):
+        for mode in ("cancel", "escape", "return", "stale"):
+            self.draft_preview(); widgets, _ = self.fake_layout(draft=True); handle = self.open(); widget = widgets[-1]
+            if mode == "cancel": handle.cancel_button.clicked.emit(False)
+            elif mode == "stale":
+                self.status = self.dto("failed", "DRAWING_DRAFT_LAYOUT_STALE"); handle.timer.timeout.emit()
+                self.assertFalse(handle.confirm_button.enabled)
+                self.assertIn("DRAWING_DRAFT_LAYOUT_STALE", handle.status_label.text)
+                handle.confirm_button.clicked.emit(False); handle.close()
+            else: handle.dialog.keyPressEvent(Event(self.qt.core.Qt.Key.Key_Escape if mode == "escape" else self.qt.core.Qt.Key.Key_Return))
+            self.assertTrue(handle._closed); widget.clear_plan.assert_called_once_with()
+            self.confirm.assert_not_called()
+
+    def test_blocked_draft_never_constructs_an_approval_window(self):
+        self.draft_preview()
+        self.preview.update(can_apply=False, changed_count=0, draft_layout=None,
+            draft_layout_reason="DRAWING_DRAFT_LAYOUT_NO_SPACE",
+            design_request={"source": self.preview["design_request"]["source"], "page": None},
+            rows=[{"object": self.preview["design_request"]["source"], "field": "TechDraw draft node",
+                   "old": None, "new": None, "status": "blocked", "reason": "No complete neutral layout"}])
+        with patch.object(views, "_qt") as qt:
+            with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"): self.open()
+            qt.assert_not_called()
+        self.confirm.assert_not_called(); self.cancel.assert_not_called()
+
+    def test_manual_dimensions_never_load_or_display_layout_components(self):
+        self.dimension_preview()
+        with patch.object(views, "_layout_sibling", side_effect=AssertionError("manual path must not load layout")):
+            handle = self.open()
+        self.assertIsNone(handle.layout_widget)
+        self.assertEqual(handle.dialog.size, (720, 420))
+        self.assertNotIn("layout", handle.preview)
+        self.confirm.assert_not_called()
+
+    def test_auto_layout_binds_frozen_graphics_and_keeps_only_existing_confirmation(self):
+        self.layout_preview(mixed=True); widgets, factory = self.fake_layout()
+        tr = lambda value: value
+        handle = self.open(tr); widget = widgets[0]
+        self.assertIs(widget.parent, handle.dialog)
+        self.assertIs(widget.translate, tr)
+        self.assertIs(handle.layout_widget, widget)
+        self.assertEqual(handle.dialog.size, (720, 780))
+        self.assertEqual(widget.plan, self.preview["layout"]["graphics"])
+        self.assertEqual(len([item for item in self.qt.objects if type(item) is self.qt.widgets.QPushButton]), 2)
+        self.preview["layout"]["graphics"]["result"]["dimensions"][0]["text"] = "caller mutation"
+        self.assertEqual(widget.plan["result"]["dimensions"][0]["text"], "40.00")
+        self.assertEqual(handle.preview["layout"]["graphics"]["result"]["dimensions"][0]["text"], "40.00")
+        factory.assert_called_once()
+        self.confirm.assert_not_called()
+        self.confirm.side_effect = self.dimension_applied
+        handle.confirm_button.clicked.emit(False)
+        self.assertTrue(handle._closed)
+        widget.clear_plan.assert_called_once_with()
+        self.assertIsNone(widget.plan)
+        self.assertIsNone(handle.layout_widget)
+        self.confirm.assert_called_once_with()
+        self.cancel.assert_not_called()
+
+    def test_layout_rejects_unbound_intent_graphics_and_rows_before_qt(self):
+        self.layout_preview(mixed=True)
+        for mode in ("intent", "intent_manual", "explicit", "order", "resolved", "row", "text", "box", "blocked", "null", "reason", "extra"):
+            bad = deepcopy(self.preview); layout = bad["layout"]
+            if mode == "intent": layout["intent"]["dimensions"][0]["edge"] = "Edge7"
+            elif mode == "intent_manual": layout["intent"] = deepcopy(bad["design_request"])
+            elif mode == "explicit": layout["intent"]["dimensions"][1]["x_mm"] += 1
+            elif mode == "order": layout["intent"]["dimensions"].reverse()
+            elif mode == "resolved": bad["design_request"]["dimensions"][0]["x_mm"] += 1
+            elif mode == "row": bad["rows"][0]["x_mm"] += 1
+            elif mode == "text": layout["graphics"]["result"]["dimensions"][0]["text"] = "different"
+            elif mode == "box": layout["graphics"]["result"]["dimensions"][0]["label_box_mm"][0] += 1
+            elif mode == "blocked": layout["graphics"]["result"].update(can_apply=False, dimensions=[])
+            elif mode == "null": layout["graphics"] = None
+            elif mode == "reason": layout["reason_code"] = "DRAWING_LAYOUT_PROFILE_UNSUPPORTED"
+            else: layout["confirm"] = True
+            with self.subTest(mode=mode), patch.object(views, "_qt") as qt:
+                with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"):
+                    views.open_part_approval(self.qt.gui, bad, self.confirm, self.cancel, self.read)
+                qt.assert_not_called()
+        self.confirm.assert_not_called(); self.cancel.assert_not_called()
+
+    def test_layout_on_manual_only_or_other_operation_is_rejected(self):
+        self.layout_preview(); layout = deepcopy(self.preview["layout"])
+        self.dimension_preview(); self.preview["layout"] = layout
+        self.preview["layout"]["intent"] = deepcopy(self.preview["design_request"])
+        with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"): self.open()
+        self.pad_preview(); self.preview["layout"] = layout
+        with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"): self.open()
+
+    def test_layout_cancel_escape_expiry_and_stale_keep_native_authority_closed(self):
+        for mode in ("cancel", "escape", "expired", "stale"):
+            self.layout_preview(); widgets, _ = self.fake_layout(); handle = self.open(); widget = widgets[-1]
+            if mode == "cancel": handle.cancel_button.clicked.emit(False)
+            elif mode == "escape": handle.dialog.keyPressEvent(Event(self.qt.core.Qt.Key.Key_Escape))
+            elif mode == "expired": self.status = self.dto("expired"); handle.timer.timeout.emit()
+            else:
+                self.status = self.dto("failed", "DIMENSION_LAYOUT_STALE"); handle.timer.timeout.emit()
+                self.assertFalse(handle.confirm_button.enabled)
+                self.assertIn("DIMENSION_LAYOUT_STALE", handle.status_label.text)
+                handle.confirm_button.clicked.emit(False); handle.close()
+            self.assertTrue(handle._closed)
+            widget.clear_plan.assert_called_once_with()
+            self.assertIsNone(widget.plan)
+            self.confirm.assert_not_called()
+
+    def test_fixed_layout_loader_rejects_cached_module_from_another_location(self):
+        name = "pft_drawing_layout_plan"
+        saved = views._LAYOUT_MODULES.pop(name, None)
+        try:
+            views._LAYOUT_MODULES[name] = types.SimpleNamespace(__file__=str(ADDON / "different.py"))
+            with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"):
+                views._layout_sibling(name)
+            with self.assertRaisesRegex(ValueError, "^PART_APPROVAL_PREVIEW_INVALID$"):
+                views._layout_sibling("unregistered")
+        finally:
+            views._LAYOUT_MODULES.pop(name, None)
+            if saved is not None: views._LAYOUT_MODULES[name] = saved
+
+    def test_layout_construction_failure_cancels_without_degraded_confirmation(self):
+        self.layout_preview(); widgets, factory = self.fake_layout()
+        for mode in ("factory", "set_plan"):
+            with self.subTest(mode=mode):
+                self.cancel.reset_mock()
+                if mode == "factory": factory.side_effect = RuntimeError("private synthetic detail")
+                else:
+                    widget = self.qt.widgets.QLabel("layout", self.qt.window)
+                    widget.set_plan = Mock(side_effect=RuntimeError("private synthetic detail"))
+                    widget.clear_plan = Mock()
+                    factory.side_effect = None; factory.return_value = widget
+                with self.assertRaisesRegex(RuntimeError, "^PART_APPROVAL_UI_UNAVAILABLE$"): self.open()
+                self.assertFalse(views._HANDLES)
+                self.confirm.assert_not_called(); self.cancel.assert_called_once_with()
+                if mode == "set_plan": widget.clear_plan.assert_called_once_with()
 
     def test_dimension_preview_shows_all_values_references_offsets_without_approval(self):
         self.dimension_preview(); handle = self.open()

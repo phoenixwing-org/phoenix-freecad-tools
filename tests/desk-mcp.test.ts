@@ -132,7 +132,7 @@ function success(result: Awaited<ReturnType<Client['callTool']>>, sourceKind: st
 
 test('Desk real stdio status, search and bounded reference batches preserve provenance and redact identity', { timeout: 30000 }, async t => {
   const f = await fixture(t), client = await f.connect(), list = await client.listTools();
-  assert.equal(list.tools.length, 30);
+  assert.equal(list.tools.length, 33);
   assert.deepEqual(list.tools.filter(tool => tool.name.startsWith('desk_')).map(tool => tool.name).sort(), [...DESK_TOOLS].sort());
   for (const tool of list.tools.filter(tool => DESK_TOOLS.includes(tool.name))) {
     assert.equal(tool.annotations?.readOnlyHint, true); assert.equal(tool.annotations?.destructiveHint, false);
@@ -212,9 +212,9 @@ test('Desk real stdio rejects malformed schemas before any CLI or HTTP request',
   assert.equal(f.cliCalls().length, 0); assert.equal(f.calls.length, 0);
 });
 
-test('Desk configuration leaves default 25 tools and chat 19 tools offline without CLI discovery', { timeout: 30000 }, async t => {
+test('Desk configuration leaves default 28 tools and chat 22 tools offline without CLI discovery', { timeout: 30000 }, async t => {
   const f = await fixture(t);
-  for (const [scope, configured, count] of [['full', false, 25], ['chat', true, 19]] as const) {
+  for (const [scope, configured, count] of [['full', false, 28], ['chat', true, 22]] as const) {
     const client = await f.connect(scope, configured), list = await client.listTools();
     assert.equal(list.tools.length, count); assert.equal(list.tools.some(tool => tool.name.startsWith('desk_')), false);
     const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
@@ -250,9 +250,9 @@ test('Desk full CallToolResult budget rejects doubled text plus structured outpu
 });
 
 
-test('chat explicit Desk opt-in exposes 24 tools and reads only the requested stored index', { timeout: 30000 }, async t => {
+test('chat explicit Desk opt-in exposes 27 tools and reads only the requested stored index', { timeout: 30000 }, async t => {
   const f = await fixture(t), client = await f.connect('chat', true, true), tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 27);
   assert.deepEqual(tools.filter(tool => tool.name.startsWith('desk_')).map(tool => tool.name).sort(), [...DESK_TOOLS].sort());
   const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
   assert.equal(record(capabilities.structuredContent?.desk).explicit_chat_opt_in, true);

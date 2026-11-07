@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Controller: isolated Codex 0.160.0 chat state, without Qt or CAD access."""
+"""Controller: isolated, version-verified Codex chat state, without Qt or CAD access."""
 
 import copy
 import hashlib
@@ -16,6 +16,7 @@ _PFT_MODEL_PAGE_LIMIT = 20
 _PFT_MODEL_MAX_PAGES = 5
 _PFT_MODEL_MAX_ITEMS = 100
 _PFT_MODEL_TIMEOUT_SECONDS = 30
+_PFT_SUPPORTED_CLI_VERSIONS = frozenset(("0.160.0", "0.167.0-alpha.3.2"))
 _PFT_DISABLE = ("shell_tool", "unified_exec", "apps", "hooks", "multi_agent",
                 "remote_plugin", "plugins", "apply_patch_freeform")
 _PFT_ENV = ("PATH", "HOME", "USERPROFILE", "SystemRoot", "SYSTEMROOT", "WINDIR",
@@ -25,7 +26,8 @@ _PFT_CHAT_TOOLS = ("get_capabilities", "get_connection_status", "list_documents"
                    "list_objects", "get_object_info", "get_selection", "measure_geometry",
                    "list_drawing_pages", "inspect_drawing_page", "fit_view", "set_axonometric_view",
                    "set_view", "set_appearance", "get_script_status", "inspect_design",
-                   "prepare_part_changes", "request_part_change_approval", "get_part_change_status")
+                   "prepare_part_changes", "request_part_change_approval", "get_part_change_status",
+                   "prepare_drawing_export", "request_drawing_export_approval", "get_drawing_export_status")
 
 _PFT_DESK_TOOLS = ("desk_get_connection_status", "desk_search_index", "desk_query_references",
                    "desk_query_cached_metadata", "desk_get_cached_thumbnail")
@@ -159,6 +161,17 @@ def _developer_instructions(mcp):
             "Report projection_verification not_checked and manual_review_required; inspect the returned page and ask the user to review it. "
             "For add_drawing_dimensions require an applied drawing_dimensions result bound to the requested page, view, ordered edges, kinds and offsets, with native_reference_and_value_checked. "
             "This verifies current references and measurements, not projection freshness or drawing completeness; report projection_verification not_checked and manual_review_required. "
+            "For an explicitly requested single-page PDF export, use prepare_drawing_export with exact document/page, format pdf and one stable requestId. "
+            "Its prepared state is an in-memory plan, not captured PDF bytes or a published file. "
+            "Show the complete returned summary and limitations, then request_drawing_export_approval with the ORIGINAL token. "
+            "Only the human may use the FreeCAD native window to explicitly capture the page, review the exact frozen PDF, choose a destination and finally publish. "
+            "Native capture may refresh drawing caches; it never authorizes arbitrary recompute, source edits or CAD saving. "
+            "Never provide a file path, confirmation or overwrite flag, simulate native clicks, choose a destination or substitute scripts for this export workflow. "
+            "Query get_drawing_export_status with the ORIGINAL token only after the human responds; do not busy-poll. "
+            "A capture confirmation does not grant publication. Report a published file only when state and publication_state are published and native_publication_confirmation is true. "
+            "Report capture_state, cleanup_state and cad_protection_state separately; unknown is neither failure nor proof that no file was written. "
+            "These are memory history results, not current filesystem checks; CAD Undo cannot roll back a published file. "
+            "On an export timeout retain the original requestId and token; never automatically retry, recapture, publish again or create a replacement request. "
             "Cancelled, failed, expired or unknown tokens never authorize another write; inspect state and prepare again only on user request. "
             "On a timeout first query the original token, never prepare a replacement to repeat a potentially executed write. "
             "Never save CAD files automatically. Do not run scripts, shell commands, other local file operations, apps or web tools.")
@@ -173,11 +186,12 @@ def _developer_instructions(mcp):
     return instructions
 
 
-def _isolated_config(mcp):
+def _isolated_config(mcp, respect_system_proxy=True):
     config = {"approval_policy": "never", "sandbox_mode": "read-only",
               "model_provider": "openai", "forced_login_method": "chatgpt",
               "web_search": "disabled", "cli_auth_credentials_store": "file",
-              "features": {name: False for name in _PFT_DISABLE},
+              "features": dict({name: False for name in _PFT_DISABLE},
+                               respect_system_proxy=respect_system_proxy, system_proxy_fallback=False),
               "tools": {"view_image": False}, "mcp_servers": {}}
     if mcp is not None:
         config["mcp_servers"] = {_PFT_MCP_SERVER: {
@@ -187,11 +201,13 @@ def _isolated_config(mcp):
     return config
 
 
-def chat_scope_fingerprint(mcp=None):
+def chat_scope_fingerprint(mcp=None, respect_system_proxy=True, cli_version="0.160.0"):
     """Hash the exact current policy and tool scope; never persist path text."""
     mcp = _mcp_configuration(mcp)
-    value = {"schema_version": 1, "plugin_version": "0.3.2", "cli_version": "0.160.0",
-             "config": _isolated_config(mcp), "instructions": _developer_instructions(mcp)}
+    if type(cli_version) is not str or cli_version not in _PFT_SUPPORTED_CLI_VERSIONS:
+        raise ValueError("unsupported chat protocol version")
+    value = {"schema_version": 1, "plugin_version": "0.4.1", "cli_version": cli_version,
+             "config": _isolated_config(mcp, respect_system_proxy), "instructions": _developer_instructions(mcp)}
     raw = json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False,
                      separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -205,7 +221,8 @@ def _session_record(value):
             or not _string(value["model"], 256) or value["model"] != value["model"].strip()
             or type(value["scope_fingerprint"]) is not str
             or re.fullmatch(r"[0-9a-f]{64}", value["scope_fingerprint"]) is None
-            or value["history_mode"] != "paginated" or value["cli_version"] != "0.160.0"
+            or value["history_mode"] != "paginated" or type(value["cli_version"]) is not str
+            or value["cli_version"] not in _PFT_SUPPORTED_CLI_VERSIONS
             or value["provider"] != "openai"):
         raise ValueError("unrecognized owned session record")
     return copy.deepcopy(value)
@@ -245,6 +262,7 @@ class PftChatController:
     def __init__(self, transport, changed, open_url, network_environment=None, session_store=None):
         self.transport, self.changed, self.open_url = transport, changed, open_url
         self._network_environment = network_environment
+        self._respect_system_proxy = True
         self._default_session_store = session_store
         self._session_store = None
         self._retain_history, self._resume_record, self._registered_session = False, None, None
@@ -259,6 +277,7 @@ class PftChatController:
         self._transcript, self._message_times, self._error, self._pending = [], [], None, {}
         self._reset_timing()
         self._connected, self._initialized = False, False
+        self._cli_version = None
         self._thread_id = self._turn_id = self._login_id = None
         self._login_url = self._login_stage = None
         self._send_attempt = self._pending_text = self._early_login = None
@@ -561,26 +580,6 @@ class PftChatController:
         if os.path.normpath(home) == os.path.normpath(default_home) or os.path.normpath(home) == os.path.normpath(cwd):
             self._publish(PftChatError("CHAT_ISOLATION_REQUIRED", "请使用独立的聊天配置目录和干净工作目录。"))
             return
-        store, resume = None, None
-        if type(retain_history) is not bool or resume_session is not None and not retain_history:
-            self._publish(PftChatError("CHAT_HISTORY_CONFIGURATION_INVALID", "恢复会话需要明确开启本机历史保留。"))
-            return
-        if retain_history:
-            store = session_store if session_store is not None else self._default_session_store
-            try:
-                if store is None or store.home != home or store.cwd != cwd:
-                    raise ValueError("profile-bound store required")
-                if resume_session is not None:
-                    candidate = _session_record(resume_session)
-                    resume = _session_record(store.get_session(candidate["thread_id"]))
-                    if (candidate != resume or resume["scope_fingerprint"] != chat_scope_fingerprint(mcp)
-                            or model_id is not None and model_id != resume["model"]):
-                        raise ValueError("owned session scope or model mismatch")
-                    model_id = resume["model"]
-            except Exception:
-                self._publish(PftChatError("CHAT_HISTORY_CONFIGURATION_INVALID",
-                    "会话登记、配置范围或原模型不匹配；未连接，也未读取其他会话。"))
-                return
         try:
             if self._network_environment is None:
                 from pft_chat_network import build_chat_proxy_environment
@@ -604,9 +603,34 @@ class PftChatController:
             code = code if isinstance(code, str) and code in messages else "CHAT_PROXY_READ_FAILED"
             self._publish(PftChatError(code, messages[code]))
             return
+        respect_system_proxy = not any(key in proxy_environment for key in
+            ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"))
+        store, resume = None, None
+        if type(retain_history) is not bool or resume_session is not None and not retain_history:
+            self._publish(PftChatError("CHAT_HISTORY_CONFIGURATION_INVALID", "恢复会话需要明确开启本机历史保留。"))
+            return
+        if retain_history:
+            store = session_store if session_store is not None else self._default_session_store
+            try:
+                if store is None or store.home != home or store.cwd != cwd:
+                    raise ValueError("profile-bound store required")
+                if resume_session is not None:
+                    candidate = _session_record(resume_session)
+                    resume = _session_record(store.get_session(candidate["thread_id"]))
+                    if (candidate != resume or resume["scope_fingerprint"] != chat_scope_fingerprint(
+                            mcp, respect_system_proxy, resume["cli_version"])
+                            or model_id is not None and model_id != resume["model"]):
+                        raise ValueError("owned session scope or model mismatch")
+                    model_id = resume["model"]
+            except Exception:
+                self._publish(PftChatError("CHAT_HISTORY_CONFIGURATION_INVALID",
+                    "会话登记、配置范围或原模型不匹配；未连接，也未读取其他会话。"))
+                return
         self._generation += 1
         generation = self._generation
+        self._cli_version = None
         self._home, self._cwd = home, cwd
+        self._respect_system_proxy = respect_system_proxy
         self._transcript, self._message_times, self._items, self._pending = [], [], {}, {}
         self._reset_timing()
         self._completed_turns.clear()
@@ -626,6 +650,10 @@ class PftChatController:
         self._mcp, self._tool_calls, self._tool_items = mcp, [], {}
         self._connected = True
         self._publish()
+        # A synchronous UI callback may close or replace this connection.
+        # Do not spawn an uninitialized child after its owner disconnected.
+        if generation != self._generation or not self._connected or self._phase != "connecting":
+            return
         arguments = []
         for feature in _PFT_DISABLE:
             arguments.extend(("--disable", feature))
@@ -633,7 +661,11 @@ class PftChatController:
                           "-c", "analytics.enabled=false", "-c", "feedback.enabled=false"))
         if mcp is not None:
             arguments.extend(("-c", _mcp_override(mcp)))
-        arguments.extend(("app-server", "--listen", "stdio://"))
+        # The pinned official client resolves system rules per destination.
+        # Disable its auth-only fallback so a failed explicit route is not
+        # retried through a different system route behind the user's back.
+        arguments.extend(("--enable" if respect_system_proxy else "--disable", "respect_system_proxy",
+                          "--disable", "system_proxy_fallback", "app-server", "--listen", "stdio://"))
         environment = {key: os.environ[key] for key in _PFT_ENV if key in os.environ}
         environment.update(proxy_environment)
         environment.update(CODEX_HOME=home, OTEL_SDK_DISABLED="true", DO_NOT_TRACK="1")
@@ -654,8 +686,17 @@ class PftChatController:
         def failed(error):
             if self._generation == generation:
                 code = getattr(error, "code", "CHAT_PROCESS_FAILED")
+                if not isinstance(code, str):
+                    code = "CHAT_PROCESS_FAILED"
                 messages = {"CHAT_TIMEOUT": "聊天操作超时，连接已停止；不会自动重试。",
                             "CHAT_PROTOCOL_TOO_LARGE": "聊天服务消息超过限制，连接已停止。",
+                            "CHAT_PROCESS_BUSY": "聊天进程尚未退出，请稍后重试。",
+                            "CHAT_NOT_CONNECTED": "聊天连接尚未就绪。",
+                            "CHAT_WRITE_TOO_LARGE": "待发送聊天消息超过限制。",
+                            "CHAT_WRITE_FAILED": "无法发送聊天消息，连接已停止。",
+                            "CHAT_PROTOCOL_INVALID": "聊天服务返回无效消息，连接已停止。",
+                            "CHAT_STDERR_TOO_LARGE": "聊天服务诊断输出超过限制，连接已停止。",
+                            "CHAT_TIMEOUT_CALLBACK_FAILED": "聊天超时处理失败，连接已停止；不会自动重试。",
                             "CHAT_PROCESS_LEASE_BUSY": "专属聊天配置已有进程登记；请先核对原连接，不会接管或自动重试。",
                             "CHAT_PROCESS_LEASE_UNSUPPORTED": "当前平台无法验证聊天进程锁，未启动连接。",
                             "CHAT_PROCESS_LEASE_UPDATE_UNVERIFIED": "聊天进程登记未确认，连接已停止；不会自动重试。",
@@ -674,8 +715,14 @@ class PftChatController:
 
     def _initialize(self, result):
         user_agent = result.get("userAgent")
-        if not isinstance(user_agent, str) or not re.search(r"(?:^|[ /])0\.160\.0(?:[ (]|$)", user_agent):
-            self._fatal("CHAT_UNSUPPORTED_VERSION", "仅支持 Codex CLI 0.160.0，当前服务版本不兼容。")
+        version = (re.search(r"(?:^|[ /])(0\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)(?=[ (]|$)", user_agent)
+                   if isinstance(user_agent, str) else None)
+        if version is None or version.group(1) not in _PFT_SUPPORTED_CLI_VERSIONS:
+            self._fatal("CHAT_UNSUPPORTED_VERSION", "当前 Codex CLI 版本尚未验证；支持 0.160.0 或 0.167.0-alpha.3.2。")
+            return
+        self._cli_version = version.group(1)
+        if self._resume_record is not None and self._resume_record["cli_version"] != self._cli_version:
+            self._history_failure("CHAT_HISTORY_VERSION_MISMATCH", "原会话与当前 Codex CLI 版本不同；未迁移登记，也未读取历史。")
             return
         self._initialized = True
         self._write({"method": "initialized", "params": {}})
@@ -690,9 +737,11 @@ class PftChatController:
         self._request("account/read", {"refreshToken": False}, self._account_read)
 
     def _account_read(self, result):
-        if "account" not in result:
-            raise ValueError("missing account")
-        account = result["account"]
+        # Codex 0.160.0's stable response makes this nullable field optional.
+        # Omission never proves authentication, even if OpenAI auth is optional.
+        if "account" not in result and type(result.get("requiresOpenaiAuth")) is not bool:
+            raise ValueError("missing account authentication requirement")
+        account = result.get("account")
         self._clear_login_link()
         if account is None:
             self._account, self._phase = "none", "signed_out"
@@ -830,6 +879,8 @@ class PftChatController:
             # every read tool is disabled; an explicit enabled value is rejected.
             if (not isinstance(config, dict) or any(config.get(key) != value for key, value in required.items())
                     or not isinstance(features, dict) or any(features.get(key) is not False for key in _PFT_DISABLE)
+                    or features.get("respect_system_proxy") is not self._respect_system_proxy
+                    or features.get("system_proxy_fallback") is not False
                     or ("tools" in config and not isinstance(tools, dict))
                     or (isinstance(tools, dict) and "view_image" in tools and tools["view_image"] is not False)):
                 self._fatal("CHAT_EFFECTIVE_CONFIG_REJECTED", "无法确认聊天的有效隔离配置，未发送消息。")
@@ -908,7 +959,7 @@ class PftChatController:
         params = {"cwd": self._cwd, "modelProvider": "openai", "sandbox": "read-only",
                   "approvalPolicy": "never", "approvalsReviewer": "user",
                   "developerInstructions": _developer_instructions(self._mcp),
-                  "config": _isolated_config(self._mcp)}
+                  "config": _isolated_config(self._mcp, self._respect_system_proxy)}
         if self._selected_model is not None:
             if self._models_status != "ready" or not any(row["model"] == self._selected_model for row in self._models):
                 self._fatal("CHAT_MODEL_UNAVAILABLE", "所选模型未通过本次连接的模型列表验证，未发送消息。")
@@ -919,7 +970,7 @@ class PftChatController:
     def _thread_policy_valid(self, result, ephemeral):
         thread, policy = result.get("thread"), result.get("sandbox")
         return (isinstance(thread, dict) and _string(thread.get("id"))
-                and thread.get("cliVersion") == "0.160.0" and thread.get("ephemeral") is ephemeral
+                and thread.get("cliVersion") == self._cli_version and thread.get("ephemeral") is ephemeral
                 and result.get("approvalPolicy") == "never" and result.get("modelProvider") == "openai"
                 and isinstance(policy, dict) and policy.get("type") == "readOnly"
                 and policy.get("networkAccess") is False and result.get("cwd") == self._cwd
@@ -948,7 +999,7 @@ class PftChatController:
                 try:
                     self._new_thread_record = _session_record({
                         "thread_id": thread["id"], "created_at": thread["createdAt"], "model": result["model"],
-                        "scope_fingerprint": chat_scope_fingerprint(self._mcp), "history_mode": thread["historyMode"],
+                        "scope_fingerprint": chat_scope_fingerprint(self._mcp, self._respect_system_proxy, self._cli_version), "history_mode": thread["historyMode"],
                         "cli_version": thread["cliVersion"], "provider": thread["modelProvider"]})
                 except Exception:
                     self._fatal("CHAT_HISTORY_METADATA_INVALID", "持久会话元数据不符合约定；未登记，也未发送消息。")
@@ -964,7 +1015,8 @@ class PftChatController:
                     or self._session_store.cwd != self._cwd):
                 raise ValueError("owned store unavailable")
             actual = self._session_store.register_thread(expected["thread_id"], expected["created_at"],
-                expected["model"], expected["scope_fingerprint"], expected["history_mode"])
+                expected["model"], expected["scope_fingerprint"], expected["history_mode"],
+                cli_version=expected["cli_version"])
             if _session_record(actual) != expected:
                 raise ValueError("owned registration mismatch")
         except Exception:
@@ -986,7 +1038,8 @@ class PftChatController:
             record = self._resume_record
             if (self._session_store.home != self._home or self._session_store.cwd != self._cwd
                     or _session_record(self._session_store.get_session(record["thread_id"])) != record
-                    or record["scope_fingerprint"] != chat_scope_fingerprint(self._mcp)
+                    or record["cli_version"] != self._cli_version
+                    or record["scope_fingerprint"] != chat_scope_fingerprint(self._mcp, self._respect_system_proxy, self._cli_version)
                     or self._selected_model != record["model"] or self._models_status != "ready"
                     or not any(row["model"] == record["model"] for row in self._models)):
                 raise ValueError("owned session or model unavailable")

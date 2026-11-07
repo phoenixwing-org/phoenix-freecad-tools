@@ -18,7 +18,8 @@ spec.loader.exec_module(chat)
 EXPECTED_CHAT_TOOLS = ('get_capabilities', 'get_connection_status', 'list_documents', 'get_document_info',
     'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'list_drawing_pages',
     'inspect_drawing_page', 'fit_view', 'set_axonometric_view', 'set_view', 'set_appearance', 'get_script_status', 'inspect_design',
-    'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status')
+    'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status',
+    'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status')
 
 EXPECTED_DESK_TOOLS = ("desk_get_connection_status", "desk_search_index", "desk_query_references",
                    "desk_query_cached_metadata", "desk_get_cached_thumbnail")
@@ -65,13 +66,13 @@ class PftSessionStore:
         self.gets.append(thread_id)
         return dict(self.records[thread_id])
 
-    def register_thread(self, thread_id, created_at, model, scope_fingerprint, history_mode='paginated'):
+    def register_thread(self, thread_id, created_at, model, scope_fingerprint, history_mode='paginated', *, cli_version='0.160.0'):
         self.registrations.append((thread_id, created_at, model, scope_fingerprint, history_mode))
         if self.register_error is not None:
             raise self.register_error
         row = {'thread_id': thread_id, 'created_at': created_at, 'model': model,
                'scope_fingerprint': scope_fingerprint, 'history_mode': history_mode,
-               'cli_version': '0.160.0', 'provider': 'openai'}
+               'cli_version': cli_version, 'provider': 'openai'}
         self.records[thread_id] = row
         return dict(row)
 
@@ -110,6 +111,7 @@ class PftChatControllerTests(unittest.TestCase):
                 'features': {key: False for key in ('shell_tool', 'unified_exec', 'apps', 'hooks',
                     'multi_agent', 'remote_plugin', 'plugins', 'apply_patch_freeform')},
                 'tools': {'view_image': False}}
+        result['features'].update(respect_system_proxy=self.controller._respect_system_proxy, system_proxy_fallback=False)
         if self.configured_mcp is not None:
             result['mcp_servers'] = {'phoenix_freecad': {'command': self.configured_mcp['node_executable'],
                 'args': [self.configured_mcp['cli_entry']], 'env': {'PHOENIX_FREECAD_TOOL_SCOPE': 'chat',
@@ -165,6 +167,124 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertGreater(connected, before)
         self.controller.disconnect()
         self.assertGreater(self.controller.snapshot['connection_generation'], connected)
+
+    def test_verified_current_cli_completes_login_and_turn_with_unchanged_policy_checks(self):
+        version = '0.167.0-alpha.3.2'
+        self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+        self.transport.result('initialize', {'userAgent': 'codex_cli_rs/' + version + ' (fixture)'})
+        self.transport.result('account/read', {'requiresOpenaiAuth': True})
+        self.assertEqual(self.controller.snapshot['phase'], 'signed_out')
+        self.controller.login()
+        self.transport.result('account/login/start', {'type': 'chatgpt', 'loginId': 'neutral-login',
+            'authUrl': 'https://auth.openai.com/authorize'})
+        self.transport.notify('account/login/completed', {'loginId': 'neutral-login', 'success': True})
+        self.transport.result('account/read', {'requiresOpenaiAuth': True, 'account': {'type': 'chatgpt'}})
+        self.transport.result('model/list', {'data': [self.model_row()]})
+        self.controller.send('Neutral compatible request')
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        result = self.thread_result()
+        result['thread']['cliVersion'] = version
+        self.transport.result('thread/start', result)
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        self.transport.result('turn/start', {'turn': {'id': 'private-turn-fixture', 'items': [], 'status': 'inProgress'}})
+        self.transport.notify('item/agentMessage/delta', self.event(itemId='neutral-answer', delta='Neutral reply'))
+        self.complete()
+        self.assertEqual(self.controller.snapshot['phase'], 'ready')
+        self.assertEqual(self.controller.snapshot['transcript'][-1]['text'], 'Neutral reply')
+
+    def test_unverified_cli_versions_and_current_cli_policy_drift_never_send(self):
+        for version in ('0.167.0', '0.167.0-alpha.3.20', '0.167.0-alpha.3.2+unknown', '0.160.0-alpha.1'):
+            with self.subTest(version=version):
+                self.setUp()
+                self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+                self.transport.result('initialize', {'userAgent': 'codex_cli_rs/' + version + ' (fixture)'})
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_UNSUPPORTED_VERSION')
+                self.assertNotIn('account/read', self.transport.methods())
+        for change in ('version', 'sandbox', 'network', 'missing_network', 'approval', 'provider', 'cwd'):
+            with self.subTest(change=change):
+                self.setUp()
+                self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+                self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.167.0-alpha.3.2 (fixture)'})
+                self.transport.result('account/read', {'account': {'type': 'chatgpt'}, 'requiresOpenaiAuth': True})
+                self.controller.send('Neutral rejected request')
+                self.pass_config()
+                self.transport.result('mcpServerStatus/list', self.inventory())
+                result = self.thread_result()
+                result['thread']['cliVersion'] = '0.167.0-alpha.3.2'
+                if change == 'version': result['thread']['cliVersion'] = '0.160.0'
+                elif change == 'sandbox': result['sandbox']['type'] = 'workspaceWrite'
+                elif change == 'network': result['sandbox']['networkAccess'] = True
+                elif change == 'missing_network': del result['sandbox']['networkAccess']
+                elif change == 'approval': result['approvalPolicy'] = 'on-request'
+                elif change == 'provider': result['modelProvider'] = 'unverified'
+                elif change == 'cwd': result['cwd'] = '/var/example/other-work'
+                self.transport.result('thread/start', result)
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_POLICY_REJECTED')
+                self.assertNotIn('turn/start', self.transport.methods())
+
+    def test_initial_connect_publication_can_disconnect_without_spawning_a_child(self):
+        disconnected = []
+        def changed(snapshot):
+            self.events.append(snapshot)
+            if snapshot['phase'] == 'connecting' and not disconnected:
+                disconnected.append(True)
+                self.controller.disconnect()
+        self.controller.changed = changed
+        self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+        self.assertEqual(self.controller.snapshot['phase'], 'disconnected')
+        self.assertFalse(self.controller.snapshot['can_send'])
+        self.assertEqual(self.transport.starts, [])
+        self.assertEqual(self.transport.messages, [])
+        self.assertEqual(self.transport.stops, 1)
+        self.assertIsNone(self.transport.timeouts[-1])
+        # A later explicit connect still owns its normal initialization.
+        self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+        self.assertEqual(len(self.transport.starts), 1)
+        self.assertEqual(self.transport.methods(), ['initialize'])
+
+    def test_initial_publication_reconnect_only_starts_the_replacement_generation(self):
+        replaced = []
+        def changed(snapshot):
+            self.events.append(snapshot)
+            if snapshot['phase'] == 'connecting' and not replaced:
+                replaced.append(True)
+                self.controller.disconnect()
+                self.controller.connect('/opt/example/replacement-codex',
+                    '/var/example/replacement-config', '/var/example/replacement-clean')
+        self.controller.changed = changed
+        self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+        self.assertEqual(len(self.transport.starts), 1)
+        program, _, environment, cwd, *_ = self.transport.starts[0]
+        self.assertEqual(program, '/opt/example/replacement-codex')
+        self.assertEqual(environment['CODEX_HOME'], '/var/example/replacement-config')
+        self.assertEqual(cwd, '/var/example/replacement-clean')
+        self.assertEqual(self.controller.snapshot['phase'], 'connecting')
+        self.assertEqual(self.transport.methods(), ['initialize'])
+        self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.160.0 (fixture)'})
+        self.transport.result('account/read', {'account': None, 'requiresOpenaiAuth': True})
+        self.assertEqual(self.controller.snapshot['phase'], 'signed_out')
+        self.assertIsNone(self.controller.snapshot['error'])
+
+    def test_transport_failures_keep_only_known_sanitized_diagnostic_codes(self):
+        known = ('CHAT_STDERR_TOO_LARGE', 'CHAT_PROTOCOL_INVALID', 'CHAT_PROCESS_BUSY',
+                 'CHAT_NOT_CONNECTED', 'CHAT_WRITE_TOO_LARGE', 'CHAT_WRITE_FAILED',
+                 'CHAT_TIMEOUT_CALLBACK_FAILED')
+        for code in (*known, 'UNKNOWN_FAILURE', None, {'untrusted': 'code'}):
+            with self.subTest(code=code):
+                self.setUp()
+                self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+                failure = type('TransportFailure', (RuntimeError,), {'code': code})(
+                    'synthetic-private-process-details')
+                self.transport.error(failure)
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['phase'], 'error')
+                expected = code if isinstance(code, str) and code in known else 'CHAT_PROCESS_FAILED'
+                self.assertEqual(snapshot['error']['code'], expected)
+                self.assertNotIn('synthetic-private-process-details', json.dumps(snapshot))
+                self.assertEqual(self.transport.stops, 1)
+                self.assertEqual(len(self.transport.starts), 1)
+                self.assertEqual(self.transport.methods(), ['initialize'])
 
     def test_lease_acquisition_errors_preserve_safe_codes_without_initializing_or_retrying(self):
         for suffix in ('BUSY', 'INVALID', 'UNSAFE', 'CHANGED', 'PROFILE_INVALID', 'UNSUPPORTED',
@@ -510,6 +630,43 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertEqual(seen, [{"HTTPS_PROXY": "http://proxy.example.invalid:8080", "NO_PROXY": "example.invalid"}])
         self.assertEqual(self.transport.starts[-1][2]["HTTPS_PROXY"], "http://proxy.example.invalid:8080")
 
+    def test_default_connection_enables_official_system_resolution_and_disables_auth_fallback(self):
+        self.ready()
+        arguments = self.transport.starts[-1][1]
+        self.assertIn(("--enable", "respect_system_proxy"), list(zip(arguments, arguments[1:])))
+        self.assertIn(("--disable", "system_proxy_fallback"), list(zip(arguments, arguments[1:])))
+        self.start_turn()
+        params = next(item['params'] for item in self.transport.messages if item.get('method') == 'thread/start')
+        self.assertIs(params['config']['features']['respect_system_proxy'], True)
+        self.assertIs(params['config']['features']['system_proxy_fallback'], False)
+
+    def test_explicit_proxy_connection_and_thread_keep_the_official_environment_policy(self):
+        for value in ('http://proxy.example.invalid:8080', ''):
+            with self.subTest(value=value):
+                self.controller.disconnect()
+                self.controller._network_environment = lambda: {'HTTPS_PROXY': value}
+                self.ready()
+                arguments = self.transport.starts[-1][1]
+                self.assertIn(("--disable", "respect_system_proxy"), list(zip(arguments, arguments[1:])))
+                self.assertIn(("--disable", "system_proxy_fallback"), list(zip(arguments, arguments[1:])))
+                self.assertEqual(self.transport.starts[-1][2]['HTTPS_PROXY'], value)
+                self.start_turn()
+                params = next(item['params'] for item in reversed(self.transport.messages) if item.get('method') == 'thread/start')
+                self.assertIs(params['config']['features']['respect_system_proxy'], False)
+                self.assertIs(params['config']['features']['system_proxy_fallback'], False)
+
+    def test_network_mode_is_bound_to_the_owned_history_scope(self):
+        self.assertNotEqual(chat.chat_scope_fingerprint(respect_system_proxy=True),
+                            chat.chat_scope_fingerprint(respect_system_proxy=False))
+
+    def test_changed_network_policy_refuses_owned_history_before_spawning(self):
+        record = self.persistent_record()
+        self.controller._network_environment = lambda: {'HTTPS_PROXY': 'http://proxy.example.invalid:8080'}
+        self.connect_persistent(record)
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_CONFIGURATION_INVALID')
+        self.assertEqual(self.transport.starts, [])
+        self.assertEqual(self.transport.messages, [])
+
     def test_network_configuration_error_is_sanitized_and_does_not_start_or_retry(self):
         for code in ("CHAT_PROXY_READ_FAILED", "CHAT_PROXY_INVALID", "CHAT_PROXY_UNSUPPORTED", "untrusted"):
             with self.subTest(code=code):
@@ -549,6 +706,43 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertIn('apply_patch_freeform', args)
         self.assertNotIn('apply_patch', args)
         self.assertEqual(self.urls, [])
+
+    def test_optional_account_omission_needs_explicit_login_without_claiming_authentication(self):
+        for requires_auth in (True, False):
+            with self.subTest(requires_auth=requires_auth):
+                self.setUp()
+                self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+                self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.160.0 (fixture)'})
+                self.transport.result('account/read', {'requiresOpenaiAuth': requires_auth})
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['phase'], 'signed_out')
+                self.assertEqual(snapshot['account'], 'none')
+                self.assertIsNone(snapshot['error'])
+                self.assertFalse(snapshot['can_send'])
+                self.assertEqual(self.urls, [])
+                self.assertEqual(self.transport.methods(), ['initialize', 'initialized', 'account/read'])
+                self.assertEqual(self.transport.stops, 0)
+                self.controller.login()
+                self.assertEqual(self.transport.methods()[-1], 'account/login/start')
+                self.assertEqual(self.controller.snapshot['phase'], 'logging_in')
+
+    def test_omitted_account_requires_the_schema_boolean_auth_requirement(self):
+        invalid = ({}, {'requiresOpenaiAuth': 'true'}, {'requiresOpenaiAuth': None},
+                   {'requiresOpenaiAuth': 0}, {'requiresOpenaiAuth': 1},
+                   {'requiresOpenaiAuth': 0.0})
+        for result in invalid:
+            with self.subTest(result=result):
+                self.setUp()
+                self.controller.connect('/opt/example/codex', '/var/example/freecad-chat/config', self.cwd)
+                self.transport.result('initialize', {'userAgent': 'codex_cli_rs/0.160.0 (fixture)'})
+                self.transport.result('account/read', result)
+                snapshot = self.controller.snapshot
+                self.assertEqual(snapshot['phase'], 'error')
+                self.assertEqual(snapshot['error']['code'], 'CHAT_PROTOCOL_INVALID')
+                self.assertFalse(snapshot['can_send'])
+                self.assertEqual(self.transport.stops, 1)
+                self.assertNotIn('account/login/start', self.transport.methods())
+                self.assertEqual(self.urls, [])
 
     def test_unsupported_version_and_api_key_account_cannot_send(self):
         self.controller.connect('/opt/example/codex', '/var/example/home', self.cwd)
@@ -1011,7 +1205,7 @@ class PftChatControllerTests(unittest.TestCase):
             del missing['features'][key]
             cases.append(missing)
             conflicting = self.effective_config()
-            conflicting['features'][key] = True
+            conflicting['features'][key] = not conflicting['features'][key]
             cases.append(conflicting)
         for value in (None, {'view_image': True}, {'view_image': 'false'}, {'view_image': 0}, {'view_image': None}):
             wrong = self.effective_config()
@@ -1150,9 +1344,50 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertEqual(parsed['env'], {'PHOENIX_FREECAD_TOOL_SCOPE': 'chat', 'PHOENIX_FREECAD_URL': config['bridge_url']})
         self.assertIs(parsed['required'], True)
         self.assertEqual(set(parsed['enabled_tools']), set(EXPECTED_CHAT_TOOLS))
-        self.assertEqual(len(parsed['enabled_tools']), 19)
-        self.assertEqual(len(set(EXPECTED_CHAT_TOOLS)), 19)
+        self.assertEqual(len(parsed['enabled_tools']), 22)
+        self.assertEqual(len(set(EXPECTED_CHAT_TOOLS)), 22)
         self.assertNotIn('execute_script', parsed['enabled_tools'])
+
+    def test_drawing_export_tools_share_only_the_explicit_native_confirmation_scope(self):
+        export_tools = {'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status'}
+        self.assertEqual(chat._isolated_config(None)['mcp_servers'], {})
+        self.assertNotIn('prepare_drawing_export', chat._developer_instructions(None))
+        configured = chat._isolated_config(self.mcp_config())['mcp_servers']['phoenix_freecad']
+        self.assertEqual(len(configured['enabled_tools']), 22)
+        self.assertTrue(export_tools.issubset(configured['enabled_tools']))
+        instructions = chat._developer_instructions(self.mcp_config())
+        for text in ('one stable requestId', 'ORIGINAL token', 'native_publication_confirmation',
+                     'not current filesystem checks', 'CAD Undo cannot roll back', 'Never provide a file path'):
+            self.assertIn(text, instructions)
+        for name in ('apply_part_changes', 'execute_script', 'recompute_document'):
+            self.assertNotIn(name, configured['enabled_tools'])
+
+    def test_legacy_nineteen_tool_effective_config_or_inventory_is_rejected_without_expansion(self):
+        export_tools = {'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status'}
+        for phase in ('effective_config', 'inventory'):
+            with self.subTest(phase=phase):
+                self.setUp(); self.ready(mcp=self.mcp_config())
+                self.controller.send('Prepare a neutral PDF export for native review')
+                if phase == 'effective_config':
+                    config = self.effective_config()
+                    config['mcp_servers']['phoenix_freecad']['enabled_tools'] = [name for name in EXPECTED_CHAT_TOOLS if name not in export_tools]
+                    self.assertEqual(len(config['mcp_servers']['phoenix_freecad']['enabled_tools']), 19)
+                    before = deepcopy(config)
+                    self.transport.result('config/read', {'config': config, 'origins': {}})
+                    self.assertEqual(config, before)
+                    self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_MCP_CONFIG_REJECTED')
+                    self.assertNotIn('mcpServerStatus/list', self.transport.methods())
+                else:
+                    self.pass_config(); inventory = self.inventory()
+                    for name in export_tools: inventory['data'][0]['tools'].pop(name)
+                    self.assertEqual(len(inventory['data'][0]['tools']), 19)
+                    before = deepcopy(inventory)
+                    self.transport.result('mcpServerStatus/list', inventory)
+                    self.assertEqual(inventory, before)
+                    self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_MCP_INVENTORY_REJECTED')
+                self.assertNotIn('thread/start', self.transport.methods())
+                self.assertNotIn('thread/resume', self.transport.methods())
+                self.assertNotIn('turn/start', self.transport.methods())
         self.assertTrue(self.controller.snapshot['mcp_enabled'])
         self.assertEqual(self.controller.snapshot['tool_calls'], [])
 
@@ -1396,7 +1631,7 @@ class PftChatControllerTests(unittest.TestCase):
         override = next(arg for arg in self.transport.starts[-1][1] if arg.startswith('mcp_servers.'))
         parsed = tomllib.loads(override)['mcp_servers']['phoenix_freecad']
         self.assertEqual(set(parsed['enabled_tools']), set(EXPECTED_CHAT_TOOLS + EXPECTED_DESK_TOOLS))
-        self.assertEqual(len(parsed['enabled_tools']), 24)
+        self.assertEqual(len(parsed['enabled_tools']), 27)
         expected = {'PHOENIX_FREECAD_TOOL_SCOPE': 'chat', 'PHOENIX_FREECAD_URL': config['bridge_url'],
                     'PHOENIX_DESK_CHAT_READS': '1', 'PHOENIX_DESK_NODE': config['desk_config']['node_executable'],
                     'PHOENIX_DESK_CLI': config['desk_config']['cli_entry'],
@@ -1956,6 +2191,24 @@ class PftChatControllerTests(unittest.TestCase):
         with patch.object(chat, '_PFT_CHAT_TOOLS', chat._PFT_CHAT_TOOLS + ('synthetic-extra-tool',)):
             self.assertNotEqual(scoped, chat.chat_scope_fingerprint(mcp))
 
+    def test_persisted_nineteen_tool_scope_is_not_upgraded_or_resumed(self):
+        mcp = self.mcp_config()
+        export_tools = {'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status'}
+        legacy = tuple(name for name in chat._PFT_CHAT_TOOLS if name not in export_tools)
+        self.assertEqual(len(legacy), 19)
+        with patch.object(chat, '_PFT_CHAT_TOOLS', legacy):
+            old_fingerprint = chat.chat_scope_fingerprint(mcp)
+        self.assertNotEqual(old_fingerprint, chat.chat_scope_fingerprint(mcp))
+        record = self.persistent_record(mcp, scope_fingerprint=old_fingerprint)
+        store = self.persistent_store([record]); before = deepcopy(store.records)
+        self.controller.connect('/opt/example/codex', store.home, self.cwd, mcp=mcp,
+            retain_history=True, resume_session=record, session_store=store)
+        self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_CONFIGURATION_INVALID')
+        self.assertEqual(self.transport.starts, [])
+        self.assertEqual(self.transport.messages, [])
+        self.assertEqual(store.registrations, [])
+        self.assertEqual(store.records, before)
+
     def test_default_temporary_connection_never_touches_an_injected_store(self):
         class UnreadableStore:
             def __getattribute__(self, _name): raise AssertionError('must not access store')
@@ -1991,6 +2244,61 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertEqual(self.transport.messages[-1]['method'], 'turn/start')
         self.assertEqual(self.controller.snapshot['registered_session'], self.persistent_record())
         self.assertEqual(self.transport.messages[-1]['params']['input'], [{'type': 'text', 'text': 'Neutral retained request'}])
+
+    def test_current_cli_registration_uses_runtime_version_and_scope(self):
+        version = '0.167.0-alpha.3.2'
+        self.store = self.persistent_store()
+        self.controller.connect('/opt/example/codex', self.store.home, self.cwd, retain_history=True, session_store=self.store)
+        self.transport.result('initialize', {'userAgent': 'codex_cli_rs/' + version + ' (fixture)'})
+        self.transport.result('account/read', {'account': {'type': 'chatgpt'}, 'requiresOpenaiAuth': True})
+        self.controller.send('Neutral retained compatible request')
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        result = self.persistent_result()
+        result['thread']['cliVersion'] = version
+        self.transport.result('thread/start', result)
+        self.assertEqual(self.store.registrations, [])
+        self.transport.result('mcpServerStatus/list', self.inventory(True))
+        registered = self.controller.snapshot['registered_session']
+        self.assertEqual(registered['cli_version'], version)
+        self.assertEqual(registered['scope_fingerprint'], chat.chat_scope_fingerprint(cli_version=version))
+        self.assertNotEqual(registered['scope_fingerprint'], chat.chat_scope_fingerprint())
+        self.assertEqual(self.store.records[registered['thread_id']], registered)
+        self.assertEqual(self.transport.messages[-1]['method'], 'turn/start')
+
+    def test_cross_version_restore_stops_before_account_or_history_read_without_changing_registration(self):
+        for original, runtime in (('0.160.0', '0.167.0-alpha.3.2'), ('0.167.0-alpha.3.2', '0.160.0')):
+            with self.subTest(original=original, runtime=runtime):
+                self.setUp()
+                record = self.persistent_record(cli_version=original,
+                    scope_fingerprint=chat.chat_scope_fingerprint(cli_version=original))
+                store = self.persistent_store([record])
+                self.controller.connect('/opt/example/codex', store.home, self.cwd, retain_history=True,
+                    resume_session=record, session_store=store)
+                self.assertEqual(len(self.transport.starts), 1)
+                self.transport.result('initialize', {'userAgent': 'codex_cli_rs/' + runtime + ' (fixture)'})
+                self.assertEqual(self.controller.snapshot['error']['code'], 'CHAT_HISTORY_VERSION_MISMATCH')
+                self.assertEqual(self.controller.snapshot['phase'], 'error')
+                self.assertEqual(self.transport.methods(), ['initialize'])
+                self.assertEqual(store.records, {record['thread_id']: record})
+                self.assertEqual(store.registrations, [])
+
+    def test_current_cli_restore_uses_matching_registered_version_before_history_read(self):
+        version = '0.167.0-alpha.3.2'
+        record = self.persistent_record(cli_version=version,
+            scope_fingerprint=chat.chat_scope_fingerprint(cli_version=version))
+        store = self.persistent_store([record])
+        self.controller.connect('/opt/example/codex', store.home, self.cwd, retain_history=True,
+            resume_session=record, session_store=store)
+        self.transport.result('initialize', {'userAgent': 'codex_cli_rs/' + version + ' (fixture)'})
+        self.transport.result('account/read', {'account': {'type': 'chatgpt'}, 'requiresOpenaiAuth': True})
+        self.transport.result('model/list', {'data': [self.model_row()]})
+        self.pass_config()
+        self.transport.result('mcpServerStatus/list', self.inventory())
+        self.assertEqual(self.transport.messages[-1]['method'], 'thread/read')
+        self.assertEqual(self.transport.messages[-1]['params'], {'threadId': record['thread_id'], 'includeTurns': False})
+        self.assertIsNone(self.controller.snapshot['error'])
+        self.assertNotIn('turn/start', self.transport.methods())
 
     def test_persistent_registration_failure_or_bad_metadata_never_sends_first_user_text(self):
         for failure in ('store', 'legacy', 'timestamp', 'provider', 'reviewer'):
@@ -2083,7 +2391,8 @@ class PftChatControllerTests(unittest.TestCase):
         self.assertEqual(params['approvalPolicy'], 'never')
         self.assertEqual(params['approvalsReviewer'], 'user')
         self.assertEqual(params['config']['mcp_servers'], {})
-        self.assertTrue(all(value is False for value in params['config']['features'].values()))
+        self.assertTrue(all(value is False for key, value in params['config']['features'].items() if key != 'respect_system_proxy'))
+        self.assertIs(params['config']['features']['respect_system_proxy'], True)
         self.assertNotIn('ephemeral', params)
         self.assertNotIn('persistExtendedHistory', params)
         self.assertNotIn('turn/start', self.transport.methods())

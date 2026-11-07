@@ -10,6 +10,24 @@ ADDON = Path(__file__).resolve().parents[2] / "addon" / "PhoenixFreeCADTools"
 BOOTSTRAP = ADDON / "InitGui.py"
 
 
+def host(registered, **options):
+    commands = {}
+    preferences = types.SimpleNamespace(GetString=lambda key, default="": default)
+    app = types.SimpleNamespace(ParamGet=lambda path: preferences)
+    gui = types.SimpleNamespace(
+        addWorkbench=registered.append,
+        addCommand=lambda identifier, command: commands.setdefault(identifier, command),
+        Command=types.SimpleNamespace(get=lambda identifier: commands.get(identifier)),
+        addWorkbenchManipulator=lambda manipulator: None,
+        removeWorkbenchManipulator=lambda manipulator: None,
+        **options)
+    tools = types.SimpleNamespace(**{name: lambda: None for name in (
+        "show_document_tools_dialog", "run_axonometric_fit", "show_appearance_dialog",
+        "show_rename_dialog", "show_link_labels_dialog", "show_properties_dialog",
+        "show_desk_dialog", "show_chat_connection_dialog", "show_help_dialog")})
+    return app, gui, tools
+
+
 class WorkbenchBootstrapTests(unittest.TestCase):
     def test_loader_registers_in_regular_module_for_all_exec_namespace_variants(self):
         for separate in (False, True):
@@ -17,8 +35,7 @@ class WorkbenchBootstrapTests(unittest.TestCase):
                 with self.subTest(separate=separate, with_file=with_file):
                     registered = []
                     base = type("WorkbenchBase", (), {})
-                    app = types.SimpleNamespace()
-                    gui = types.SimpleNamespace(addWorkbench=registered.append)
+                    app, gui, tools = host(registered)
                     bridge = types.SimpleNamespace(get_status=lambda: {"running": False, "stopping": False})
                     initial_path = list(sys.path)
                     global_namespace = {"__name__": "FreeCADLoaderTest", "sentinel": object()}
@@ -27,7 +44,7 @@ class WorkbenchBootstrapTests(unittest.TestCase):
                     if with_file:
                         local_namespace["__file__"] = str(BOOTSTRAP)
                     try:
-                        with patch.dict(sys.modules, {"FreeCAD": app, "FreeCADGui": gui, "pft_bridge": bridge, "pft_workbench_tools": types.SimpleNamespace()}):
+                        with patch.dict(sys.modules, {"FreeCAD": app, "FreeCADGui": gui, "pft_bridge": bridge, "pft_workbench_tools": tools}):
                             exec(compile(BOOTSTRAP.read_text(), str(BOOTSTRAP), "exec"), global_namespace, local_namespace)
                             module = sys.modules["pft_workbench_gui"]
                             self.assertEqual(module._addon_dir, str(ADDON))
@@ -48,10 +65,10 @@ class WorkbenchBootstrapTests(unittest.TestCase):
         preferred = type("GuiWorkbenchBase", (), {})
         fallback = type("FallbackWorkbenchBase", (), {})
         registered = []
-        gui = types.SimpleNamespace(Workbench=preferred, addWorkbench=registered.append)
+        app, gui, tools = host(registered, Workbench=preferred)
         initial_path = list(sys.path)
         try:
-            with patch.dict(sys.modules, {"FreeCAD": types.SimpleNamespace(), "FreeCADGui": gui, "pft_bridge": types.SimpleNamespace(), "pft_workbench_tools": types.SimpleNamespace()}):
+            with patch.dict(sys.modules, {"FreeCAD": app, "FreeCADGui": gui, "pft_bridge": types.SimpleNamespace(), "pft_workbench_tools": tools}):
                 exec(compile(BOOTSTRAP.read_text(), str(BOOTSTRAP), "exec"), {"__name__": "Loader"}, {"Workbench": fallback})
                 self.assertIsInstance(registered[0], preferred)
                 self.assertNotIsInstance(registered[0], fallback)

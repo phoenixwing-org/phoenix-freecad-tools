@@ -29,6 +29,7 @@ CAPABILITIES = {
 _ERROR = "图纸尺寸数据格式无效。"
 _REQUEST_KEYS = frozenset(("page", "view", "dimensions"))
 _REQUEST_ROW_KEYS = frozenset(("edge", "kind", "x_mm", "y_mm"))
+_AUTO_ROW_KEYS = frozenset(("edge", "kind", "placement"))
 _RESULT_KEYS = frozenset(("kind", "page", "view", "dimensions", "measurement_verification",
                           "projection_verification", "manual_review_required"))
 _RESULT_ROW_KEYS = _REQUEST_ROW_KEYS | frozenset(("name", "value_mm"))
@@ -104,6 +105,53 @@ def validate_request(value):
     page, view = _owners(value)
     return {"page": page, "view": view,
             "dimensions": _dimensions(value["dimensions"], _REQUEST_ROW_KEYS)}
+
+
+def validate_intent(value):
+    """Validate an explicit request or an explicitly opted-in mixed layout intent.
+
+    This only validates detached data. It does not advertise layout support,
+    guess missing coordinates, resolve positions or authorize any CAD change.
+    The existing validate_request remains the resolved/manual-only contract.
+    """
+    value = _mapping(value, _REQUEST_KEYS)
+    page, view = _owners(value)
+    dimensions = value["dimensions"]
+    if type(dimensions) is not list or not 1 <= len(dimensions) <= 8:
+        _reject()
+    rows, seen = [], set()
+    for entry in dimensions:
+        if (type(entry) is dict and all(type(key) is str for key in entry)
+                and frozenset(entry) == _AUTO_ROW_KEYS):
+            entry = _mapping(entry, _AUTO_ROW_KEYS)
+            if type(entry["placement"]) is not str or entry["placement"] != "auto":
+                _reject()
+            # Use the established exact edge and kind rules without accepting
+            # coordinates on an automatic row or persisting a placeholder.
+            row = _row({"edge": entry["edge"], "kind": entry["kind"],
+                        "x_mm": 0, "y_mm": 0}, _REQUEST_ROW_KEYS)
+            row = {"edge": row["edge"], "kind": row["kind"], "placement": "auto"}
+        else:
+            row = _row(entry, _REQUEST_ROW_KEYS)
+        identity = row["edge"], row["kind"]
+        if identity in seen:
+            _reject()
+        seen.add(identity)
+        rows.append(row)
+    return {"page": page, "view": view, "dimensions": rows}
+
+
+def validate_resolution(intent, resolved):
+    """Bind every resolved row to its original intent, preserving explicit X/Y."""
+    intent, resolved = validate_intent(intent), validate_request(resolved)
+    if (intent["page"] != resolved["page"] or intent["view"] != resolved["view"]
+            or len(intent["dimensions"]) != len(resolved["dimensions"])):
+        _reject()
+    for before, after in zip(intent["dimensions"], resolved["dimensions"]):
+        keys = ("edge", "kind") if before.get("placement") == "auto" else _REQUEST_ROW_KEYS
+        if any(before[key] != after[key] for key in keys):
+            _reject()
+    return resolved
 
 
 def validate_result(value, expected=None):

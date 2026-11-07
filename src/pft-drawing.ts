@@ -2,6 +2,8 @@
 /** One explicit source, an exact runtime gate and a native-confirmed drawing draft. */
 import * as z from 'zod/v4';
 import { PftPartApprovalCapabilitySchema, PftDrawingNativeNameSchema } from './pft-part-approval.js';
+import { PftDrawingDraftLayoutCapabilitySchema, PftDrawingDraftLayoutSchema, PftDrawingDraftLayoutReasonSchema,
+  PftDrawingDraftLayoutPreviewBindingSchema } from './pft-draft-layout-contract.js';
 export { PftDrawingDesignResultSchema } from './pft-part-approval.js';
 
 export const PFT_DRAWING_CAPABILITY = Object.freeze({ version: 1, operation: 'create_drawing',
@@ -32,8 +34,14 @@ export const PftDrawingPreviewSchema = z.object({ document: PftDrawingDocumentNa
   changed_count: z.union([z.literal(0), z.literal(5)]), rows: z.array(previewRow).min(1).max(5),
   requires_confirmation: z.literal(true), saves_document: z.literal(false), storage: z.literal('memory_only'),
   design_request: z.object({ source: PftDrawingNativeNameSchema, page: PftDrawingNativeNameSchema.nullable() }).strict(),
+  draft_layout: PftDrawingDraftLayoutSchema.nullable().optional(), draft_layout_reason: PftDrawingDraftLayoutReasonSchema.nullable().optional(),
 }).strict().superRefine((value, context) => {
   const names = value.rows.map(row => row.object);
+  if (Object.hasOwn(value, 'draft_layout') || Object.hasOwn(value, 'draft_layout_reason')) {
+    if (!PftDrawingDraftLayoutPreviewBindingSchema.safeParse({ pair: { draft_layout: value.draft_layout,
+      draft_layout_reason: value.draft_layout_reason }, request: value.design_request, rows: value.rows, can_apply: value.can_apply }).success)
+      context.addIssue({ code: 'custom', message: '草稿布局扩展必须完整成对并绑定五个新节点或整批阻断' });
+  }
   const valid = value.can_apply
     ? value.changed_count === 5 && value.design_request.page !== null && value.rows.length === 5
       && value.rows.every(row => row.status === 'change') && new Set(names).size === 5
@@ -62,14 +70,19 @@ export async function pftPrepareDrawing(input: PftDrawingInput, transport: Drawi
     || !PftPartApprovalCapabilitySchema.safeParse(status.part_approvals).success) {
     throw new ErrorClass('INVALID_RESPONSE', 'FreeCAD插件的出图或原生确认能力声明格式无效；未派发预览。');
   }
+  const hasDraftLayout = Object.hasOwn(status, 'drawing_draft_layout');
+  if (hasDraftLayout && !PftDrawingDraftLayoutCapabilitySchema.safeParse(status.drawing_draft_layout).success)
+    throw new ErrorClass('INVALID_RESPONSE', 'FreeCAD插件的草稿留白能力声明格式无效；未派发预览。');
   const value = await transport.prepare({ docName: parsed.data.document, objectNames: parsed.data.objects,
-    operation: parsed.data.operation });
+    operation: parsed.data.operation, ...(hasDraftLayout ? { draftLayoutVersion: 1 } : {}) });
   let encoded: string | undefined;
   try { encoded = JSON.stringify(value); } catch { /* Reject non-JSON preview without forwarding it. */ }
   const preview = encoded !== undefined && Buffer.byteLength(encoded, 'utf8') <= 128 * 1024
     ? PftDrawingPreviewSchema.safeParse(value) : null;
   if (!preview?.success || preview.data.document !== parsed.data.document
-    || preview.data.design_request.source !== parsed.data.objects[0]) {
+    || preview.data.design_request.source !== parsed.data.objects[0]
+    || Object.hasOwn(preview.data, 'draft_layout') !== hasDraftLayout
+    || Object.hasOwn(preview.data, 'draft_layout_reason') !== hasDraftLayout) {
     throw new ErrorClass('INVALID_RESPONSE', '出图预览无法验证或与明确目标不一致；未授予确认，请重新检查原生预览状态。');
   }
   return preview.data;

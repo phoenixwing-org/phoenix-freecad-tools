@@ -23,7 +23,7 @@ async function connection(t: TestContext, scope: 'full' | 'chat') {
 test('full and explicitly enabled chat expose runtime observation through the existing read-only status tool', async t => {
   for (const scope of ['full', 'chat'] as const) {
     const { f, client } = await connection(t, scope), tools = await client.listTools();
-    assert.equal(tools.tools.length, scope === 'full' ? 30 : 24);
+    assert.equal(tools.tools.length, scope === 'full' ? 33 : 27);
     const tool = tools.tools.find(tool => tool.name === 'desk_get_connection_status')!;
     assert.equal(tool.annotations?.readOnlyHint, true); assert.equal(tool.annotations?.destructiveHint, false);
     assert.equal(f.calls.length, 0); assert.equal(f.cliCalls().length, 0);

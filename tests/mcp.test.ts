@@ -17,10 +17,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const TOOL_NAMES = ['get_capabilities', 'get_connection_status', 'list_documents', 'fit_view', 'set_axonometric_view',
   'get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design', 'list_drawing_pages',
-  'inspect_drawing_page', 'set_view', 'set_appearance', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status', 'apply_part_changes'];
+  'inspect_drawing_page', 'set_view', 'set_appearance', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status', 'apply_part_changes', 'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status'];
 const METHODS = ['get_status', 'list_documents', 'view_fit', 'view_axonometric', 'get_document_info', 'list_objects',
   'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design', 'list_drawing_pages', 'inspect_drawing_page',
-  'view_standard', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status', 'apply_part_changes'];
+  'view_standard', 'capture_view', 'execute_script', 'get_script_status', 'set_selection', 'set_visibility', 'recompute_document', 'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status', 'apply_part_changes', 'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status'];
 const READ_METHODS = ['get_document_info', 'list_objects', 'get_object_info'];
 const INSTANCE_TOKEN = 'sample_document_instance_token01';
 const READ_CAPABILITY = { version: 1, methods: [...READ_METHODS, 'inspect_design'], revision_coverage: 'partial', write_guard: false };
@@ -130,12 +130,12 @@ async function session(t: TestContext, toolScope: 'full' | 'chat' = 'full', desk
   return { client, calls, state };
 }
 
-test('真实 stdio 默认发现25工具；离线清单区分插件运行时能力和工具作用', async (t) => {
+test('真实 stdio 默认发现28工具；离线清单区分插件运行时能力和工具作用', async (t) => {
   const { client, calls } = await session(t), list = await client.listTools();
   assert.deepEqual(list.tools.map(tool => tool.name).sort(), [...TOOL_NAMES].sort());
   assert.equal(calls.length, 0);
   const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
-  assert.equal(capabilities.structuredContent?.version, '0.3.2');
+  assert.equal(capabilities.structuredContent?.version, '0.4.1');
   assert.equal(capabilities.structuredContent?.runtime_supported_checked, false);
   assert.deepEqual(capabilities.structuredContent?.script_history, { scope: 'bridge_service_session', session_id_field: 'script_session_id', full_results: 20, remembered_request_ids: 4096, expired_requests_reexecute: false });
   assert.equal(calls.length, 0);
@@ -441,7 +441,8 @@ test('兼容旧读取的归一化结果同样遵守128KiB预算', async (t) => {
 const CHAT_TOOLS = ['get_capabilities', 'get_connection_status', 'list_documents', 'get_document_info', 'list_objects',
   'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design', 'list_drawing_pages', 'inspect_drawing_page',
   'fit_view', 'set_axonometric_view', 'set_view', 'set_appearance', 'get_script_status',
-  'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status'];
+  'prepare_part_changes', 'request_part_change_approval', 'get_part_change_status',
+  'prepare_drawing_export', 'request_drawing_export_approval', 'get_drawing_export_status'];
 const CHAT_EXCLUDED = ['capture_view', 'execute_script', 'set_selection', 'set_visibility', 'recompute_document', 'apply_part_changes'];
 
 test('inspect_design真实stdio在full/chat均为只读严格工具，raw tools/call映射分页与原生来源', async (t) => {
@@ -566,7 +567,7 @@ function appearanceJob(params: Record<string, unknown>, state = 'done'): Record<
       target_count: payload.objects.length, changed_count: payload.objects.length, saved: false, recomputed: false, replayed: false } } : {}) };
 }
 
-test('chat真实stdio仅注册精确19工具，manifest清单分组和effects均只描述启用能力', async (t) => {
+test('chat真实stdio仅注册精确22工具，manifest清单分组和effects均只描述启用能力', async (t) => {
   const { client, calls } = await session(t, 'chat');
   const tools = (await client.listTools()).tools;
   assert.deepEqual(tools.map(tool => tool.name).sort(), [...CHAT_TOOLS].sort());
@@ -728,7 +729,7 @@ const DESK_ENV = { PHOENIX_DESK_NODE: '/opt/public-example/node',
   PHOENIX_DESK_CLI: '/opt/public-example/desk/scripts/desk-web-service.mjs', PHOENIX_DESK_STATE_DIR: '/var/public-example/private-state' };
 const DESK_TOOLS = ['desk_get_connection_status', 'desk_search_index', 'desk_query_references', 'desk_query_cached_metadata', 'desk_get_cached_thumbnail'];
 
-test('Desk 可选 full 范围精确发现30工具；离线清单不探测配置或服务', async t => {
+test('Desk 可选 full 范围精确发现33工具；离线清单不探测配置或服务', async t => {
   const { client, calls } = await session(t, 'full', DESK_ENV);
   const list = await client.listTools();
   assert.deepEqual(list.tools.map(tool => tool.name).sort(), [...TOOL_NAMES, ...DESK_TOOLS].sort());
@@ -743,10 +744,10 @@ test('Desk 可选 full 范围精确发现30工具；离线清单不探测配置�
   assert.equal(calls.length, 0);
 });
 
-test('chat 即使有 Desk 候选配置仍精确19工具；不新增权限或披露配置', async t => {
+test('chat 即使有 Desk 候选配置仍精确22工具；不新增权限或披露配置', async t => {
   const { client, calls } = await session(t, 'chat', DESK_ENV);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 19);
+  assert.equal(list.tools.length, 22);
   assert.equal(list.tools.some(tool => DESK_TOOLS.includes(tool.name)), false);
   const reply = await client.callTool({ name: 'get_capabilities', arguments: {} });
   assert.equal(reply.structuredContent?.desk, undefined);
@@ -802,7 +803,7 @@ test('chat 显式 Desk opt-in 只增加五个业务只读工具，仍拒绝六�
 test('重算严格成功outputSchema保留0/正计数但不声称完成；结构化错误不被成功schema吞掉', async t => {
   const { client, calls, state } = await session(t);
   const tools = await client.listTools(), tool = tools.tools.find(item => item.name === 'recompute_document');
-  assert.equal(tools.tools.length, 25);
+  assert.equal(tools.tools.length, 28);
   assert.equal(tool?.outputSchema?.type, 'object');
   assert.match(tool!.description!, /不承诺原生回调或跨文档隔离/u);
   const manifest = await client.callTool({ name: 'get_capabilities', arguments: {} });
@@ -854,9 +855,9 @@ test('旧重算能力拒绝派发；畸形已派发结果整笔拒绝且仅一�
   }
 });
 
-test('chat仍19工具且离线元数据不宣称排除的重算能力', async t => {
+test('chat仍22工具且离线元数据不宣称排除的重算能力', async t => {
   const { client, calls } = await session(t, 'chat');
-  assert.equal((await client.listTools()).tools.length, 19);
+  assert.equal((await client.listTools()).tools.length, 22);
   const manifest = await client.callTool({ name: 'get_capabilities', arguments: {} });
   assert.equal(Object.hasOwn(manifest.structuredContent!, 'recompute_result'), false);
   assert.equal(calls.length, 0);
@@ -872,7 +873,7 @@ function approvalStatus(token: string, state = 'awaiting_confirmation'): Record<
 test('chat原生零件链精确映射预览/请求/查询，pending不是写入且仅GUI能确认', async t => {
   const { client, calls, state } = await session(t, 'chat');
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 19);
+  assert.equal(tools.length, 22);
   assert.equal(tools.some(tool => tool.name === 'apply_part_changes'), false);
   const request = tools.find(tool => tool.name === 'request_part_change_approval')!;
   assert.deepEqual(request.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
@@ -1002,7 +1003,7 @@ function padAppliedStatus(token: string): Record<string, unknown> {
 }
 
 test('Pad离线能力和operation声明不新增工具，不把注册清单当作运行能力', async t => {
-  for (const [scope, desk, expected] of [['full', false, 25], ['chat', false, 19], ['full', true, 30], ['chat', true, 24]] as const) {
+  for (const [scope, desk, expected] of [['full', false, 28], ['chat', false, 22], ['full', true, 33], ['chat', true, 27]] as const) {
     const { client, calls } = await session(t, scope, desk ? { ...DESK_ENV, ...(scope === 'chat' ? { PHOENIX_DESK_CHAT_READS: '1' } : {}) } : {});
     const tools = (await client.listTools()).tools;
     assert.equal(tools.length, expected);
@@ -1139,11 +1140,11 @@ function drawingAppliedStatus(): Record<string, unknown> {
       projection_verification: 'not_checked', manual_review_required: true } } };
 }
 
-test('内置出图复用25/19工具及精确manifest，不把离线能力当成已创建', async t => {
+test('内置出图使用28/22工具及精确manifest，不把离线能力当成已创建', async t => {
   for (const scope of ['full', 'chat'] as const) {
     const { client, calls } = await session(t, scope);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, scope === 'full' ? 25 : 19);
+    assert.equal(tools.length, scope === 'full' ? 28 : 22);
     const prepare = tools.find(tool => tool.name === 'prepare_part_changes')!;
     assert.match(prepare.description!, /create_drawing/u);
     assert.match(prepare.description!, /not_checked/u);
@@ -1233,10 +1234,10 @@ function dimensionAppliedStatus(): Record<string, unknown> {
       measurement_verification: 'native_reference_and_value_checked', projection_verification: 'not_checked', manual_review_required: true } } };
 }
 
-test('full/chat尺寸复用25/19工具，双cap可发现且明确预览/原生状态，无apply和脚本', async t => {
+test('full/chat尺寸使用28/22工具，双cap可发现且明确预览/原生状态，无apply和脚本', async t => {
   for (const scope of ['full', 'chat'] as const) {
     const { client, calls, state } = await session(t, scope);
-    assert.equal((await client.listTools()).tools.length, scope === 'full' ? 25 : 19);
+    assert.equal((await client.listTools()).tools.length, scope === 'full' ? 28 : 22);
     const capabilities = (await client.callTool({ name: 'get_capabilities', arguments: {} })).structuredContent!;
     assert.deepEqual(capabilities.drawing_dimensions, PFT_DRAWING_DIMENSIONS_CAPABILITY);
     assert.deepEqual(capabilities.drawing_references, PFT_DRAWING_REFERENCES_CAPABILITY);

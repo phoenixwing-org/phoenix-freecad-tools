@@ -127,7 +127,7 @@ async function main(args) {
       return { data, response };
     };
     const { data: status } = await call('get_connection_status');
-    requireThat(status.protocol_version === 1 && status.running === true && status.addon_version === '0.3.2', '需要运行中的 0.3.2 协议 v1 插件。');
+    requireThat(status.protocol_version === 1 && status.running === true && status.addon_version === '0.4.1', '需要运行中的 0.4.1 协议 v1 插件。');
     const needed = ['get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design', 'list_drawing_pages', 'inspect_drawing_page', 'view_standard', 'capture_view'];
     requireThat(Array.isArray(status.supported_methods) && needed.every(name => status.supported_methods.includes(name)), '插件未声明全部待验能力。');
 

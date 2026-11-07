@@ -151,3 +151,102 @@ test('尺寸结果及确认状态严格绑定kind、节点数量、引用与真�
     call: async () => { calls++; return approval(); } }, PftBridgeError);
   assert.equal(value.state, 'applied'); assert.equal(calls, 1);
 });
+
+import { PFT_DRAWING_DIMENSION_LAYOUT_CAPABILITY } from '../src/pft-drawing-layout-contract.js';
+import { neutralAutoInput, neutralAutoPreview } from './helpers/pft-drawing-layout-fixture.js';
+const layoutStatus = { ...status, drawing_dimension_layout: PFT_DRAWING_DIMENSION_LAYOUT_CAPABILITY };
+
+test('auto须明确opt-in且严格二选一；旧插件不派发，新插件完整映射混合意图', async () => {
+  const value = neutralAutoInput();
+  const row = value.dimensions[0]!;
+  assert.equal(PftDrawingDimensionsInputSchema.safeParse(value).success, true);
+  for (const dimensions of [[{ ...row, xMm: 0, yMm: 0 }], [{ ...row, placement: 'explicit' }], [{ edge: row.edge, kind: row.kind }],
+    [{ ...row, placement: true }], [{ ...row, x_mm: 0 }]])
+    assert.equal(PftDrawingDimensionsInputSchema.safeParse({ ...value, dimensions }).success, false);
+  for (const cap of [undefined, null, {}, { ...PFT_DRAWING_DIMENSION_LAYOUT_CAPABILITY, max_search_attempts: 8193 }]) {
+    let calls = 0;
+    await assert.rejects(pftPrepareDrawingDimensions(value, { status: async () => ({ ...status, drawing_dimension_layout: cap }),
+      prepare: async () => { calls++; return neutralAutoPreview(); } }, PftBridgeError),
+    { code: cap === undefined ? 'UNSUPPORTED_CAPABILITY' : 'INVALID_RESPONSE' });
+    assert.equal(calls, 0);
+  }
+  const calls: unknown[] = [];
+  const response = await pftPrepareDrawingDimensions(value, { status: async () => layoutStatus,
+    prepare: async params => { calls.push(params); return neutralAutoPreview(); } }, PftBridgeError);
+  assert.deepEqual(calls, [{ docName: value.document, objectNames: [value.page], viewName: value.view,
+    operation: value.operation, dimensions: response.layout!.intent.dimensions }]);
+  assert.deepEqual(response, neutralAutoPreview());
+  assert.equal(response.design_request!.dimensions.at(-1)!.x_mm, 'xMm' in value.dimensions.at(-1)! ? value.dimensions.at(-1)!.xMm : undefined);
+});
+
+test('auto成功/无解/原生profile不足保留完整意图，blocked没有伪坐标和部分成功', async () => {
+  const success = neutralAutoPreview();
+  const blocked = neutralAutoPreview('blocked');
+  const unsupported = { ...blocked, layout: { ...blocked.layout!, graphics: null, reason_code: 'DRAWING_LAYOUT_PAGE_OPEN_REQUIRED' as const } };
+  for (const [value, args] of [[success, neutralAutoInput()], [blocked, neutralAutoInput('blocked')], [unsupported, neutralAutoInput('blocked')]] as const) {
+    assert.deepEqual(PftDrawingDimensionsPreviewSchema.parse(value), value);
+    assert.deepEqual(await pftPrepareDrawingDimensions(args, { status: async () => layoutStatus, prepare: async () => value }, PftBridgeError), value);
+  }
+  assert.equal(blocked.design_request, null); assert.deepEqual(blocked.layout!.graphics!.result.dimensions, []);
+  for (const value of [{ ...blocked, design_request: success.design_request }, { ...blocked, changed_count: 1 },
+    { ...blocked, can_apply: true }, { ...blocked, rows: success.rows }, { ...blocked, layout: undefined },
+    { ...unsupported, layout: { ...unsupported.layout, reason_code: null } },
+    { ...success, design_request: null }, { ...success, layout: { ...success.layout!, graphics: null, reason_code: 'DRAWING_LAYOUT_STYLE_UNSUPPORTED' } }])
+    assert.equal(PftDrawingDimensionsPreviewSchema.safeParse(value).success, false);
+});
+
+test('auto响应逐项绑定原意图与解，拒绝文字/几何/路径/顺序/显式坐标篡改且不重发', async () => {
+  const changes: Array<(value: ReturnType<typeof neutralAutoPreview>) => void> = [
+    value => { value.layout!.intent.page = 'OtherPage'; },
+    value => { value.layout!.intent.dimensions.reverse(); },
+    value => { value.design_request!.dimensions[0]!.x_mm += 1e-10; },
+    value => { const row = value.layout!.intent.dimensions.at(-1)!; if (!('placement' in row)) row.x_mm += 1e-10; },
+    value => { value.layout!.graphics!.input.dimensions[0]!.text = 'Other label'; },
+    value => { value.layout!.graphics!.result.dimensions[0]!.label_box_mm[0] += 1; },
+    value => { value.rows[0]!.object = value.layout!.intent.page; },
+    value => { delete value.layout; },
+    value => { value.layout!.graphics!.result.dimensions[0]!.segments_mm[0]![0][0] += .5; },
+  ];
+  for (const [index, change] of changes.entries()) {
+    const value = neutralAutoPreview(); change(value); let calls = 0;
+    await assert.rejects(pftPrepareDrawingDimensions(neutralAutoInput(), { status: async () => layoutStatus,
+      prepare: async () => { calls++; return value; } }, PftBridgeError), { code: 'INVALID_RESPONSE' }, String(index));
+    assert.equal(calls, 1);
+  }
+  // A whole alternate, internally valid plan cannot replace the submitted request.
+  const alternate = neutralAutoPreview('five');
+  await assert.rejects(pftPrepareDrawingDimensions(neutralAutoInput(), { status: async () => layoutStatus,
+    prepare: async () => alternate }, PftBridgeError), { code: 'INVALID_RESPONSE' });
+  // Existing explicit-only calls still neither require nor return a layout field.
+  assert.deepEqual(await pftPrepareDrawingDimensions(input, { status: async () => status, prepare: async () => preview() }, PftBridgeError), preview());
+  await assert.rejects(pftPrepareDrawingDimensions(input, { status: async () => layoutStatus,
+    prepare: async () => ({ ...preview(), layout: neutralAutoPreview().layout }) }, PftBridgeError), { code: 'INVALID_RESPONSE' });
+});
+
+test('布局新增固定状态错误不扩测量结果，拒绝任意原生原因/清理正文', async () => {
+  for (const error_code of ['DIMENSION_LAYOUT_UNAVAILABLE', 'DIMENSION_LAYOUT_STALE', 'DIMENSION_LAYOUT_STYLE_UNVERIFIED', 'DIMENSION_LAYOUT_CLEANUP_UNVERIFIED']) {
+    const value = { ...approval('failed'), error_code };
+    assert.equal(PftPartApprovalDataSchema.safeParse(value).success, true);
+    assert.deepEqual(await pftPartApproval('get_part_change_status', { token }, { status: async () => status, call: async () => value }, PftBridgeError), value);
+  }
+  assert.equal(PftPartApprovalDataSchema.safeParse({ ...approval('failed'), error_code: 'DRAWING_LAYOUT_PRIVATE_EXCEPTION' }).success, false);
+  assert.equal(PftPartApprovalDataSchema.safeParse({ ...approval(), layout: neutralAutoPreview().layout }).success, false);
+});
+
+test('完整auto预览精确128KiB边界，合法内部64KiB/32KiB数据不靠字段长度提前拒绝', () => {
+  const value = neutralAutoPreview('bounded_eight');
+  value.rows.forEach((row, index) => { if (row.status === 'change') { row.note = '界'.repeat(2048); row.object = '尺'.repeat(60) + index; } });
+  value.document = '文'.repeat(256); value.expires_at = '期'.repeat(128);
+  value.layout!.intent.page = value.design_request!.page = '页'.repeat(60);
+  value.layout!.intent.view = value.design_request!.view = value.layout!.graphics!.input.view.name = '视'.repeat(60);
+  const size = () => Buffer.byteLength(JSON.stringify(value));
+  const overflow = size() - 128 * 1024;
+  assert.ok(overflow > 0 && overflow < 1000);
+  const last = value.rows.at(-1)!; assert.equal(last.status, 'change');
+  if (last.status !== 'change') throw new Error('neutral fixture expected a successful row');
+  const remove = Math.ceil(overflow / 3); last.note = '界'.repeat(2048 - remove) + 'a'.repeat(remove * 3 - overflow);
+  assert.equal(size(), 128 * 1024);
+  assert.equal(PftDrawingDimensionsPreviewSchema.safeParse(value).success, true);
+  last.note += 'a'; assert.equal(size(), 128 * 1024 + 1);
+  assert.equal(PftDrawingDimensionsPreviewSchema.safeParse(value).success, false);
+});

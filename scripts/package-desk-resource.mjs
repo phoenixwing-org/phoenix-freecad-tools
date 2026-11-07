@@ -84,7 +84,7 @@ export async function buildDeskResource({ root = ROOT } = {}) {
   const package_ = JSON.parse(read('package.json').toString('utf8'));
   const lock = JSON.parse(read('package-lock.json').toString('utf8'));
   const version = package_.version;
-  if (!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/u.test(version) || version !== '0.3.2'
+  if (!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/u.test(version) || version !== '0.4.1'
       || lock.version !== version || lock.packages?.['']?.version !== version
       || package_.devDependencies?.esbuild !== ESBUILD || lock.packages?.['']?.devDependencies?.esbuild !== ESBUILD
       || lock.packages?.['node_modules/esbuild']?.version !== ESBUILD || esbuildVersion !== ESBUILD) fail('Package, lock and exact build dependency versions must agree.');

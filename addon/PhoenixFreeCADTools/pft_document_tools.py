@@ -69,6 +69,8 @@ TRANSLATABLE_STRINGS = (
     "原生对象报告；未验证本地或继承来源。", "未选择属性对象。",
     "所选对象属性汇总超过128 KiB，请减少勾选对象。",
     "所选对象属性", "属性字段必须是至多20个唯一的FreeCAD内部字段名。", "未选择属性字段。",
+    "显示单位选项必须为布尔值。", "显示单位结果超过128 KiB，请减少勾选对象。",
+    "尺寸（FreeCAD 显示单位）", "显示单位不可读取",
 )
 
 
@@ -221,6 +223,7 @@ _VECTOR_PROPERTY_TYPES = frozenset(("App::PropertyVector", "App::PropertyVectorD
 _VECTOR_LENGTH_TYPES = frozenset(("App::PropertyVectorDistance", "App::PropertyPosition"))
 _VECTOR_LIST_TYPE = "App::PropertyVectorList"
 _TRANSFORM_PROPERTY_KINDS = {"App::PropertyRotation": "rotation", "App::PropertyPlacement": "placement"}
+_PLACEMENT_LIST_TYPE = "App::PropertyPlacementList"
 # Fixed 1.1 native types inherit scalar getters, not their setter tuples.
 # Constraints are editable metadata, not a unit or a reader-side range rule.
 _CONSTRAINED_SCALAR_KINDS = {"App::PropertyIntegerConstraint": "integer", "App::PropertyPercent": "integer",
@@ -230,7 +233,7 @@ _PROPERTY_KINDS = {"App::PropertyString": "string", "App::PropertyInteger": "int
                    "App::PropertyFloat": "float", "App::PropertyBool": "boolean",
                    "App::PropertyEnumeration": "enumeration", **_CONSTRAINED_SCALAR_KINDS, **_PROPERTY_LIST_KINDS,
                    **{name: "vector" for name in _VECTOR_PROPERTY_TYPES}, _VECTOR_LIST_TYPE: "vector_list",
-                   **_TRANSFORM_PROPERTY_KINDS}
+                   **_TRANSFORM_PROPERTY_KINDS, _PLACEMENT_LIST_TYPE: "placement_list"}
 # These fixed property types use native Quantity.Value and the internal basis.
 # A contradictory native signature is unknown, never a guessed conversion.
 _QUANTITY_SIGNATURES = {
@@ -427,6 +430,29 @@ def _property_vector_list(value):
     return {**metadata, "value": vectors, "status": "empty" if count == 0 else "available"}
 
 
+def _property_placement_list(value):
+    # PropertyPlacementList::getPyObject returns a list of copied Base.Placement
+    # values. Bounds apply after that native getter; never resolve Link/parents,
+    # multiply transforms or publish a prefix when one member is unreadable.
+    if type(value) is not list:
+        return {"value": None, "status": "unsupported"}
+    count = len(value)
+    metadata = {"item_count": count}
+    if count > PFT_MAX_PROPERTY_LIST_ITEMS:
+        return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "item_limit"}
+    placements, byte_count = [], 2
+    for item in value:
+        placement, status = _placement_components(item)
+        if status != "available":
+            return {**metadata, "value": None, "status": status}
+        byte_count += bool(placements) + len(json.dumps(placement, ensure_ascii=False,
+            allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        if byte_count > PFT_MAX_PROPERTY_BYTES:
+            return {**metadata, "value": None, "status": "unknown", "truncated": True, "limit_reason": "utf8_budget"}
+        placements.append(placement)
+    return {**metadata, "value": placements, "status": "empty" if count == 0 else "available"}
+
+
 def _property_quantity(value):
     if type(value).__name__ != "Quantity":
         return None, "unsupported"
@@ -452,7 +478,93 @@ def _property_quantity(value):
     return {"kind": "quantity", "value": number, **description}, "available"
 
 
-def _property_field(obj, name, properties, valid_list, explicit):
+def _empty_quantity_display(status="unknown"):
+    return {"status": status, "text": None, "factor": None, "unit": None,
+            "source": "native_getUserPreferred", "sanitized": False, "truncated": False}
+
+
+def _display_text(value, maximum):
+    # Work on a bounded prefix; unlike ordinary property text, a formatted
+    # quantity occupies one cell. Never publish half a formatted number/unit.
+    prefix = value[:maximum + 1]
+    clean = "".join(" " if unicodedata.category(char) in ("Cc", "Cf", "Cs") else char for char in prefix)
+    encoded = clean.encode("utf-8")
+    truncated = len(value) > len(prefix) or len(encoded) > maximum
+    return None if truncated else clean, clean != prefix, truncated
+
+
+def _quantity_display(value):
+    # QuantityPyImp.cpp returns (localized text, factor, unit) without changing
+    # the quantity. Preserve that text: fractional/locale/temperature output
+    # must never be parsed or reconstructed from Value / factor here.
+    result = _empty_quantity_display()
+    if type(value).__name__ != "Quantity" or type(value).__module__ != "Base":
+        result["status"] = "unsupported"
+        return result
+    getter, status = _read(value, "getUserPreferred")
+    if status != "available":
+        result["status"] = "read_failed" if status == "read_failed" else "unknown"
+        return result
+    if not callable(getter):
+        return result
+    try:
+        preferred = getter()
+    except Exception:
+        result["status"] = "read_failed"
+        return result
+    if (type(preferred) is not tuple or len(preferred) != 3 or type(preferred[0]) is not str
+            or type(preferred[1]) is not float or not math.isfinite(preferred[1]) or preferred[1] <= 0
+            or type(preferred[2]) is not str):
+        return result
+    text, text_cleaned, text_truncated = _display_text(preferred[0], PFT_MAX_PROPERTY_BYTES)
+    unit, unit_cleaned, unit_truncated = _display_text(preferred[2], 128)
+    result.update(sanitized=text_cleaned or unit_cleaned, truncated=text_truncated or unit_truncated)
+    if result["truncated"]:
+        result["limit_reason"] = "utf8_budget"
+    elif text is not None and text.strip():
+        result.update(status="available", text=text, factor=preferred[1], unit=unit)
+    return result
+
+
+def _dimension_displays(app, dimensions, properties):
+    # Only construct our own length quantities. There is no schema setter,
+    # source property access or second Shape read in this display path.
+    factory, factory_status, initialized = None, "unavailable", False
+    # Exact compact payload budget, including both outer keys, wrappers,
+    # arrays and separators. Existing raw dimension metadata is unchanged;
+    # the additional display payload shares the property output's bound.
+    byte_count = len(json.dumps({"properties": properties, "dimensions": []}, ensure_ascii=False,
+                               allow_nan=False, separators=(",", ":")).encode("utf-8"))
+    if byte_count > PFT_MAX_PROPERTIES_BYTES:
+        raise PftDocumentToolsError("UNIT_DISPLAY_TOO_LARGE", "显示单位结果超过128 KiB，请减少勾选对象。")
+    for index, row in enumerate(dimensions):
+        displays = {}
+        for key in ("length_mm", "width_mm", "height_mm"):
+            if row["status"] != "available" or row[key] is None:
+                displays[key] = _empty_quantity_display("read_failed" if row["status"] == "read_failed" else "unknown")
+                continue
+            if not initialized:
+                initialized = True
+                namespace, factory_status = _read(app, "Units")
+                if factory_status == "available":
+                    factory, factory_status = _read(namespace, "Quantity")
+            if factory_status != "available" or not callable(factory):
+                displays[key] = _empty_quantity_display("read_failed" if factory_status == "read_failed" else "unknown")
+                continue
+            try:
+                quantity = factory(row[key], "mm")
+            except Exception:
+                displays[key] = _empty_quantity_display("read_failed")
+            else:
+                displays[key] = _quantity_display(quantity)
+        byte_count += bool(index) + len(json.dumps({"display_dimensions": displays}, ensure_ascii=False,
+            allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        if byte_count > PFT_MAX_PROPERTIES_BYTES:
+            raise PftDocumentToolsError("UNIT_DISPLAY_TOO_LARGE", "显示单位结果超过128 KiB，请减少勾选对象。")
+        row["display_dimensions"] = displays
+
+
+def _property_field(obj, name, properties, valid_list, explicit, use_user_units=False):
     field = {"name": name, "type": None, "status": "read_failed", "value": None,
              "truncated": False, "sanitized": False}
     if explicit:
@@ -473,8 +585,12 @@ def _property_field(obj, name, properties, valid_list, explicit):
             return field  # Do not even get unsupported properties (Links, Shape, Python objects).
         if explicit:
             field["kind"] = kind
+            if kind == "quantity" and use_user_units:
+                field["display_quantity"] = _empty_quantity_display()
             if kind in ("vector", "vector_list"):
                 field.update(_vector_metadata(native_type))
+            elif kind == "placement_list":
+                field.update(_transform_metadata("placement"))
             elif kind in _TRANSFORM_PROPERTY_KINDS.values():
                 field.update(_transform_metadata(kind))
         value = getattr(obj, name)
@@ -492,6 +608,8 @@ def _property_field(obj, name, properties, valid_list, explicit):
             field["value"], field["status"] = _vector_components(value)
         elif kind == "vector_list":
             field.update(_property_vector_list(value))
+        elif kind == "placement_list":
+            field.update(_property_placement_list(value))
         elif kind in _TRANSFORM_PROPERTY_KINDS.values():
             field.update(_property_transform(value, kind))
         elif kind == "boolean":
@@ -511,12 +629,17 @@ def _property_field(obj, name, properties, valid_list, explicit):
             if (field["status"] == "available" and expected is not None
                     and field["value"]["unit_signature"] != list(expected)):
                 field["value"], field["status"] = None, "unknown"
+            if use_user_units:
+                field["display_quantity"] = (_quantity_display(value) if field["status"] == "available"
+                    else _empty_quantity_display(field["status"]))
     except Exception:
         field["value"], field["status"] = None, "read_failed"
+        if "display_quantity" in field:
+            field["display_quantity"] = _empty_quantity_display("read_failed")
     return field
 
 
-def _object_properties(objects, names, explicit=False):
+def _object_properties(objects, names, explicit=False, use_user_units=False):
     """Read selected native objects only; never follow Links or introspect arbitrary values."""
     if not names:
         return []
@@ -530,7 +653,7 @@ def _object_properties(objects, names, explicit=False):
                "locality": "not_verified", "link_source_resolved": False,
                "status": "available" if valid_list else "read_failed", "fields": []}
         for name in names:
-            field = _property_field(obj, name, properties, valid_list, explicit)
+            field = _property_field(obj, name, properties, valid_list, explicit, use_user_units)
             if field["status"] == "read_failed":
                 row["status"] = "read_failed"
             row["fields"].append(field)
@@ -541,14 +664,16 @@ def _object_properties(objects, names, explicit=False):
     return rows
 
 
-def read_document_tools(app, gui, document_name=None, target_names=None, property_names=None):
+def read_document_tools(app, gui, document_name=None, target_names=None, property_names=None, use_user_units=False):
     if threading.current_thread() is not threading.main_thread():
         raise PftDocumentToolsError("MAIN_THREAD_REQUIRED", "请从 FreeCAD 主界面打开当前文档工具。")
+    if type(use_user_units) is not bool:
+        raise PftDocumentToolsError("INVALID_UNIT_DISPLAY", "显示单位选项必须为布尔值。")
     names = validate_property_names(property_names)
     property_scope = "bom" if property_names is None else "explicit"
     document = _document(app, document_name)
     if document is None:
-        return {"document": None, "candidates": [], "selected_names": [], "dimensions": [], "properties": [], "property_scope": property_scope, "property_names": list(names), "warnings": ["当前没有打开的文档。"]}
+        return {"document": None, "candidates": [], "selected_names": [], "dimensions": [], "properties": [], "property_scope": property_scope, "property_names": list(names), "use_user_units": use_user_units, "warnings": ["当前没有打开的文档。"]}
     native_objects = _items(_value(document, "Objects", []))
     if len(native_objects) > PFT_MAX_SCAN_OBJECTS:
         raise PftDocumentToolsError("DOCUMENT_TOO_LARGE", "当前文档对象超过2000项，未自动扫描；请使用较小文档或专用查询。")
@@ -619,14 +744,17 @@ def read_document_tools(app, gui, document_name=None, target_names=None, propert
     if any(parent in selected_ids and any(id(child) in selected_ids for child in children) for parent, children in containers.items()):
         warnings.append("同时选择了容器和内部对象；尺寸逐对象报告，不合并几何。")
     dimensions = [_dimension(shapes[name], *_shape(shapes[name])) for name in selected_names]
-    properties = _object_properties([shapes[name] for name in selected_names], names, explicit=property_names is not None)
+    properties = _object_properties([shapes[name] for name in selected_names], names,
+                                    explicit=property_names is not None, use_user_units=use_user_units)
+    if use_user_units:
+        _dimension_displays(app, dimensions, properties)
     if any(not _live(document, shapes[name]) for name in selected_names):
         raise PftDocumentToolsError("TARGET_CHANGED", "目标对象已变化或不适用，请刷新后重新选择。")
     if _document(app, info["Name"]) is not document:
         raise PftDocumentToolsError("DOCUMENT_CHANGED", "文档已关闭或变化，请刷新。")
     return {"document": info, "candidates": candidates, "selected_names": selected_names,
             "dimensions": dimensions, "properties": properties, "property_scope": property_scope,
-            "property_names": list(names), "warnings": warnings}
+            "property_names": list(names), "use_user_units": use_user_units, "warnings": warnings}
 
 
 def _boolean(value, tr):
@@ -685,7 +813,14 @@ def _property_headers(snapshot):
     return _PROPERTY_HEADERS[:3] + ("类型",) + _PROPERTY_HEADERS[3:] if snapshot.get("property_scope") == "explicit" else _PROPERTY_HEADERS
 
 
-def _property_display(field, tr):
+def _display_with_internal(internal, display, tr):
+    if isinstance(display, dict) and display.get("status") == "available" and isinstance(display.get("text"), str):
+        return display["text"]
+    status = display.get("status") if isinstance(display, dict) else "unknown"
+    return internal + " (" + tr("显示单位不可读取") + ": " + _status(status, tr) + ")"
+
+
+def _property_display(field, tr, use_user_units=False):
     value = field["value"]
     if value is None:
         return ""
@@ -700,21 +835,22 @@ def _property_display(field, tr):
     if (type(value) is list and field.get("kind") in _PROPERTY_LIST_KINDS.values()
             and all(type(item) in (str, int, float, bool) for item in value)):
         return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-    if field.get("kind") in ("vector", "vector_list", "rotation", "placement") and type(value) in (dict, list):
+    if field.get("kind") in ("vector", "vector_list", "rotation", "placement", "placement_list") and type(value) in (dict, list):
         # Format the frozen primitive DTO only. Unit and coordinate provenance
         # remain visible; these values are not cached Shape.BoundBox extents.
         description = {key: field.get(key) for key in (
             "unit", "unit_signature", "unit_system", "unit_source", "coordinate_scope", "coordinate_frame",
             "placement_applied_by_tool", "link_source_resolved")}
-        if field.get("kind") in _TRANSFORM_PROPERTY_KINDS.values():
+        if field.get("kind") in (*_TRANSFORM_PROPERTY_KINDS.values(), "placement_list"):
             description.update({key: field.get(key) for key in (
                 "representation", "quaternion_normalization", "quaternion_normalized_by_tool")})
-            if field["kind"] == "placement":
+            if field["kind"] in ("placement", "placement_list"):
                 description["component_units"] = field["component_units"]
         return json.dumps({"value": value, **description}, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     if (isinstance(value, dict) and value.get("kind") == "quantity" and value.get("unit_system") == "freecad_internal"
             and _finite_property_number(value.get("value")) is not None and isinstance(value.get("unit"), str)):
-        return format(value["value"], ".12g") + " " + _text(value["unit"], 128)
+        internal = format(value["value"], ".12g") + " " + _text(value["unit"], 128)
+        return _display_with_internal(internal, field.get("display_quantity"), tr) if use_user_units else internal
     return tr("未知")
 
 
@@ -729,17 +865,35 @@ def _property_cells(snapshot, tr):
             prefix = (obj["Name"], obj["Label"], field["name"])
             if snapshot.get("property_scope") == "explicit":
                 prefix += (field["type"] or tr("未知"),)
-            yield prefix + (_property_display(field, tr), _status(field["status"], tr), obj["source"], "; ".join(notes))
+            display = field.get("display_quantity", {}) if snapshot.get("use_user_units") else {}
+            if display.get("truncated"):
+                notes.append(tr("已截断"))
+            if display.get("sanitized"):
+                notes.append(tr("已净化控制字符"))
+            yield prefix + (_property_display(field, tr, snapshot.get("use_user_units", False)), _status(field["status"], tr), obj["source"], "; ".join(notes))
 
 
 def _number(value, tr):
     return tr("未知") if value is None else format(value, ".12g")
 
 
+def _dimension_title(snapshot):
+    return "尺寸（FreeCAD 显示单位）" if snapshot.get("use_user_units") else "尺寸（mm）"
+
+
+def _dimension_display(snapshot, row, key, tr):
+    internal = _number(row[key], tr)
+    if not snapshot.get("use_user_units"):
+        return internal
+    if row[key] is not None:
+        internal += " mm"
+    return _display_with_internal(internal, row.get("display_dimensions", {}).get(key), tr)
+
+
 def format_dimensions(snapshot, tr=lambda value: value):
-    lines = [tr("尺寸（mm）"), " | ".join(tr(key) for key in ("对象", "显示名称", "X 长度", "Y 宽度", "Z 高度", "状态"))]
+    lines = [tr(_dimension_title(snapshot)), " | ".join(tr(key) for key in ("对象", "显示名称", "X 长度", "Y 宽度", "Z 高度", "状态"))]
     for row in snapshot.get("dimensions", []):
-        lines.append(" | ".join((row["Name"], row["Label"], *(_number(row[key], tr) for key in ("length_mm", "width_mm", "height_mm")), _status(row["status"], tr))))
+        lines.append(" | ".join((row["Name"], row["Label"], *(_dimension_display(snapshot, row, key, tr) for key in ("length_mm", "width_mm", "height_mm")), _status(row["status"], tr))))
     if not snapshot.get("dimensions"):
         lines.append(tr("未选择尺寸对象。"))
     lines.extend(tr(warning) for warning in snapshot.get("warnings", []))
@@ -757,9 +911,9 @@ def format_markdown(snapshot, tr=lambda value: value):
     # Intentionally omit FileName even though the local information UI shows it.
     lines = ["# " + escape_markdown(tr("当前文档信息")), ""]
     lines.extend(escape_markdown(line) for line in _info_lines(snapshot, tr, False))
-    lines.extend(("", "## " + escape_markdown(tr("尺寸（mm）")), "", "| " + " | ".join(escape_markdown(tr(key)) for key in ("对象", "显示名称", "X 长度", "Y 宽度", "Z 高度", "状态")) + " |", "| --- | --- | --- | --- | --- | --- |"))
+    lines.extend(("", "## " + escape_markdown(tr(_dimension_title(snapshot))), "", "| " + " | ".join(escape_markdown(tr(key)) for key in ("对象", "显示名称", "X 长度", "Y 宽度", "Z 高度", "状态")) + " |", "| --- | --- | --- | --- | --- | --- |"))
     for row in snapshot.get("dimensions", []):
-        values = (row["Name"], row["Label"], *(_number(row[key], tr) for key in ("length_mm", "width_mm", "height_mm")), _status(row["status"], tr))
+        values = (row["Name"], row["Label"], *(_dimension_display(snapshot, row, key, tr) for key in ("length_mm", "width_mm", "height_mm")), _status(row["status"], tr))
         lines.append("| " + " | ".join(escape_markdown(value) for value in values) + " |")
     if not snapshot.get("dimensions"):
         lines.extend(("", escape_markdown(tr("未选择尺寸对象。"))))

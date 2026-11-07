@@ -7,6 +7,7 @@ or alter a document. Call start_server() from FreeCAD's Python console or menu.
 
 import itertools
 import importlib.util
+from copy import deepcopy
 from pathlib import Path
 import json
 import os
@@ -27,15 +28,17 @@ def _load_helper(name):
 _operations = _load_helper("pft_operations")
 _runtime = _load_helper("pft_runtime")
 _business = _load_helper("pft_business")
+_drawing_export = _load_helper("pft_drawing_export")
 _design = _load_helper("pft_design_inspection")
 _drawing_references = _load_helper("pft_drawing_references")
 _mcp_settings = _load_helper("pft_mcp_settings")
 _instance_registry = _load_helper("pft_instance_registry")
 _OPERATION_METHODS = set(_operations.METHODS)
 _BUSINESS_METHODS = set(_business.METHODS)
+_EXPORT_METHODS = set(_drawing_export.METHODS)
 _DESIGN_METHODS = set(_design.METHODS)
-SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS | _BUSINESS_METHODS | _DESIGN_METHODS)
-ADDON_VERSION = "0.3.2"
+SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS | _BUSINESS_METHODS | _EXPORT_METHODS | _DESIGN_METHODS)
+ADDON_VERSION = "0.4.1"
 PROTOCOL_VERSION = 1
 def _default_port(environ):
     if environ.get("PFT_DEVELOPMENT") != "1":
@@ -113,8 +116,11 @@ def get_status():
             "part_approvals": dict(_business.APPROVAL_CAPABILITIES),
             "pad_length_write": dict(_business.PAD_LENGTH_CAPABILITIES),
             "drawing_create": {**_business.DRAWING_CREATE_CAPABILITIES, "views": list(_business.DRAWING_CREATE_CAPABILITIES["views"])},
+            "drawing_draft_layout": dict(_business.DRAWING_DRAFT_LAYOUT_CAPABILITIES),
             "drawing_references": dict(_drawing_references.CAPABILITIES),
             "drawing_dimensions": {**_business.DRAWING_DIMENSIONS_CAPABILITIES, "kinds": list(_business.DRAWING_DIMENSIONS_CAPABILITIES["kinds"])},
+            "drawing_dimension_layout": dict(_business.DRAWING_DIMENSION_LAYOUT_CAPABILITIES),
+            "drawing_export": deepcopy(_drawing_export.CAPABILITIES),
             "instance_routing": dict(_service_identity) if running and _service_identity is not None else None,
             "instance_registration_error": dict(_registration_error) if _registration_error else None,
             "running": bool(running),
@@ -142,7 +148,9 @@ def _validate_request(payload):
     if not isinstance(params, dict):
         raise PftBridgeError("INVALID_PARAMS", "params 必须是 JSON 对象。")
     if (_operations.validate(method, params, PftBridgeError) or _runtime.validate(method, params, PftBridgeError)
-            or _business.validate(method, params, PftBridgeError) or _design.validate(method, params, PftBridgeError)):
+            or _business.validate(method, params, PftBridgeError)
+            or _drawing_export.validate(method, params, PftBridgeError)
+            or _design.validate(method, params, PftBridgeError)):
         return method, params
     keys = {"docName"} if method == "view_fit" else {"docName", "fit"} if method == "view_axonometric" else set()
     if set(params) - keys:
@@ -224,6 +232,9 @@ def _perform_gui(method, params, _approval_epoch=None):
 
     if method in _OPERATION_METHODS:
         return _operations.perform(method, params, App, Gui, PftBridgeError)
+    if method in _EXPORT_METHODS:
+        return _drawing_export.perform(method, params, App, Gui, PftBridgeError,
+                                       _approval_epoch=_approval_epoch)
     if method in _BUSINESS_METHODS:
         if method == "request_part_change_approval":
             return _business.perform(method, params, App, Gui, PftBridgeError, _approval_epoch=_approval_epoch)
@@ -300,6 +311,7 @@ def _create_gui_dispatcher():
             self.pending = []
             self.processing = False
             self.approval_epoch = 0
+            self.export_approval_epoch = 0
             self.requested.connect(self.run, QtCore.Qt.QueuedConnection)
 
         @QtCore.Slot(object)
@@ -327,6 +339,8 @@ def _create_gui_dispatcher():
                 _check_admission(job.admission)
                 if job.method == "request_part_change_approval":
                     job.result = _perform_gui(job.method, job.params, _approval_epoch=self.approval_epoch)
+                elif job.method in _EXPORT_METHODS:
+                    job.result = _perform_gui(job.method, job.params, _approval_epoch=self.export_approval_epoch)
                 else:
                     job.result = _perform_gui(job.method, job.params)
             except PftBridgeError as error:
@@ -350,6 +364,8 @@ def _create_gui_dispatcher():
                 _check_admission(admission)
                 if method == "request_part_change_approval":
                     return _perform_gui(method, params, _approval_epoch=self.approval_epoch)
+                if method in _EXPORT_METHODS:
+                    return _perform_gui(method, params, _approval_epoch=self.export_approval_epoch)
                 return _perform_gui(method, params)
             job = _PftGuiJob(method, params, admission)
             with self.lock:
@@ -405,9 +421,10 @@ def process_request(payload, *, _listener=None):
         method, params = _validate_request(payload)
         admission = _admit(method, payload, _listener)
         guarded = payload.get("target") is not None
-        if method in {"execute_script", "get_script_status"}:
+        if method in {"execute_script", "get_script_status", "prepare_drawing_export"}:
             _bind_origin(_request_origins, params["requestId"], admission)
-        if method in {"request_part_change_approval", "get_part_change_status", "apply_part_changes"}:
+        if method in {"request_part_change_approval", "get_part_change_status", "apply_part_changes",
+                      "request_drawing_export_approval", "get_drawing_export_status"}:
             _bind_origin(_token_origins, params["token"], admission, require_known=guarded)
         if method == "prepare_part_changes" and admission is not None:
             with _state_lock:
@@ -424,6 +441,27 @@ def process_request(payload, *, _listener=None):
             return _success(_runtime.status(params["requestId"], PftBridgeError))
         if method == "get_part_change_status":
             return _success(_business.perform(method, params, None, None, PftBridgeError))
+        if method == "get_drawing_export_status":
+            return _success(_drawing_export.perform(method, params, None, None, PftBridgeError))
+        if method == "prepare_drawing_export":
+            # Claim and bind the preparing token before any GUI work. A lost
+            # response can replay the same request ID without capturing again.
+            # Keep this independent of the part-change/Undo lifecycle.
+            with _state_lock:
+                _check_admission(admission)
+                fresh, snapshot = _drawing_export.claim_prepare(params, PftBridgeError)
+                try:
+                    snapshot = _remember_preview(snapshot, admission)
+                except PftBridgeError as error:
+                    _drawing_export.dispatch_error(params["requestId"], error)
+                    raise
+            if not fresh:
+                return _success(snapshot)
+            try:
+                return _success(_remember_preview(dispatch(), admission))
+            except PftBridgeError as error:
+                _drawing_export.dispatch_error(params["requestId"], error)
+                raise
         if method == "execute_script":
             fresh, snapshot = _runtime.claim(params, PftBridgeError)
             if not fresh:
@@ -467,7 +505,7 @@ class _PftBridgeHttpServer(ThreadingHTTPServer):
 
 
 class _PftRequestHandler(BaseHTTPRequestHandler):
-    server_version = "PhoenixFreeCADTools/0.3.2"
+    server_version = "PhoenixFreeCADTools/0.4.1"
     sys_version = ""
 
     def log_message(self, format, *args):
@@ -583,6 +621,7 @@ def start_server(port=None, *, discovery_registration_directory=None):
         # Gate transitions share this state lock with stop_server.  A failed
         # startup must never leave the previous native approval lifecycle open.
         _business.cancel_pending_approvals()
+        _drawing_export.cancel_pending_approvals()
         dispatcher = _create_gui_dispatcher()
         try:
             server = _PftBridgeHttpServer(("127.0.0.1", selected_port), _PftRequestHandler)
@@ -613,10 +652,12 @@ def start_server(port=None, *, discovery_registration_directory=None):
             # Finish every fallible lifecycle initialization before starting a
             # serving thread; dispatch cannot acquire _state_lock yet.
             dispatcher.approval_epoch = _business.begin_approval_lifecycle()
+            dispatcher.export_approval_epoch = _drawing_export.begin_approval_lifecycle()
             server_thread.start()
             _listener_configuration = {**selected_configuration, "effective_port": server.server_address[1]}
         except Exception as error:
             _business.cancel_pending_approvals()
+            _drawing_export.cancel_pending_approvals()
             _service_identity = None
             _registration = registration
             if registration is not None:
@@ -645,6 +686,7 @@ def stop_server():
             # Atomic with start's enable: a request starting after this point
             # cannot acquire a fresh grant until a successful new lifecycle.
             _business.cancel_pending_approvals()
+            _drawing_export.cancel_pending_approvals()
             server = _server
             dispatcher = _dispatcher
             _server = None

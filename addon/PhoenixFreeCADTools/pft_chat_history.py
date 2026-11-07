@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded text-only history projection for the fixed Codex 0.160.0 protocol.
+"""Bounded text-only history projection for the verified Codex protocols.
 
 Pure Python: no Qt, filesystem, RPC, credentials, clock reads or live-turn
 callbacks. The caller binds responses to its connection generation and exact

@@ -148,14 +148,26 @@ def create_thumbnail_widget(app, gui, parent, get_document_name, on_activate=Non
 
     preview = _plain(ThumbnailPreview(), core)
     preview.setObjectName("PhoenixTools_ThumbnailPreview")
-    preview.setMinimumHeight(180)
+    preview.setMinimumHeight(96)
     preview.setMaximumHeight(320)
     alignment = _enum(core.Qt, "AlignmentFlag", "AlignCenter")
     if alignment is not None:
         preview.setAlignment(alignment)
     layout.addWidget(preview, 1)
-    status = _plain(widgets.QLabel(tr("尚未生成缩略图。"), content), core)
+    status = _shrink_horizontal(widgets.QPlainTextEdit(content))
     status.setObjectName("PhoenixTools_ThumbnailStatus")
+    status.setReadOnly(True)
+    status.setPlainText(tr("尚未生成缩略图。"))
+    status.setMinimumHeight(64)
+    status.setMaximumHeight(112)
+    status.setLineWrapMode(_enum(widgets.QPlainTextEdit, "LineWrapMode", "WidgetWidth"))
+    status.setWordWrapMode(_enum(qtgui.QTextOption, "WrapMode", "WrapAtWordBoundaryOrAnywhere"))
+    frame = _enum(widgets.QFrame, "Shape", "NoFrame")
+    if frame is not None:
+        status.setFrameShape(frame)
+    horizontal_off = _enum(core.Qt, "ScrollBarPolicy", "ScrollBarAlwaysOff")
+    if horizontal_off is not None:
+        status.setHorizontalScrollBarPolicy(horizontal_off)
     layout.addWidget(status)
     actions = widgets.QHBoxLayout()
     activate = widgets.QPushButton(tr("激活此文档"), content)
@@ -180,7 +192,7 @@ def create_thumbnail_widget(app, gui, parent, get_document_name, on_activate=Non
         state["preview"] = None
         preview.clear()
         preview.setText(tr(message))
-        status.setText(tr(message))
+        status.setPlainText(tr(message))
         available()
 
     def set_document(document_name, active=False):
@@ -214,7 +226,7 @@ def create_thumbnail_widget(app, gui, parent, get_document_name, on_activate=Non
                 raise RuntimeError()
             set_document(document_name, active=True)
         except Exception:
-            status.setText(tr("无法激活此文档，请先在 FreeCAD 中切换。"))
+            status.setPlainText(tr("无法激活此文档，请先在 FreeCAD 中切换。"))
         finally:
             state["busy"] = False
             available()
@@ -257,7 +269,7 @@ def create_thumbnail_widget(app, gui, parent, get_document_name, on_activate=Non
             warnings = warnings if isinstance(warnings, (tuple, list)) else ()
             visible_warnings = [tr(message) for message in warnings if isinstance(message, str)
                                 and message in known_messages][:3]
-            status.setText("\n".join([caption] + visible_warnings))
+            status.setPlainText("\n".join([caption] + visible_warnings))
         except Exception as error:
             message = error.message if isinstance(error, getattr(module, "PftThumbnailCaptureError", ())) else "缩略图生成失败；未保存 CAD 文档。"
             clear_preview(message)
@@ -287,17 +299,17 @@ def create_thumbnail_widget(app, gui, parent, get_document_name, on_activate=Non
             if plan is None:
                 return
             if plan.get("data") != image["png"]:
-                status.setText(tr("预览 PNG 与导出计划不一致，请重新生成。"))
+                status.setPlainText(tr("预览 PNG 与导出计划不一致，请重新生成。"))
                 return
             if not _confirm_export(core, widgets, content, plan):
                 return
             if state["preview"] is not image:
                 return
             module.write_png_export(plan, overwrite=plan["exists"])
-            status.setText(tr("PNG 已导出；CAD 文档未保存。"))
+            status.setPlainText(tr("PNG 已导出；CAD 文档未保存。"))
         except Exception as error:
             message = error.message if isinstance(error, getattr(module, "PftThumbnailError", ())) else "PNG 导出失败；未保存 CAD 文档。"
-            status.setText(tr(message))
+            status.setPlainText(tr(message))
 
     activate.clicked.connect(lambda _checked=False: activate_document())
     capture.clicked.connect(lambda _checked=False: generate())

@@ -10,6 +10,7 @@ from pathlib import Path
 _RESULT_CONTRACT = None
 _DRAWING_RESULT_CONTRACT = None
 _DIMENSION_RESULT_CONTRACT = None
+_LAYOUT_MODULES = {}
 
 
 _HANDLES = OrderedDict()
@@ -25,8 +26,11 @@ _ERROR_CODES = frozenset((
     "PAD_RECOMPUTE_UNVERIFIED", "PAD_NATIVE_CONFIRMATION_REQUIRED",
     "DRAWING_UNSUPPORTED", "DRAWING_PLAN_STALE", "DRAWING_TEMPLATE_UNAVAILABLE", "DRAWING_CREATE_FAILED",
     "DRAWING_RECOMPUTE_UNVERIFIED", "DRAWING_PROJECTION_UNAVAILABLE", "DRAWING_NATIVE_CONFIRMATION_REQUIRED", "DRAWING_RESULT_INVALID",
+    "DRAWING_DRAFT_LAYOUT_UNAVAILABLE", "DRAWING_DRAFT_LAYOUT_NO_SPACE", "DRAWING_DRAFT_LAYOUT_STALE",
     "DIMENSION_UNSUPPORTED", "DIMENSION_PLAN_STALE", "DIMENSION_CREATE_FAILED", "DIMENSION_RECOMPUTE_UNVERIFIED",
     "DIMENSION_VALUE_UNVERIFIED", "DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "DIMENSION_RESULT_INVALID",
+    "DIMENSION_LAYOUT_UNAVAILABLE", "DIMENSION_LAYOUT_STALE", "DIMENSION_LAYOUT_STYLE_UNVERIFIED",
+    "DIMENSION_LAYOUT_CLEANUP_UNVERIFIED",
 ))
 TRANSLATABLE_STRINGS = (
     "确认零件修改", "确认图纸创建", "确认图纸尺寸", "文档：%s", "操作：%s", "原预览到期时间：%s", "仅点击“确认修改”会修改文档；可撤销，不会自动保存。",
@@ -91,6 +95,23 @@ def _dimension_contract():
     return _DIMENSION_RESULT_CONTRACT
 
 
+def _layout_sibling(name):
+    if name not in ("pft_drawing_layout_plan", "pft_drawing_layout_views", "pft_draft_layout", "pft_draft_layout_views"):
+        raise ValueError("PART_APPROVAL_PREVIEW_INVALID")
+    filename = Path(__file__).resolve().with_name(name + ".py")
+    module = _LAYOUT_MODULES.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location("_pft_approval_" + name, filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if Path(getattr(module, "__file__", "")).resolve() != filename:
+            raise ValueError("PART_APPROVAL_PREVIEW_INVALID")
+        _LAYOUT_MODULES[name] = module
+    if Path(getattr(module, "__file__", "")).resolve() != filename:
+        raise ValueError("PART_APPROVAL_PREVIEW_INVALID")
+    return module
+
+
 def _dimension_preview(result):
     request = _dimension_contract().validate_request(result.get("design_request"))
     rows = result["rows"]
@@ -124,6 +145,16 @@ def _preview_copy(preview):
             raise ValueError()
         if result["operation"] == "add_drawing_dimensions":
             _dimension_preview(result)
+        if "layout" in result:
+            if result["operation"] != "add_drawing_dimensions":
+                raise ValueError()
+            result["layout"] = _layout_sibling("pft_drawing_layout_plan").validate_preview(
+                result["layout"], result["design_request"], can_apply=result["can_apply"])
+            # Blocked auto layouts stay in the read-only preview response and
+            # never acquire a native confirmation window.
+            if (result["can_apply"] is not True or result["layout"]["graphics"] is None
+                    or result["layout"]["graphics"]["result"]["can_apply"] is not True):
+                raise ValueError()
         if result["operation"] == "create_drawing":
             request = _drawing_contract().validate_design_request(result.get("design_request"))
             rows = result["rows"]
@@ -133,6 +164,15 @@ def _preview_copy(preview):
                     or len({row["object"] for row in rows}) != 5
                     or request["source"] in {row["object"] for row in rows}):
                 raise ValueError()
+        if "draft_layout" in result or "draft_layout_reason" in result:
+            if result["operation"] != "create_drawing" or not {"draft_layout", "draft_layout_reason"}.issubset(result):
+                raise ValueError()
+            pair = _layout_sibling("pft_draft_layout").validate_preview(
+                {key: result[key] for key in ("draft_layout", "draft_layout_reason")},
+                result["design_request"], result["rows"], can_apply=result["can_apply"])
+            if result["can_apply"] is not True or pair["draft_layout"] is None or pair["draft_layout_reason"] is not None:
+                raise ValueError()
+            result.update(pair)
         if result["operation"] == "set_pad_length":
             request = result.get("design_request")
             if (type(request) is not dict or set(request) != {"body", "pad", "length_mm"}
@@ -157,7 +197,7 @@ class _ApprovalHandle:
         self._closed = self._cancel_called = self._confirming = self._attempted = False
         self._close_requested = self._native_destroyed = self._polling = False
         self._state = "prepared"
-        self.dialog = self.timer = None
+        self.dialog = self.timer = self.layout_widget = None
         owner = self
 
         class ApprovalDialog(widgets.QDialog):
@@ -186,13 +226,23 @@ class _ApprovalHandle:
             self.dialog.setModal(False)
             self.dialog.setWindowModality(_enum(core.Qt, "WindowModality", "NonModal"))
             self.dialog.setMinimumWidth(0)
-            self.dialog.resize(720, 420)
+            self.dialog.resize(720, 780 if "layout" in preview or "draft_layout" in preview else 420)
             layout = widgets.QVBoxLayout(self.dialog)
             layout.setContentsMargins(12, 12, 12, 12)
             for key, value in (("文档：%s", preview["document"]), ("操作：%s", preview["operation"]),
                                ("原预览到期时间：%s", preview["expires_at"])):
                 layout.addWidget(self._label(translate(key) % value))
             layout.addWidget(self._label(translate("仅点击“确认修改”会修改文档；可撤销，不会自动保存。")))
+            if "layout" in preview:
+                self.layout_widget = _layout_sibling("pft_drawing_layout_views").create_drawing_layout_widget(
+                    self.dialog, translate=translate)
+                self.layout_widget.set_plan(preview["layout"]["graphics"])
+                layout.addWidget(self.layout_widget, 2)
+            elif "draft_layout" in preview:
+                self.layout_widget = _layout_sibling("pft_draft_layout_views").create_draft_layout_widget(
+                    self.dialog, translate=translate)
+                self.layout_widget.set_plan(preview["draft_layout"])
+                layout.addWidget(self.layout_widget, 2)
             self.table = widgets.QTableWidget(len(preview["rows"]), 6, self.dialog)
             self.table.setObjectName("pftPartApprovalRows")
             self.table.setMinimumWidth(0)
@@ -429,6 +479,12 @@ class _ApprovalHandle:
             return
         self._closed = True
         _HANDLES.pop(id(self), None)
+        widget, self.layout_widget = self.layout_widget, None
+        if widget is not None and not self._native_destroyed:
+            try:
+                widget.clear_plan()
+            except Exception:
+                pass
         if self.timer is not None:
             try:
                 self.timer.stop()

@@ -88,6 +88,7 @@ class NativeObject:
         self.Placement = placement()
         self.Shape = Shape()
         self.InList, self.Group = [], []
+        self.OutList, self.ExpressionEngine = [], []
         self.valid = True
 
     def isValid(self): return self.valid
@@ -113,12 +114,31 @@ class NativeObject:
 class DraftNode:
     def __init__(self, name, kind):
         self.Name, self.TypeId, self.State = name, kind, ['Touched']
+        self.PropertiesList, self.ExpressionEngine = ['ExpressionEngine'], []
+        self._outlist_override = None
         self.Views, self.Source, self.EditableTexts = [], [], {'title': 'synthetic placeholder'}
+        if kind == 'TechDraw::DrawViewPart':
+            self.PropertiesList.extend(['Source', 'XSource'])
+            self.XSource = []
         self.Scale, self.X, self.Y = 1., 0., 0.
         self.ProjectionType = 'Third angle'  # A user preference must not change the contract.
         self.CoarseView = True  # An existing preference must not downgrade exact HLR.
 
     def addView(self, view): self.Views.append(view)
+
+    @property
+    def OutList(self):
+        if self._outlist_override is not None:
+            return self._outlist_override
+        if self.TypeId == 'TechDraw::DrawPage':
+            template = getattr(self, 'Template', None)
+            return ([] if template is None else [template]) + self.Views[:]
+        if self.TypeId == 'TechDraw::DrawViewPart':
+            return self.Source[:] + self.XSource[:]
+        return []
+
+    @OutList.setter
+    def OutList(self, value): self._outlist_override = value
 
 
 class Document:
@@ -733,12 +753,310 @@ class DrawingTests(unittest.TestCase):
 
 
 
+class DependencySnapshotTests(unittest.TestCase):
+    setUp = DrawingTests.setUp
+    prepare = DrawingTests.prepare
+    apply = DrawingTests.apply
+    error = DrawingTests.error
+
+    def helper(self, name='Origin', kind='App::Origin'):
+        obj = NS(Name=name, TypeId=kind, Document=self.doc,
+                 PropertiesList=['ExpressionEngine'], State=['Up-to-date'],
+                 ExpressionEngine=[], OutList=[], isValid=lambda: True)
+        self.doc.Objects.append(obj)
+        return obj
+
+    def test_native_auxiliary_graph_needs_no_shape_or_placement_and_commits(self):
+        origin = self.helper()
+        plane = self.helper('Plane', 'App::Plane')
+        sketch = self.helper('Sketch', 'Sketcher::SketchObject')
+        self.source.OutList = [origin, sketch]
+        origin.OutList = [plane]
+        sketch.OutList = [plane]
+        self.app.ParamGet = lambda path: (_ for _ in ()).throw(AssertionError('prepare initialized preferences'))
+        plan, _ = self.prepare()
+        signature = plan['snapshot'][7]
+        self.assertEqual([row[2] for row in signature], [self.source.Name, 'Origin', 'Plane', 'Sketch'])
+        self.assertIs(signature[1][1], origin)
+        self.assertEqual(signature[0][5], (id(origin), id(sketch)))
+        self.assertTrue(all(type(row) is tuple and type(row[4]) is tuple and type(row[5]) is tuple
+                            for row in signature))
+        self.assertFalse(any(hasattr(obj, 'Shape') or hasattr(obj, 'Placement') for obj in (origin, plane, sketch)))
+        result = self.apply(plan)
+        self.assertEqual(result['kind'], 'drawing_draft')
+        self.assertEqual(self.doc.events, ['open', 'commit'])
+
+    def test_body_tip_is_a_root_even_when_not_in_sources_cached_outlist(self):
+        self.source.TypeId = 'PartDesign::Body'
+        tip = NativeObject('Pocket', 'PartDesign::Pocket')
+        tip.Document = self.doc
+        self.doc.Objects.append(tip)
+        self.source.Tip, self.source.Group = tip, [tip]
+        tip.OutList = [self.helper('Sketch', 'Sketcher::SketchObject')]
+        plan, _ = self.prepare()
+        self.assertEqual([row[2] for row in plan['snapshot'][7]], [self.source.Name, 'Pocket', 'Sketch'])
+        tip.OutList[0].Proxy = None
+        self.error(lambda: self.apply(plan), 'DRAWING_PLAN_STALE')
+        self.assertEqual(self.doc.events, [])
+
+    def test_foreign_dependency_is_rejected_before_reading_any_other_foreign_field(self):
+        accesses = []
+        foreign_document = object()
+        class Foreign:
+            def __getattribute__(self, key):
+                accesses.append(key)
+                if key == 'Document':
+                    return foreign_document
+                raise AssertionError('foreign field was inspected')
+        self.source.OutList = [Foreign()]
+        self.error(self.prepare, 'DRAWING_UNSUPPORTED')
+        self.assertEqual(accesses, ['Document'])
+        self.assertEqual((self.prime_calls, self.doc.events, self.doc.created_calls), ([], [], []))
+
+    def test_proxy_python_link_invalid_and_expression_dependencies_are_rejected(self):
+        for mode in ('proxy', 'proxy_property', 'python', 'link', 'link_element', 'invalid', 'expression',
+                     'touched', 'unregistered', 'wrong_registration'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                dependency = self.helper()
+                self.source.OutList = [dependency]
+                if mode == 'proxy': dependency.Proxy = None
+                elif mode == 'proxy_property': dependency.PropertiesList.append('Proxy')
+                elif mode == 'python': dependency.TypeId = 'PartDesign::FeaturePython'
+                elif mode == 'link': dependency.TypeId = 'App::Link'
+                elif mode == 'link_element': dependency.TypeId = 'App::LinkElement'
+                elif mode == 'invalid': dependency.isValid = lambda: False
+                elif mode == 'expression': dependency.ExpressionEngine = [('Length', '1 + 1')]
+                elif mode == 'touched': dependency.State = ['Touched']
+                elif mode == 'unregistered': self.doc.Objects.remove(dependency)
+                else:
+                    self.doc.Objects.remove(dependency)
+                    self.helper(dependency.Name)
+                self.error(self.prepare, 'DRAWING_UNSUPPORTED')
+                self.assertEqual((self.prime_calls, self.doc.events), ([], []))
+
+    def test_nonempty_source_expression_is_rejected_before_source_shape_read(self):
+        reads = []
+        class ShapeReadTrap(NativeObject):
+            @property
+            def Shape(self):
+                reads.append('Shape')
+                raise AssertionError('source Shape read before dependency validation')
+        self.source.__class__ = ShapeReadTrap
+        self.source.ExpressionEngine = [('Placement.Base.x', '1 + 1')]
+        self.error(self.prepare, 'DRAWING_UNSUPPORTED')
+        self.assertEqual(reads, [])
+
+    def test_local_edge_replacement_removal_and_child_identity_are_frozen(self):
+        for mode in ('replace_edge', 'remove_edge', 'rename', 'state', 'type', 'replace_identity', 'foreign'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                before, other = self.helper('Before'), self.helper('Other')
+                self.source.OutList = [before]
+                plan, _ = self.prepare()
+                if mode == 'replace_edge': self.source.OutList = [other]
+                elif mode == 'remove_edge': self.source.OutList = []
+                elif mode == 'rename': before.Name = 'Renamed'
+                elif mode == 'state': before.State = ['Up-to-date', 'Expanded']
+                elif mode == 'type': before.TypeId = 'App::Plane'
+                elif mode == 'replace_identity':
+                    self.doc.Objects.remove(before)
+                    self.source.OutList = [self.helper('Before')]
+                else: before.Document = object()
+                self.error(lambda: self.apply(plan), 'DRAWING_PLAN_STALE')
+                self.assertEqual((self.prime_calls, self.doc.events), ([], []))
+
+    def test_dependencies_are_rechecked_after_initialization_before_any_cad_write(self):
+        dependency, replacement = self.helper('Before'), self.helper('After')
+        self.source.OutList = [dependency]
+        plan, _ = self.prepare()
+        with patch.object(drawing, '_prime_projection_engine', side_effect=lambda app: setattr(self.source, 'OutList', [replacement])):
+            self.error(lambda: self.apply(plan), 'DRAWING_PLAN_STALE')
+        self.assertEqual((self.doc.events, self.doc.created_calls), ([], []))
+
+    def test_dependency_change_during_recompute_is_not_committed_as_success(self):
+        dependency, replacement = self.helper('Before'), self.helper('After')
+        self.source.OutList = [dependency]
+        plan, _ = self.prepare()
+        self.doc.recompute_hook = lambda nodes: setattr(self.source, 'OutList', [replacement])
+        self.error(lambda: self.apply(plan), 'DRAWING_PLAN_STALE')
+        self.assertEqual(self.doc.events, ['open', 'abort'])
+        self.assertEqual(self.source.OutList, [dependency])
+
+    def test_cycles_and_malformed_or_failed_native_reads_are_fixed_errors(self):
+        for mode in ('self_cycle', 'nested_cycle', 'roots_list', 'too_many_roots', 'outlist_iterator',
+                     'expression_iterator', 'read_failure'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                dependency = self.helper()
+                self.source.OutList = [dependency]
+                roots = (self.source,)
+                if mode == 'self_cycle': self.source.OutList = [self.source]
+                elif mode == 'nested_cycle': dependency.OutList = [self.source]
+                elif mode == 'roots_list': roots = [self.source]
+                elif mode == 'too_many_roots': roots = (self.source,) * 3
+                elif mode == 'outlist_iterator': dependency.OutList = iter(())
+                elif mode == 'expression_iterator': dependency.ExpressionEngine = iter(())
+                else:
+                    dependency.isValid = lambda: (_ for _ in ()).throw(RuntimeError('synthetic-private-read-detail'))
+                error = self.error(lambda: drawing._dependency_snapshot(self.doc, roots), 'DRAWING_UNSUPPORTED')
+                self.assertNotIn('synthetic-private-read-detail', str(error))
+
+    def test_iterative_node_limit_accepts_boundary_and_rejects_one_more(self):
+        previous = self.source
+        for index in range(drawing._MAX_DEPENDENCY_NODES - 1):
+            current = self.helper('Aux%03d' % index)
+            previous.OutList = [current]
+            previous = current
+        signature = drawing._dependency_snapshot(self.doc, (self.source,))
+        self.assertEqual(len(signature), drawing._MAX_DEPENDENCY_NODES)
+        previous.OutList = [self.helper('OneTooMany')]
+        self.error(lambda: drawing._dependency_snapshot(self.doc, (self.source,)), 'DRAWING_UNSUPPORTED')
+
+    def test_total_edges_have_a_separate_budget_with_shared_dependencies(self):
+        dependency, leaf = self.helper('Shared'), self.helper('Leaf')
+        half = drawing._MAX_DEPENDENCY_EDGES // 2
+        self.source.OutList = [dependency] * half
+        dependency.OutList = [leaf] * half
+        self.assertEqual(len(drawing._dependency_snapshot(self.doc, (self.source,))), 3)
+        dependency.OutList.append(leaf)
+        self.error(lambda: drawing._dependency_snapshot(self.doc, (self.source,)), 'DRAWING_UNSUPPORTED')
+
+
+class CreatedDependencyTests(unittest.TestCase):
+    setUp = DrawingTests.setUp
+    apply = DrawingTests.apply
+    error = DrawingTests.error
+
+    def prepare_mode(self, automatic):
+        if automatic:
+            self.app.Version = lambda: ('1', '1', '4', 'Independent build')
+            patches = (patch.dict('sys.modules', {'PySide6.QtCore': NS(qVersion=lambda: '6.8.3')}),
+                       patch.object(drawing, '_DRAFT_TEMPLATE_SHA256',
+                                    __import__('hashlib').sha256(self.template.read_bytes()).hexdigest()))
+            for item in patches:
+                item.start(); self.addCleanup(item.stop)
+        return drawing.prepare_plan(self.app, self.gui, self.doc, self.source, controller,
+                                    draft_layout=automatic)[0]
+
+    def test_created_native_links_are_identity_sets_not_an_assumed_property_order(self):
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                self.setUp()
+                plan = self.prepare_mode(automatic)
+                def reorder(node):
+                    if len(self.doc.created_calls) == 5:
+                        page, template, *views = self.doc.Objects[1:]
+                        page.OutList = list(reversed([template, *views]))
+                self.doc.add_hook = reorder
+                self.assertEqual(self.apply(plan)['kind'], 'drawing_draft')
+                self.assertEqual(self.doc.events, ['open', 'commit'])
+                self.assertEqual(len(self.doc.recompute_calls), 1)
+
+    def test_new_page_template_and_view_cannot_add_unreviewed_dependencies(self):
+        for automatic in (False, True):
+            for target, attack in (('view', 'xsource'), ('view', 'expression'), ('page', 'expression'),
+                                   ('template', 'expression'), ('view', 'outlist'), ('page', 'outlist'),
+                                   ('template', 'outlist'), ('view', 'proxy'), ('page', 'proxy_property')):
+                with self.subTest(automatic=automatic, target=target, attack=attack):
+                    self.setUp()
+                    plan = self.prepare_mode(automatic)
+                    accesses = []
+                    class Foreign:
+                        def __getattribute__(self, key):
+                            accesses.append(key)
+                            raise AssertionError('unreviewed target must not be inspected')
+                    foreign = Foreign()
+                    kinds = {'view': 'TechDraw::DrawViewPart', 'page': 'TechDraw::DrawPage',
+                             'template': 'TechDraw::DrawSVGTemplate'}
+                    def mutate(node):
+                        if node.TypeId != kinds[target]: return
+                        if attack == 'xsource': node.XSource = [foreign]
+                        elif attack == 'expression': node.ExpressionEngine = [('X', 'OtherDocument.Value')]
+                        elif attack == 'outlist': node.OutList = [foreign]
+                        elif attack == 'proxy': node.Proxy = None
+                        else: node.PropertiesList.append('Proxy')
+                    self.doc.add_hook = mutate
+                    self.error(lambda: self.apply(plan), 'DRAWING_CREATE_FAILED')
+                    self.assertEqual(self.doc.recompute_calls, [])
+                    self.assertEqual(self.doc.events, ['open', 'abort'])
+                    self.assertEqual(self.doc.Objects, [self.source])
+                    self.assertEqual(accesses, [])
+
+    def test_duplicate_missing_and_wrong_local_links_are_not_a_valid_created_graph(self):
+        for automatic in (False, True):
+            for mode in ('duplicate_page', 'duplicate_source', 'missing_source', 'local_wrong_target', 'missing_xsource'):
+                with self.subTest(automatic=automatic, mode=mode):
+                    self.setUp()
+                    plan = self.prepare_mode(automatic)
+                    def mutate(node):
+                        if len(self.doc.created_calls) != 5: return
+                        page, template, front, top, iso = self.doc.Objects[1:]
+                        if mode == 'duplicate_page': page.OutList = [template, front, front, iso]
+                        elif mode == 'duplicate_source': iso.OutList = [self.source, self.source]
+                        elif mode == 'missing_source': iso.OutList = []
+                        elif mode == 'local_wrong_target': iso.OutList = [template]
+                        else: iso.PropertiesList.remove('XSource')
+                    self.doc.add_hook = mutate
+                    self.error(lambda: self.apply(plan), 'DRAWING_CREATE_FAILED')
+                    self.assertEqual(self.doc.recompute_calls, [])
+                    self.assertEqual(self.doc.events, ['open', 'abort'])
+
+    def test_final_owner_and_before_write_callback_cannot_expand_the_recompute_graph(self):
+        original_verify, original_run = drawing._verify_created, controller._run_transaction
+        for automatic in (False, True):
+            for stage in ('owner', 'before_write') if automatic else ('owner',):
+                with self.subTest(automatic=automatic, stage=stage):
+                    self.setUp()
+                    plan = self.prepare_mode(automatic)
+                    armed, injected = [], []
+                    def verify(*args, **kwargs):
+                        result = original_verify(*args, **kwargs)
+                        if not self.doc.recompute_calls: armed.append(True)
+                        return result
+                    def run(app, document, title, write, rollback, committed):
+                        def checked_write(native_owner):
+                            def owner(*args, **kwargs):
+                                result = native_owner(*args, **kwargs)
+                                if armed and not injected and (stage == 'owner' or kwargs.get('before_write')):
+                                    document.Objects[-1].XSource = [object()]
+                                    injected.append(True)
+                                return result
+                            return write(owner)
+                        return original_run(app, document, title, checked_write, rollback, committed)
+                    with patch.object(drawing, '_verify_created', side_effect=verify), patch.object(controller, '_run_transaction', side_effect=run):
+                        self.error(lambda: self.apply(plan), 'DRAWING_CREATE_FAILED')
+                    self.assertEqual(injected, [True])
+                    self.assertEqual(self.doc.recompute_calls, [])
+                    self.assertEqual(self.doc.events, ['open', 'abort'])
+
+    def test_recompute_and_commit_readbacks_keep_the_new_node_guard(self):
+        for automatic in (False, True):
+            for stage in ('recompute', 'commit'):
+                with self.subTest(automatic=automatic, stage=stage):
+                    self.setUp()
+                    plan = self.prepare_mode(automatic)
+                    def change(): self.doc.Objects[-1].ExpressionEngine = [('X', 'OtherDocument.Value')]
+                    if stage == 'recompute': self.doc.recompute_hook = lambda nodes: change()
+                    else: self.doc.commit_hook = change
+                    if stage == 'recompute':
+                        self.error(lambda: self.apply(plan), 'DRAWING_CREATE_FAILED')
+                        self.assertEqual(self.doc.events, ['open', 'abort'])
+                    else:
+                        self.error(lambda: self.apply(plan), 'PART_COMMIT_UNVERIFIED', controller.PftWriteError)
+                        self.assertEqual(self.doc.events, ['open', 'commit'])
+                    self.assertEqual(len(self.doc.recompute_calls), 1)
+
+
 class ProjectionInitializationTests(unittest.TestCase):
     def setUp(self):
         previous = drawing._projection_primed
         drawing._projection_primed = False
         self.addCleanup(setattr, drawing, '_projection_primed', previous)
         self.calls = []
+        self.preference_calls = []
+        self.preferences = {}
+        self.groups = NS(GetGroup=self.group)
         self.shape = object()
         self.projected = [NS(isNull=lambda: False, Edges=[object()] * 4), None, None, None]
         def make_box(*dimensions):
@@ -750,13 +1068,54 @@ class ProjectionInitializationTests(unittest.TestCase):
         modules = patch.dict('sys.modules', {'Part': NS(makeBox=make_box), 'TechDraw': NS(project=project)})
         modules.start()
         self.addCleanup(modules.stop)
-        self.app = NS(Vector=lambda *xyz: xyz)
+        self.app = NS(Vector=lambda *xyz: xyz, ParamGet=self.param_get)
+
+    def group(self, name):
+        self.preference_calls.append(('group', name))
+        return self.preferences.setdefault(name, NS())
+
+    def param_get(self, path):
+        self.preference_calls.append(('root', path))
+        return self.groups
 
     def test_fixed_in_memory_cube_primes_exact_projection_once(self):
         drawing._prime_projection_engine(self.app)
         drawing._prime_projection_engine(self.app)
         self.assertEqual(self.calls, [('box', (1., 1., 1.)), ('project', self.shape, (0., 0., 1.))])
+        one = [('root', 'User parameter:BaseApp/Preferences/Mod/TechDraw'),
+               ('group', 'General'), ('group', 'debug')]
+        self.assertEqual(self.preference_calls, one + one)
         self.assertTrue(drawing._projection_primed)
+
+    def test_existing_native_values_and_handles_are_preserved_without_value_writes(self):
+        general, debug = NS(HandleFaces=False), NS(allowCrazyEdge=True)
+        self.preferences.update(General=general, debug=debug)
+        drawing._prime_projection_engine(self.app)
+        self.assertIs(self.preferences['General'], general)
+        self.assertIs(self.preferences['debug'], debug)
+        self.assertEqual(vars(general), {'HandleFaces': False})
+        self.assertEqual(vars(debug), {'allowCrazyEdge': True})
+
+    def test_primed_cube_does_not_skip_native_groups_or_swallow_later_failure(self):
+        drawing._projection_primed = True
+        def fail(name):
+            raise RuntimeError('synthetic-native-parameter-detail')
+        self.groups.GetGroup = fail
+        with self.assertRaises(drawing.PftDrawingError) as caught:
+            drawing._prime_projection_engine(self.app)
+        self.assertEqual(caught.exception.code, 'DRAWING_PROJECTION_UNAVAILABLE')
+        self.assertNotIn('synthetic-native-parameter-detail', str(caught.exception))
+        self.assertEqual(self.calls, [])
+
+    def test_missing_native_parameter_api_or_group_is_not_engine_readiness(self):
+        for app in (NS(Vector=lambda *xyz: xyz),
+                    NS(Vector=lambda *xyz: xyz, ParamGet=lambda path: NS(GetGroup=lambda name: None))):
+            with self.subTest(app=app):
+                with self.assertRaises(drawing.PftDrawingError) as caught:
+                    drawing._prime_projection_engine(app)
+                self.assertEqual(caught.exception.code, 'DRAWING_PROJECTION_UNAVAILABLE')
+                self.assertFalse(drawing._projection_primed)
+                self.assertEqual(self.calls, [])
 
     def test_invalid_projection_does_not_claim_engine_ready(self):
         self.projected[0] = NS(isNull=lambda: True, Edges=[])

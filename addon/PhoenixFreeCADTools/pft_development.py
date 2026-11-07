@@ -9,12 +9,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import threading
 
 COMMAND = 'PhoenixTools_ReloadDevelopmentUI'
-UI_MODULES = ('pft_panel_host', 'pft_thumbnail_views', 'pft_document_tools_views',
+UI_MODULES = ('pft_panel_host', 'pft_quick_toolbar', 'pft_thumbnail_views', 'pft_document_tools_views',
               'pft_appearance_controls', 'pft_appearance_views', 'pft_chat_transcript',
               'pft_chat_views', 'pft_mcp_settings_views', 'pft_workbench_views', 'pft_desk_views')
 _SOURCE = Path(__file__).resolve().parent
@@ -187,6 +188,8 @@ def register(app, gui, workbench_class):
     if os.environ.get('PFT_DEVELOPMENT') != '1':
         return False
     configure_bootstrap(app, gui)
+    if getattr(workbench_class, '_pft_development_registered', False):
+        return True
     class ReloadCommand:
         def GetResources(self):
             return {'MenuText': '重载开发界面', 'ToolTip': '仅重载被动界面；桥接、协议、事务与控制器改动须重启此开发实例。', 'CmdType': 'NoTransaction'}
@@ -205,8 +208,11 @@ def register(app, gui, workbench_class):
         original = workbench_class.Initialize
         def initialize(self):
             original(self)
-            self.appendMenu('Phoenix 开发', [COMMAND])
+            if getattr(self, '_pft_development_ui_initialized', False):
+                return
+            self.appendMenu('Phoenix', [COMMAND])
             self.appendToolbar('Phoenix 开发', [COMMAND])
+            self._pft_development_ui_initialized = True
         workbench_class.Initialize = initialize
         workbench_class._pft_development_registered = True
     return True
@@ -225,23 +231,36 @@ def write_readiness(app, gui):
     configure_bootstrap(app, gui)
     gui.activateWorkbench('PftWorkbench')
     window = gui.getMainWindow()
-    title = 'FreeCAD — Phoenix Development (' + os.environ.get('PFT_DEVELOPMENT_PORT', '9877') + ')'
-    if getattr(window, '_pft_development_title_handler', None) is None:
-        changing = [False]
-        def keep_development_title(*_ignored):
-            # Ignore the signal's document-derived title; never retain/read it.
-            if changing[0]:
-                return
-            changing[0] = True
-            try:
-                window.setWindowTitle(title)
-            finally:
-                changing[0] = False
-        signal = getattr(window, 'windowTitleChanged', None)
-        if signal is not None:
-            signal.connect(keep_development_title)
-        window._pft_development_title_handler = keep_development_title
-    window._pft_development_title_handler()
+    version = getattr(sys.modules['pft_bridge'], 'ADDON_VERSION', None)
+    if type(version) is not str or re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', version) is None:
+        raise PftDevelopmentError('无法确认开发插件版本。')
+    purpose = os.environ.get('PFT_DEVELOPMENT_PURPOSE', '通用').strip()
+    if (not purpose or len(purpose) > 80 or any(ord(char) < 32 or ord(char) == 127 or char in '|｜' for char in purpose)):
+        raise PftDevelopmentError('开发用途不符合标题格式。')
+    label = 'Phoenix ' + version + ' 开发｜' + purpose
+    port = os.environ.get('PFT_DEVELOPMENT_PORT', '')
+    if port.isascii() and port.isdecimal() and 1024 <= int(port) <= 65535:
+        label += '｜' + port
+    from PySide import QtCore
+    receiver = getattr(window, '_pft_development_title_receiver', None)
+    if receiver is None:
+        class _PftDevelopmentTitleReceiver(QtCore.QObject):
+            def __init__(self):
+                super().__init__(window)
+                self.prefix = ''
+
+            @QtCore.Slot(str)
+            def update(self, native_title):
+                # Preserve the native document/modified title for display only;
+                # never put it in the readiness receipt or other diagnostics.
+                if not native_title.startswith(self.prefix):
+                    window.setWindowTitle(self.prefix + native_title)
+
+        receiver = _PftDevelopmentTitleReceiver()
+        window.windowTitleChanged.connect(receiver.update)
+        window._pft_development_title_receiver = receiver
+    receiver.prefix = label + ' — '
+    receiver.update(window.windowTitle())
     window.showNormal()
     window.raise_()
     window.activateWindow()
@@ -259,7 +278,7 @@ def write_readiness(app, gui):
     payload = {'schema_version': 1, 'owner_id': marker['owner_id'], 'pid': os.getpid(),
                'ready': visible, 'window_visible': visible, 'qt_platform': platform,
                'workbench': 'PftWorkbench', 'module_paths': module_paths,
-               'automatic_service_start': False}
+               'automatic_service_start': False, 'addon_version': version, 'purpose': purpose}
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
     with os.fdopen(os.open(str(receipt), flags, 0o600), 'w', encoding='utf-8') as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)

@@ -33,7 +33,7 @@ class InstanceRegistryTests(unittest.TestCase):
         record = {"schema_version": 1, "owner": "phoenix-freecad-tools",
                   "instance_id": format(index, "032x"), "service_id": "f" * 32,
                   "pid": 123, "url": "http://127.0.0.1:23456/", "protocol_version": 1,
-                  "addon_version": "0.3.2"}
+                  "addon_version": "0.4.1"}
         record.update(changes)
         return record
 
@@ -95,6 +95,7 @@ class InstanceRegistryTests(unittest.TestCase):
     def test_explicit_runtime_insecure_or_symlink_never_uses_an_alternate_namespace(self):
         runtime = self.base / "runtime"
         runtime.mkdir(mode=0o755)
+        runtime.chmod(0o755)  # Make this deliberately public fixture independent of the caller's umask.
         options = dict(home=self.home, platform="linux", env={"XDG_RUNTIME_DIR": str(runtime)})
         self.error("UNSAFE", lambda: registry.resolve_instance_directory(**options))
         runtime.chmod(0o700)
@@ -119,6 +120,7 @@ class InstanceRegistryTests(unittest.TestCase):
     def test_controlled_default_creation_uses_private_fixed_suffix_and_keeps_existing_modes(self):
         library = self.home / "Library"
         library.mkdir(mode=0o755)
+        library.chmod(0o755)
         mac = registry.publish_instance(self.record(), home=self.home, platform="darwin", env={})
         mac_path = registry.resolve_instance_directory(home=self.home, platform="darwin", env={})
         self.assertEqual(stat.S_IMODE(library.stat().st_mode), 0o755)
@@ -155,7 +157,7 @@ class InstanceRegistryTests(unittest.TestCase):
 
     def test_exact_schema_and_canonical_loopback_url_are_required_before_filesystem_writes(self):
         changes = [{"schema_version": True}, {"schema_version": 2}, {"protocol_version": False},
-                   {"protocol_version": 2}, {"owner": "other"}, {"addon_version": "0.3.1"},
+                   {"protocol_version": 2}, {"owner": "other"}, {"addon_version": "0.3.1"}, {"addon_version": "0.3.2"},
                    {"pid": False}, {"pid": 0}, {"pid": 1.0}, {"pid": 9007199254740992},
                    {"instance_id": "A" * 32}, {"instance_id": "f" * 31}, {"service_id": "g" * 32},
                    {"url": "http://localhost:23456/"}, {"url": "http://127.0.0.1:80/"},
@@ -432,6 +434,7 @@ class InstanceRegistryTests(unittest.TestCase):
         self.assertEqual(opened_files, [target.name])
         runtime = self.base / "public-runtime"
         runtime.mkdir(mode=0o755)
+        runtime.chmod(0o755)
         self.error("UNSAFE", lambda: registry.resolve_instance_directory(home=self.home, platform="linux",
             env={"XDG_RUNTIME_DIR": str(runtime), "XDG_STATE_HOME": str(self.base / "other")}))
         self.assertFalse((self.base / "other").exists())

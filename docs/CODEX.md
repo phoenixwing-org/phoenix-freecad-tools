@@ -1,6 +1,6 @@
-# Codex 接入与本机调用（0.3.2候选）
+# Codex 接入与本机调用（0.4.1待发布候选）
 
-版本说明：当前统一候选为0.3.2；本页0.4.0–0.10.0均为未发布内部迭代标签，保留当时代码、原生版本及归档事实，不能视为多个正式发行或本轮最终验收。详见[版本约定](VERSIONING.md)。
+版本说明：当前源码候选为0.4.1（待发布），最后已发布版本仍为0.3.2；下文固定npm示例继续安装最后正式版，不表示0.4.1已经在Registry可用。本页旧0.4.0–0.10.0标识保留未发布内部迭代的当时语义，不能视为多个正式发行或本轮最终验收。详见[版本约定](VERSIONING.md)。
 
 本服务将当前 FreeCAD 会话作为工具提供给 Codex。聊天和模型选择仍由客户端管理，FreeCAD 插件不需要填写聊天 API Key。项目目录为 `phoenix-freecad-tools`，npm 包为 `@phoenix-wing/phoenix-freecad-mcp`，CLI 命令和 MCP 服务名仍为 `phoenix-freecad-mcp`，示例 Codex 服务 ID 为 `phoenix-freecad`。
 
@@ -45,11 +45,11 @@ codex mcp list
 
 注册格式依据 [OpenAI 官方 MCP 接入说明](https://learn.chatgpt.com/docs/extend/mcp)。`codex mcp add <服务ID> -- <命令与参数>` 的服务 ID 是客户端配置名，不是 npm 包名。选择 `npx` 或本机 Node/`dist/cli.js` 中的一种方式注册；同一条目无需重复注册。MCP stdio 的 stdout 用于协议消息。
 
-注册成功不等于既有聊天已刷新工具清单。让客户端重新连接或重新加载 MCP 后，先调用 `get_connection_status`，确认 `running`、协议 `1`、插件实际加载版本（新候选为0.3.2，勿用磁盘版本代替内存读回）、实际 `supported_methods` 与 `script_session_id`。`get_capabilities` 是离线清单，不证明插件已连接或支持新功能。模型 ID 不写在 MCP 配置中。
+注册成功不等于既有聊天已刷新工具清单。让客户端重新连接或重新加载 MCP 后，先调用 `get_connection_status`，确认 `running`、协议 `1`、插件实际加载版本（新候选为0.4.1，勿用磁盘版本代替内存读回）、实际 `supported_methods` 与 `script_session_id`。`get_capabilities` 是离线清单，不证明插件已连接或支持新功能。模型 ID 不写在 MCP 配置中。
 
 ## 可选 Desk 数据工具
 
-服务启动环境同时提供`PHOENIX_DESK_NODE`、`PHOENIX_DESK_CLI`、`PHOENIX_DESK_STATE_DIR`三个经核实的规范绝对路径后，full模式额外注册`desk_get_connection_status`、`desk_search_index`、`desk_query_references`、`desk_query_cached_metadata`、`desk_get_cached_thumbnail`，合计30项。未配置仍25项，chat默认19项；chat另行明确设置`PHOENIX_DESK_CHAT_READS=1`并提供完整三路径时增加五个只读工具为24项，仍排除完整权限入口。路径属于用户的本机执行配置，不填写到公开示例或Git；不会自动复制FreeCAD面板设置、读取最近工作空间或启动后台。
+服务启动环境同时提供`PHOENIX_DESK_NODE`、`PHOENIX_DESK_CLI`、`PHOENIX_DESK_STATE_DIR`三个经核实的规范绝对路径后，full模式额外注册`desk_get_connection_status`、`desk_query_references`、`desk_query_cached_metadata`、`desk_get_cached_thumbnail`。0.4.1候选的默认完整28项增加为33项，chat默认22项；chat另行明确设置`PHOENIX_DESK_CHAT_READS=1`并提供完整三路径时增加为27项，仍排除完整权限入口。正式0.3.2对应旧基数25/19。路径属于用户的本机执行配置，不填写到公开示例或Git；不会自动复制FreeCAD面板设置、读取最近工作空间或启动后台。
 
 现有`scripts/call-tool.mjs`会把这三个显式环境变量传给自己的stdio服务，离线get_capabilities可检查注册结果。先调用Desk连接检查；需要知道当前声明能力时，显式传`{"includeRuntimeFeatures":true}`，区分连接ready、缓存支持和Native仍需预检。默认不多读，404仅报告未声明，未知版本或身份变化报错；不读取当前/最近空间。再以明确workspace及查询/相对路径请求已有索引。缓存工具还要求运行态cad.cache.read v1；先取元数据，再用对应thumbnail的精确revision按需取图；缺失/过期不生成，旧构建不支持则拒绝。查询与当前FreeCAD内存分开；完整合同与后续计划见[Desk能力共享](DESK-MCP-CONTRACT.md)。客户端仍需重新连接才能发现新增工具，不要因此重启含未保存文档的FreeCAD。
 

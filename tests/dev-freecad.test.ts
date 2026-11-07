@@ -7,7 +7,40 @@ import childProcess, { spawn as liveSpawnBinding } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import test from 'node:test';
-import { launchDevelopment, prepareDevelopment } from '../scripts/dev-freecad.mjs';
+import { launchDevelopment, main, prepareDevelopment } from '../scripts/dev-freecad.mjs';
+
+const PROXY_ENVIRONMENT_NAMES = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'] as const;
+
+function proxyEnvironment(t: { after(callback: () => void): void }, values: Record<string, string>) {
+  const previous = new Map(PROXY_ENVIRONMENT_NAMES.map(key => [key, process.env[key]]));
+  for (const key of PROXY_ENVIRONMENT_NAMES) {
+    if (Object.hasOwn(values, key)) process.env[key] = values[key];
+    else delete process.env[key];
+  }
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+function assertProxyValuesAbsent(text: string, values: Record<string, string>) {
+  for (const value of Object.values(values)) {
+    if (value !== '') assert.equal(text.includes(value), false);
+  }
+}
+
+function profileFileContents(profile: string): string[] {
+  const result: string[] = [];
+  for (const entry of fs.readdirSync(profile, { withFileTypes: true })) {
+    const filename = path.join(profile, entry.name);
+    if (entry.isDirectory()) result.push(...profileFileContents(filename));
+    else if (entry.isFile()) result.push(fs.readFileSync(filename, 'utf8'));
+  }
+  return result;
+}
 
 function fixture(t: { after(callback: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pft-dev-launcher-test-'));
@@ -54,6 +87,7 @@ test('prepare owns a private profile and returns separate argv without starting 
     '--user-cfg', path.join(f.profile, 'config', 'user.cfg'),
     '--system-cfg', path.join(f.profile, 'config', 'system.cfg'), path.join(f.profile, 'startup.FCMacro')]);
   assert.equal(prepared.environment.PFT_DEVELOPMENT_PORT, '9877');
+  assert.equal(prepared.environment.PFT_DEVELOPMENT_PURPOSE, '通用');
   assert.equal(prepared.environment.FREECAD_USER_HOME, f.profile);
   assert.equal(prepared.environment.FREECAD_USER_DATA, f.profile);
   assert.equal(prepared.environment.FREECAD_USER_TEMP, path.join(f.profile, 'temp'));
@@ -69,6 +103,76 @@ test('prepare owns a private profile and returns separate argv without starting 
   const macro = fs.readFileSync(path.join(f.profile, 'startup.FCMacro'), 'utf8');
   assert.match(macro, /write_readiness/);
   assert.doesNotMatch(macro, /openDocument|newDocument|start_server|ParamGet|saveParameter/);
+});
+
+test('purpose is an explicit private launch label and invalid labels create no profile', t => {
+  const f = fixture(t);
+  for (const purpose of ['', 'line\nbreak', 'two｜fields']) {
+    assert.throws(() => prepareDevelopment({ ...f, purpose }), /开发用途/);
+    assert.equal(fs.existsSync(f.profile), false);
+  }
+  const prepared = prepareDevelopment({ ...f, purpose: ' Neutral task ' });
+  assert.equal(prepared.environment.PFT_DEVELOPMENT_PURPOSE, 'Neutral task');
+  assert.equal(prepared.launch.env.PFT_DEVELOPMENT_PURPOSE, 'Neutral task');
+  assert.doesNotMatch(fs.readFileSync(path.join(f.profile, 'startup.FCMacro'), 'utf8'), /Neutral task/);
+});
+
+test('explicit proxy settings reach only the private child environment with case and empty values intact', async t => {
+  const values = {
+    HTTP_PROXY: 'http://fixture-http-user:fixture-http-password@proxy-one.invalid:8080',
+    HTTPS_PROXY: 'https://fixture-tls-user:fixture-tls-password@proxy-two.invalid:8443',
+    ALL_PROXY: 'socks5://fixture-socks-user:fixture-socks-password@proxy-three.invalid:1080',
+    NO_PROXY: 'localhost,.fixture.internal',
+    http_proxy: '',
+    https_proxy: 'http://fixture-lower-user:fixture-lower-password@proxy-four.invalid:8081',
+    all_proxy: 'socks5h://fixture-other-user:fixture-other-password@proxy-five.invalid:1081',
+    no_proxy: '',
+  };
+  proxyEnvironment(t, values);
+  const f = fixture(t), prepared = prepareDevelopment(f), mocked = mockedProcess(t);
+  for (const key of PROXY_ENVIRONMENT_NAMES) {
+    assert.equal(Object.hasOwn(prepared.environment, key), true);
+    assert.equal(prepared.environment[key], values[key]);
+    assert.equal(Object.hasOwn(prepared.launch.env, key), false);
+  }
+  const result = await launchDevelopment(prepared);
+  assert.equal(mocked.calls.length, 1);
+  const options = mocked.calls[0][2] as { env: Record<string, string> };
+  assert.equal(options.env, prepared.environment);
+  for (const key of PROXY_ENVIRONMENT_NAMES) {
+    assert.equal(options.env[key], values[key]);
+    assert.equal(process.env[key], values[key]);
+  }
+  assertProxyValuesAbsent(JSON.stringify(prepared.launch), values);
+  assertProxyValuesAbsent(JSON.stringify(result), values);
+  for (const contents of profileFileContents(f.profile)) assertProxyValuesAbsent(contents, values);
+});
+
+test('missing proxy settings add no defaults or private environment entries', t => {
+  proxyEnvironment(t, {});
+  const prepared = prepareDevelopment(fixture(t));
+  for (const key of PROXY_ENVIRONMENT_NAMES) {
+    assert.equal(Object.hasOwn(prepared.environment, key), false);
+    assert.equal(Object.hasOwn(prepared.launch.env, key), false);
+    assert.equal(Object.hasOwn(process.env, key), false);
+  }
+});
+
+test('prepare CLI JSON and persisted manifests do not disclose credential-style proxy values', async t => {
+  const values = Object.fromEntries(PROXY_ENVIRONMENT_NAMES.map((key, index) =>
+    [key, 'http://fixture-user-' + index + ':fixture-password-' + index + '@proxy.invalid:8080']));
+  proxyEnvironment(t, values);
+  const f = fixture(t), output: string[] = [], originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  let result;
+  try { result = await main(['--prepare', '--profile', f.profile, '--app', f.app]); }
+  finally { process.stdout.write = originalWrite; }
+  const serialized = output.join('');
+  assert.deepEqual(JSON.parse(serialized), result);
+  assert.equal(result.launched, false);
+  for (const key of PROXY_ENVIRONMENT_NAMES) assert.equal(Object.hasOwn(result.env, key), false);
+  assertProxyValuesAbsent(serialized, values);
+  for (const contents of profileFileContents(f.profile)) assertProxyValuesAbsent(contents, values);
 });
 
 test('owned profile reuse preserves its preferences and does not read normal user preferences', t => {

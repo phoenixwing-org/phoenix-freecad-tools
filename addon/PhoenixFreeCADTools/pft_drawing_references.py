@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bounded native cached TechDraw edge references, without document mutations.
 
-TechDraw Edge names are zero based. getEdgeBySelection already returns an
-unscaled view-local edge with Qt's inverted Y; no second scale/placement is
-applied. Availability describes this cached edge, not HLR completion, freshness,
+TechDraw Edge names are zero based. Native Selection/Index getters return
+unscaled Y-up values; copied points are normalized once to the public Qt Y-down
+coordinate contract. No second scale or placement is applied. Availability
+describes this cached edge, not HLR completion, freshness,
 source topology identity, visibility, or a production drawing verification.
 """
 import json
@@ -83,7 +84,10 @@ def _number(value, positive=False):
 def _point(value, vector_type):
     if type(value) is not vector_type:
         _fail()
-    return [_number(value.x), _number(value.y), _number(value.z)]
+    # FreeCAD 1.1.4 DrawViewPartPyImp mirrors the cached display geometry in
+    # both native getters. Normalize that Y-up result to our declared Qt frame
+    # on the detached DTO only; the native Vector and edge remain untouched.
+    return [_number(value.x), -_number(value.y), _number(value.z)]
 
 
 def _empty(edge, status, curve=None):

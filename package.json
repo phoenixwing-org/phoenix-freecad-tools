@@ -1,6 +1,6 @@
 {
   "name": "@phoenix-wing/phoenix-freecad-mcp",
-  "version": "0.3.2",
+  "version": "0.4.1",
   "description": "Phoenix 的 Node.js/TypeScript FreeCAD MCP 服务",
   "type": "module",
   "license": "Apache-2.0",

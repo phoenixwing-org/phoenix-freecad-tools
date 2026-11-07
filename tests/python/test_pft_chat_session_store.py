@@ -122,6 +122,26 @@ class ChatSessionStoreTests(unittest.TestCase):
         self.assert_error("CHANGED", lambda: self.register(store, fingerprint="b" * 64))
         self.assertEqual(self.path.read_bytes(), before[0])
 
+    def test_verified_runtime_version_is_stored_without_rewriting_legacy_metadata(self):
+        legacy = self.register()
+        current = self.store().register_thread('thread-current', 1700000001, 'fixture-model', 'b' * 64,
+                                              cli_version='0.167.0-alpha.3.2')
+        self.assertEqual(current['cli_version'], '0.167.0-alpha.3.2')
+        self.assertEqual(self.store().get_session(legacy['thread_id']), legacy)
+        self.assertEqual(self.store().get_session(current['thread_id']), current)
+        before = self.path.read_bytes()
+        store = self.store()
+        self.assert_error('CHANGED', lambda: store.register_thread('thread-1', 1700000000, 'fixture-model', 'a' * 64,
+                                                                 cli_version='0.167.0-alpha.3.2'))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_unknown_runtime_version_is_rejected_before_any_registry_write(self):
+        for version in ('0.167.0', '0.167.0-alpha.3.20', '0.168.0', None, [], True):
+            with self.subTest(version=version):
+                self.assert_error('INVALID', lambda: self.store().register_thread(
+                    'thread-1', 1700000000, 'fixture-model', 'a' * 64, cli_version=version))
+                self.assertFalse(self.path.exists())
+
     def test_observed_etag_rejects_external_updates_and_requires_new_store_to_read_them(self):
         first = self.store()
         self.register(first)

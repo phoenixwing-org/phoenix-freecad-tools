@@ -49,7 +49,9 @@
 
 普通 MCP 成功结果同时提供 JSON 文本和 `structuredContent`，格式为 `{ok:true,source_kind:"live_freecad_gui",observed_at:...,data:...}`。`observed_at` 是 Node 的观测时间，不是模型修订令牌。工具失败使用 `isError:true`，内容为 `{ok:false,error:{code,message}}`；输入 schema 错误可在 SDK 校验阶段直接拒绝，不派发到插件。离线能力清单的 `source_kind` 为 `server_manifest`。
 
-## 基础完整模式 25 个 MCP 工具
+## 基础完整模式 28 个 MCP 工具
+
+以下为未发布候选清单；正式0.3.2仍为25/19。三个PDF导出入口使用独立的drawing_export v1能力、严格输入与状态DTO，成功结果来源为bridge_export_memory，不标成当前CAD或文件状态。prepare在GUI派发前认领requestId，token绑定原服务；原生捕获和最终发布分别确认，最终只发布预览的冻结字节。macOS受限单页已通过正式SDK及原生确认链自动验收；用户手工操作、更多场景和平台仍待验，参见[导出合同](TECHDRAW-EXPORT-PLAN.md)。
 
 下表参数为 MCP 层参数，`?` 表示可省略。Node 将 `document` 映射为 `docName`、`object` 映射为 `objectName`、`objects` 映射为 `objectNames`、`page` 映射为 `pageName`；其余参数名保持原样。文档、对象和图纸均使用内部 **Name**，不是显示 Label。只有标注可省略的文档参数才默认使用活动文档；新通用操作和业务预览要求显式文档，不从磁盘打开工程。
 
@@ -80,10 +82,13 @@
 | `apply_part_changes` | `apply_part_changes` | `{token}`；仅原五类业务可在未进入原生确认链时写入，或重放其保留的成功摘要；Pad/草稿/关联尺寸始终拒绝此入口，含成功重放 |
 | `execute_script` | `execute_script` | `{code,requestId}`；显式授权的 Python 脚本执行与请求状态 |
 | `get_script_status` | `get_script_status` | `{requestId}`；当前桥接服务会话中的请求状态，不执行脚本 |
+| `prepare_drawing_export` | `prepare_drawing_export` | `{document,page,format:"pdf",requestId}`；独立有界内存导出计划，不打开图页或捕获 |
+| `request_drawing_export_approval` | `request_drawing_export_approval` | `{token}`；打开或复用原生PDF确认面板，不代替用户捕获和发布确认 |
+| `get_drawing_export_status` | `get_drawing_export_status` | `{token}`；纯内存导出状态，分别保留捕获、发布、清理及CAD保护结果 |
 
-内嵌聊天注册精确19个工具：基础读取、视图/外观和脚本状态16项，加上`prepare_part_changes`、`request_part_change_approval`和`get_part_change_status`。其余6项`capture_view`、`execute_script`、`set_selection`、`set_visibility`、`recompute_document`、`apply_part_changes`不注册。Label/BOM/Link修改只能从完整预览进入FreeCAD原生确认窗口，模型不能提交布尔值来确认；有限首个Pad Length复用此链且必须原生人工确认，详见[Pad合同](PAD-LENGTH-EDIT.md)。独立样件上的正式MCP、原生确认按钮自动化及撤销/重做已通过；用户人工、更多模型场景及跨平台仍待验收，范围见[验证记录](VERIFICATION.md)。配置和实际清单必须精确匹配；开启可选Desk时再增加5个只读工具。
+内嵌聊天注册精确22个工具：基础读取、视图/外观和脚本状态16项，加上三个零件预览/确认/状态工具与三个图纸PDF导出工具。其余6项`capture_view`、`execute_script`、`set_selection`、`set_visibility`、`recompute_document`、`apply_part_changes`不注册。Label/BOM/Link修改只能从完整预览进入FreeCAD原生确认窗口，模型不能提交布尔值来确认；有限首个Pad Length复用此链且必须原生人工确认，详见[Pad合同](PAD-LENGTH-EDIT.md)。独立样件上的正式MCP、原生确认按钮自动化及撤销/重做已通过；用户人工、更多模型场景及跨平台仍待验收，范围见[验证记录](VERIFICATION.md)。配置和实际清单必须精确匹配；开启可选Desk时再增加5个只读工具。
 
-明确开启发现的完整模式额外注册`list_freecad_instances {}`与`select_freecad_instance {instanceId,serviceId}`，共27项；可选Desk后32项。普通完整25/Desk30、聊天19/Desk24及worker4项保持原清单，chat/worker无显式URL却要求发现时明确拒绝。列表和选择结果用`source_kind:instance_registry_and_status_handshake`，不声明`live_freecad_gui`来源。列表逐项报告ready/unavailable/incompatible/identity_mismatch，不扫描端口、不读取文档、不移除失联登记。初次唯一ready可自动绑定，多实例需选择；已绑定目标丢失或登记/服务身份改变后必须明确重新选择，不能自动采用另一个实例。
+明确开启发现的完整模式额外注册`list_freecad_instances {}`与`select_freecad_instance {instanceId,serviceId}`，共30项；可选Desk后35项。普通完整28/Desk33、聊天22/Desk27及worker4项保持原清单，chat/worker无显式URL却要求发现时明确拒绝。列表和选择结果用`source_kind:instance_registry_and_status_handshake`，不声明`live_freecad_gui`来源。列表逐项报告ready/unavailable/incompatible/identity_mismatch，不扫描端口、不读取文档、不移除失联登记。初次唯一ready可自动绑定，多实例需选择；已绑定目标丢失或登记/服务身份改变后必须明确重新选择，不能自动采用另一个实例。
 
 每次工具调用从预检到HTTP请求持有同一目标客户端；同步调用在途时拒绝切换。`requestId`和预览token各有最多4096项会话内关联，不淘汰关联来允许改绑；已知标识移到另一实例/服务时返回`INSTANCE_AFFINITY_MISMATCH`。桥接另保留进程内的来源记录，带target的业务token必须在对应服务准备，未知token返回`INSTANCE_AFFINITY_UNKNOWN`。停止再启动监听即使`script_session_id`不变，旧服务的标识也不能被新服务认领。选择不迁移或取消原生审批，未知写入结果不自动重发。
 
@@ -246,3 +251,7 @@ FreeCAD 工作台显示为 **Phoenix Tools**。前三个图标入口分别为只
 `drawing_references` v1在既有`inspect_drawing_page`增加明确view与offset/limit：内部为viewName，索引0–2047、每窗最多50项，返回原生未缩放投影mm、缺失/未知/unsupported，以及受支持既有尺寸的native_measurement。无view保留原摘要；此扩展核对read_provenance，不声明完整枚举或投影ready。
 
 `drawing_dimensions` v1声明`prepare_part_changes.operation=add_drawing_dimensions`。外部参数为document/page/view及1–8项{edge,kind,xMm,yMm}；桥接为docName/objectNames:[page]/viewName/dimensions:[{edge,kind,x_mm,y_mm}]。五种kind为Distance/DistanceX/DistanceY/Diameter/Radius，Edge0起。完整preview及状态分别限128KiB/4KiB；native_gui_only、同token查询/一次应用与缺能力零派发，无脚本或direct apply回退。写入后DesignResult.kind=drawing_dimensions，逐项真实value_mm、measurement_verification=native_reference_and_value_checked，继续projection_verification=not_checked/manual_review_required=true。严格数据、坐标、冻结与验收边界见[关联尺寸合同](TECHDRAW-DIMENSIONS.md)。
+
+开发候选另声明独立`drawing_dimension_layout` v1（算法`paper_lanes_v1`、有限profile`freecad_1_1_4_a4_mm_v1`），正式0.3.2及旧实例无此能力。显式行保持原合同；自动行严格为`{edge,kind,placement:"auto"}`，允许混合，但不得同时带坐标。桥接自动行同形，成功后归一为完整显式`design_request`，预览另含严格`layout`意图及有界估算图；整批无解时`can_apply=false/design_request=null`，无部分坐标或写入。缺能力在派发前拒绝。确认仍只走原token与原生GUI，不增加工具、外部授权或脚本回退；完整字段、字节预算、清理未知和有限原生验收见[布局合同](TECHDRAW-LAYOUT-PLAN.md)。
+
+开发候选的`drawing_draft_layout` v1为`create_drawing`独立协商完整新草稿计划，算法`annotation_slots_v1`，输入/计划分别限4/16KiB。新客户端核对声明后，内部prepare携带精确整数`draftLayoutVersion:1`；未协商时不添加字段并保持旧合同。新预览必须同时有`draft_layout/draft_layout_reason`：成功为完整三视图DTO/null，阻断为null/固定原因，不增加工具或改变applied/status结果。DTO严格包含纸面政策、全局AABB跨度、比例、三视图名字/方向/中心/几何框及标注带，须与明确source/page及五节点行绑定；无passthrough、部分坐标或外部确认回退。估算与当前原生验收边界见[草稿合同](TECHDRAW-DRAFT.md)。
