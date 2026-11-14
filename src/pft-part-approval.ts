@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import * as z from 'zod/v4';
+import { PFT_BASIC_PART_OPERATION, PftBasicPartCapabilitySchema, PftBasicPartResultSchema,
+  pftBasicPartRowCount } from './pft-basic-part.js';
 
 export const PFT_PART_APPROVAL_CAPABILITY = Object.freeze({ version: 1,
   request_method: 'request_part_change_approval', status_method: 'get_part_change_status',
@@ -29,6 +31,8 @@ const fixedErrorCodes = ['PART_CHANGE_FAILED', 'PART_APPROVAL_UI_UNAVAILABLE', '
   'PART_PREFERENCE_RESTORE_UNVERIFIED', 'PART_ROLLBACK_AND_PREFERENCE_UNVERIFIED',
   'PAD_UNSUPPORTED', 'PAD_PLAN_STALE', 'PAD_PARAMETER_VERIFY_FAILED', 'PAD_GEOMETRY_VERIFY_FAILED',
   'PAD_RECOMPUTE_UNVERIFIED', 'PAD_NATIVE_CONFIRMATION_REQUIRED',
+  'BASIC_PART_INVALID', 'BASIC_PART_CONTEXT_CHANGED', 'BASIC_PART_NATIVE_UNAVAILABLE', 'BASIC_PART_CREATE_UNVERIFIED',
+  'BASIC_PART_GEOMETRY_UNVERIFIED', 'BASIC_PART_WRITE_FAILED', 'BASIC_PART_NATIVE_CONFIRMATION_REQUIRED',
   'DRAWING_UNSUPPORTED', 'DRAWING_PLAN_STALE', 'DRAWING_TEMPLATE_UNAVAILABLE', 'DRAWING_CREATE_FAILED',
   'DRAWING_RECOMPUTE_UNVERIFIED', 'DRAWING_PROJECTION_UNAVAILABLE', 'DRAWING_NATIVE_CONFIRMATION_REQUIRED', 'DRAWING_RESULT_INVALID', 'DIMENSION_UNSUPPORTED', 'DIMENSION_PLAN_STALE', 'DIMENSION_CREATE_FAILED',
   'DRAWING_DRAFT_LAYOUT_UNAVAILABLE', 'DRAWING_DRAFT_LAYOUT_NO_SPACE', 'DRAWING_DRAFT_LAYOUT_STALE',
@@ -96,12 +100,15 @@ const dimensionResult = z.object({ changed_count: z.number().int().min(1).max(8)
 const drawingResult = z.object({ changed_count: z.literal(5), saves_document: z.literal(false),
   design_result: PftDrawingDesignResultSchema,
 }).strict();
+const basicPartResult = z.strictObject({ changed_count: z.union([z.literal(6), z.literal(7)]),
+  saves_document: z.literal(false), design_result: PftBasicPartResultSchema,
+});
 export const PftPartApprovalDataSchema = z.object({ document: documentName,
-  operation: z.enum(['normalize_names', 'sync_link_labels', 'initialize_properties', 'recommend_properties', 'set_properties', 'set_pad_length', 'create_drawing', 'add_drawing_dimensions']),
+  operation: z.enum(['normalize_names', 'sync_link_labels', 'initialize_properties', 'recommend_properties', 'set_properties', 'set_pad_length', 'create_drawing', 'add_drawing_dimensions', PFT_BASIC_PART_OPERATION]),
   token, state: z.enum(['prepared', 'awaiting_confirmation', 'applying', 'applied', 'cancelled', 'failed', 'expired']),
   changed_count: changedCount, requires_confirmation: z.literal(true), saves_document: z.literal(false),
   storage: z.literal('memory_only'), native_confirmation: z.boolean(),
-  result: z.union([legacyResult, padResult, drawingResult, dimensionResult]).nullable(),
+  result: z.union([legacyResult, padResult, drawingResult, dimensionResult, basicPartResult]).nullable(),
   error_code: z.enum(fixedErrorCodes).nullable(),
 }).strict().superRefine((value, context) => {
   const isPad = value.operation === 'set_pad_length';
@@ -121,8 +128,18 @@ export const PftPartApprovalDataSchema = z.object({ document: documentName,
     || ['awaiting_confirmation', 'applying', 'applied'].includes(value.state) && value.changed_count < 1
     || ['applying', 'applied'].includes(value.state) && !value.native_confirmation))
     context.addIssue({ code: 'custom', message: '尺寸应用必须含1至8项并经过原生人工确认' });
+  const isBasicPart = value.operation === PFT_BASIC_PART_OPERATION;
+  if (isBasicPart && (![6, 7].includes(value.changed_count) || !/^[A-Za-z][A-Za-z0-9_]{0,63}(?![\s\S])/u.test(value.document)
+    || ['applying', 'applied'].includes(value.state) && !value.native_confirmation)) {
+    context.addIssue({ code: 'custom', message: '新建零件须绑定明确的新文档并经过原生人工确认' });
+  }
   if (value.state === 'applied' && value.result !== null) {
-    const expectedKind = isPad ? 'pad_length' : isDrawing ? 'drawing_draft' : isDimension ? 'drawing_dimensions' : null;
+    const expectedKind = isPad ? 'pad_length' : isDrawing ? 'drawing_draft' : isDimension ? 'drawing_dimensions'
+      : isBasicPart ? 'basic_part' : null;
+    if (isBasicPart && 'design_result' in value.result && value.result.design_result.kind === 'basic_part'
+      && (value.result.design_result.document !== value.document
+        || pftBasicPartRowCount(value.result.design_result.profile) !== value.changed_count))
+      context.addIssue({ code: 'custom', message: '新建零件结果必须与文档及预览行数一致' });
     const actualKind = 'design_result' in value.result ? value.result.design_result.kind : null;
     if (isDimension && 'design_result' in value.result && value.result.design_result.kind === 'drawing_dimensions'
       && value.result.design_result.dimensions.length !== value.changed_count)
@@ -187,7 +204,8 @@ export async function pftPartApproval(method: PftPartApprovalMethod, input: { to
   try { encoded = JSON.stringify(value); } catch { /* Reject non-JSON status without forwarding it. */ }
   const parsed = encoded !== undefined && Buffer.byteLength(encoded, 'utf8') <= PFT_PART_APPROVAL_CAPABILITY.max_status_bytes
     ? PftPartApprovalDataSchema.safeParse(value) : null;
-  if (!parsed?.success || parsed.data.token !== parsedInput.data.token) {
+  if (!parsed?.success || parsed.data.token !== parsedInput.data.token
+    || parsed.data.operation === PFT_BASIC_PART_OPERATION && !PftBasicPartCapabilitySchema.safeParse(status.basic_part_create).success) {
     throw new ErrorClass('INVALID_RESPONSE', unverifiedState);
   }
   return parsed.data;

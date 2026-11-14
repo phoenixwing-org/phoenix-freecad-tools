@@ -20,13 +20,15 @@
 
 显式字段支持`App::PropertyString/Integer/Float/Bool/Enumeration`。枚举仅读当前选中字符串，不读取选项列表，不把索引或布尔值猜成名称。显式字段另支持`IntegerConstraint/Percent`当前整数及`FloatConstraint/Precision`当前有限浮点值；不读取约束范围或setter四元tuple，也不把Precision推断为mm。
 
-另支持明确选择的`App::PropertyStringList/IntegerList/FloatList/BoolList`，保留次序、重复项、0、false和空字符串；原生BoolList返回的tuple也按布尔列表读取，空列表与未知/缺失分别报告。每字段最多100项，清洗后的紧凑JSON列表最多2 KiB UTF-8；超限整字段不发布值，标记未知及已截断，并保留`item_count`和固定`limit_reason`，不把部分列表当作完整结果。列表项严格匹配原生类型，不把整数和布尔互换；数值须有限且整数在有符号64位内。文本控制字符处理有标记，信息和Markdown共用冻结列表；不展开任意嵌套对象或读取LinkList；VectorList和PlacementList遵循下面的独立合同。这仍是属性读取，不进行数量聚合。
+另支持明确选择的`App::PropertyStringList/IntegerList/FloatList/BoolList`，保留次序、重复项、0、false和空字符串；原生BoolList返回的tuple也按布尔列表读取，空列表与未知/缺失分别报告。每字段最多100项，清洗后的紧凑JSON列表最多2 KiB UTF-8；超限整字段不发布值，标记未知及已截断，并保留`item_count`和固定`limit_reason`，不把部分列表当作完整结果。列表项严格匹配原生类型，不把整数和布尔互换；数值须有限且整数在有符号64位内。文本控制字符处理有标记，信息和Markdown共用冻结列表；不展开任意嵌套对象，VectorList、PlacementList及引用列表遵循各自独立合同。这仍是属性读取，不进行数量聚合。
 
 显式字段另支持`Vector/VectorDistance/Position/VectorList`：仅复制原生有限浮点xyz。偏移和位置按属性类型标内部mm；普通向量及列表保持单位、坐标系未声明，不应用Placement或解析Link来源。零向量、空列表保留，列表超过100项或完整值2 KiB时整项未知、不发布部分结果；限制是getter之后的处理/输出边界。信息及Markdown显示同一冻结值和来源，完整DTO见[属性读取合同](PROPERTY-READING.md)。
 
 显式字段另支持`Rotation/Placement`：旋转只复制原生xyzw四元数，Placement分开复制Base xyz和旋转；平移内部mm、旋转无量纲。不相乘、不转换坐标系、不归一化或解析Link；零平移／单位旋转保留，坏值或嵌套异常整项未知或读取失败，信息和Markdown使用同一冻结DTO。完整字段与原生验证边界见[属性读取合同](PROPERTY-READING.md#旋转与-placement)。
 
 后续未发布修正增加显式`PlacementList`：按原顺序读取位姿副本，保留重复和空列表，逐项使用相同的混合单位说明；不推导对象数量或装配世界坐标。100项／完整值2KiB上限先到即整字段未知，任何坏成员也不发布前缀；复制和Markdown使用冻结列表。它不扩大默认五字段，原生验收状态见[位姿列表合同](PROPERTY-READING.md#位姿列表后续修正尚未发布)。
+
+后续未发布修正还支持显式标准`Link/LinkList/LinkSub/LinkSubList`四族及各自Child/Global/Hidden，共16个精确类型。仅复制初始文档登记中的目标身份和getter报告的子名称，注明扫描时登记、未解析来源和未验证子元素；空目标、空列表及未知分别报告。名单外或其它文档的目标使整字段未知，不扩大默认五字段，也不汇总BOM数量。XLink及`App::Link.LinkedObject`仍不读取。完整DTO、预算与原生验收边界见[引用属性合同](PROPERTY-READING.md#引用属性后续修正尚未发布)。
 
 量值支持`Quantity/QuantityConstraint/Length/Distance/Angle/Area/Volume/Mass/Density/Speed/Acceleration/Force/Pressure/Frequency/Power/Temperature`；固定类型的原生维度须与其物理预期一致，矛盾时不发布数值。
 
@@ -90,7 +92,7 @@ MCP的`set_appearance`走直接prepare/apply，与可取消的非模态预览窗
 
 macOS独立人工样件的真实原生对话框自动化已验证保存框取消、新建导出、覆盖取消及确认覆盖。覆盖取消保留原文件的字节、文件身份与修改时间；确认导出与冻结512×512预览逐字节一致，改变捕获选项后仍只捕获一次。未保存样件的默认文件名已实测；已保存CAD的目录建议仅经纯逻辑验证。该结果不等于用户人工验收或跨平台通过。
 
-仅支持8位非交错RGB/RGBA PNG，最多4 MiB及1024×1024像素；去除作者、文本、EXIF、时间等附带元数据，保留像素和必要色彩/透明信息，ICC暂不支持。图像仍可能含用户模型内容；当前颜色沿用三维视图；专用浅灰风格、工程内嵌缩略图、引用及量值列表等更广属性类型与BOM聚合仍在后续计划。
+仅支持8位非交错RGB/RGBA PNG，最多4 MiB及1024×1024像素；去除作者、文本、EXIF、时间等附带元数据，保留像素和必要色彩/透明信息，ICC暂不支持。图像仍可能含用户模型内容；当前颜色沿用三维视图；专用浅灰风格、工程内嵌缩略图、更多原生属性类型与BOM聚合仍在后续计划。
 
 
 专用浅灰风格还需要独立渲染适配：目标FreeCAD 1.1.0的[面集渲染分支](https://github.com/FreeCAD/FreeCAD/blob/1.1.0/src/Mod/Part/Gui/SoBrepFaceSet.cpp#L762-L958)会自行设置材质，不能把上层Coin覆盖当作所有实体都有效；独立提取几何还必须保留隐藏子面与显示上下文。当前没有加入未经验证的样式入口，也不临时改写零件材质。

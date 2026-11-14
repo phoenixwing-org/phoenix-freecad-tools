@@ -694,6 +694,73 @@ class WorkbenchToggleTests(unittest.TestCase):
         self.assertEqual(len(self.single_shots), 1)
         self.assertEqual(len(self.registered), 1)
 
+    def _port_conflict(self, etag="a"*64):
+        error = self.bridge.PftBridgeError("Synthetic port unavailable")
+        error.code = "PORT_UNAVAILABLE"
+        error.discovery_recovery = (12345, etag)
+        return error
+
+    def test_manual_and_auto_port_conflict_save_once_and_retry_own_bridge_once(self):
+        _, command, _ = self.initialize()
+        self.preferences.bools["AutoStartMCP"] = True
+        settings = self.namespace["pft_mcp_settings"]
+        for invoke in (command.Activated, lambda: self.namespace["_auto_start_mcp"](self.window)):
+            with self.subTest(invoke=invoke), \
+                 patch.dict(sys.modules, {"pft_workbench_views": types.SimpleNamespace(confirm_mcp_port_conflict=lambda window, port: window is self.window and port == 12345)}), \
+                 patch.object(settings, "save_config", return_value={"etag": "b"*64}) as save, \
+                 patch.object(self.bridge, "start_server", side_effect=[self._port_conflict(), {"running": True, "port": 54321}]) as start:
+                invoke()
+            save.assert_called_once_with({"schema_version": 2, "bridge": {"preferred_port": 12345},
+                                          "discovery": {"enabled": True}}, expected_etag="a"*64)
+            self.assertEqual([call.kwargs for call in start.call_args_list],
+                             [{}, {"_expected_discovery_etag": "b"*64}])
+
+    def test_port_conflict_cancel_suppresses_nested_manual_and_auto_attempts(self):
+        _, command, _ = self.initialize()
+        self.preferences.bools["AutoStartMCP"] = True
+        settings = self.namespace["pft_mcp_settings"]
+        def cancel(window, port):
+            command.Activated()
+            self.namespace["_auto_start_mcp"](window)
+            return False
+        with patch.dict(sys.modules, {"pft_workbench_views": types.SimpleNamespace(confirm_mcp_port_conflict=cancel)}), \
+             patch.object(settings, "save_config") as save, \
+             patch.object(self.bridge, "start_server", side_effect=self._port_conflict(None)) as start:
+            command.Activated()
+        start.assert_called_once_with()
+        save.assert_not_called()
+        self.assertFalse(self.window.property(self.namespace["_START_BUSY"]))
+
+    def test_port_conflict_stale_or_uncertain_settings_are_visible_and_never_retried(self):
+        _, command, _ = self.initialize()
+        settings = self.namespace["pft_mcp_settings"]
+        for code, uncertain, expected in (
+            ("MCP_SETTINGS_CHANGED", False, "MCP_SETTINGS_CHANGED"),
+            ("MCP_SETTINGS_UNSAFE", False, "MCP_SETTINGS_UNSAFE"),
+            ("MCP_SETTINGS_SAVE_UNVERIFIED", True, "不要直接重复保存"),
+        ):
+            with self.subTest(code=code), \
+                 patch.dict(sys.modules, {"pft_workbench_views": types.SimpleNamespace(confirm_mcp_port_conflict=lambda *args: True)}), \
+                 patch.object(settings, "save_config", side_effect=settings.PftMcpSettingsError(code, uncertain)) as save, \
+                 patch.object(self.app.Console, "PrintError") as feedback, \
+                 patch.object(self.bridge, "start_server", side_effect=self._port_conflict()) as start:
+                command.Activated()
+            start.assert_called_once_with()
+            save.assert_called_once()
+            self.assertIn(expected, feedback.call_args.args[0])
+
+    def test_port_conflict_retry_failure_does_not_prompt_save_or_retry_again(self):
+        _, command, _ = self.initialize()
+        settings = self.namespace["pft_mcp_settings"]
+        with patch.dict(sys.modules, {"pft_workbench_views": types.SimpleNamespace(confirm_mcp_port_conflict=lambda *args: True)}), \
+             patch.object(settings, "save_config", return_value={"etag": "b"*64}) as save, \
+             patch.object(self.app.Console, "PrintError") as feedback, \
+             patch.object(self.bridge, "start_server", side_effect=[self._port_conflict(), self._port_conflict()]) as start:
+            command.Activated()
+        self.assertEqual(start.call_count, 2)
+        save.assert_called_once()
+        self.assertIn("PORT_UNAVAILABLE", feedback.call_args.args[0])
+
     def test_already_running_or_stopping_startup_does_not_schedule_start(self):
         self.preferences.bools["AutoStartMCP"] = True
         for running, stopping in ((True, False), (False, True), (True, True)):

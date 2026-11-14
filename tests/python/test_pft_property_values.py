@@ -194,7 +194,7 @@ class PropertyValueFailureTests(unittest.TestCase):
         quantity = Quantity(value=0.0)
         link = fixtures.PftBomObject(self.document, "Instance", {"Length": quantity, "LinkedObject": source,
             "Shape": fixtures.PftOpaqueValue(), "Opaque": fixtures.PftOpaqueValue()},
-            {"Length": "App::PropertyLength", "LinkedObject": "App::PropertyLink", "Shape": "Part::PropertyPartShape",
+            {"Length": "App::PropertyLength", "LinkedObject": "App::PropertyXLink", "Shape": "Part::PropertyPartShape",
              "Opaque": "App::PropertyPythonObject"}, kind="App::Link")
         link.getLinkedObject = Mock(side_effect=AssertionError("source resolution forbidden"))
         link.getGlobalPlacement = Mock(side_effect=AssertionError("extra transformation forbidden"))

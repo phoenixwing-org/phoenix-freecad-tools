@@ -2,11 +2,11 @@
 
 ![Phoenix](addon/PhoenixFreeCADTools/Resources/icons/phoenix-wing-mark.svg)
 
-让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中英文工作台工具。当前源码候选为 **0.4.1（待发布）**（[候选说明](docs/RELEASE-0.4.1.md)），最后已发布版本仍为 **0.3.2**（[发行说明](docs/RELEASE-0.3.2.md)）。采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
+让现有聊天客户端通过 MCP 理解和操作 FreeCAD，并提供可独立使用的中英文工作台工具。当前源码候选为 **0.4.2（待试用）**（[候选说明](docs/RELEASE-0.4.2.md)），最后已发布版本为 **0.4.1**（[发行说明](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases/tag/v0.4.1)）。采用 Node.js / TypeScript 服务与轻量 Python 插件，应用代码使用 **Apache-2.0**。
 
 本轮基础发行范围是 **MCP 接入和常用工作台按钮**；复杂 Desk 集成作为可选实验能力，不作为基础使用的前提。npm 包名为 **`@phoenix-wing/phoenix-freecad-mcp`**，CLI 命令与 MCP 服务名仍为 `phoenix-freecad-mcp`。
 
-FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语言设置和桥接启停；当前未发布源码候选的Node服务提供28个 MCP 工具，明确开启多实例发现后完整模式为30项，内嵌聊天保持受控22工具模式；正式0.3.2仍为25/19。可选原生 Codex 聊天使用官方 ChatGPT 登录流程，无需 Platform API Key；提供消息收发、中断和受控 MCP 工具接入，真实官方认证与模型服务的本轮验收状态见[聊天说明](docs/CHAT-USAGE.md)。
+FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语言设置和桥接启停；0.4.1 与 0.4.2 默认提供 28 个 MCP 工具，启用发现后完整模式为 30 项，内嵌聊天为受控的 22 项。可选原生 Codex 聊天使用官方 ChatGPT 登录流程，无需 Platform API Key；提供消息收发、中断和受控 MCP 工具接入，真实官方认证与模型服务的本轮验收状态见[聊天说明](docs/CHAT-USAGE.md)。
 
 [工具帮助](addon/PhoenixFreeCADTools/HELP.md) · [版本约定](docs/VERSIONING.md) · [设计诊断](docs/DESIGN-INSPECTION.md) · [当前文档工具](docs/CURRENT-DOCUMENT-TOOLS.md) · [原生聊天](docs/CHAT-USAGE.md) · [原生修改确认](docs/NATIVE-PART-APPROVAL.md) · [有限Pad编辑](docs/PAD-LENGTH-EDIT.md) · [关联尺寸](docs/TECHDRAW-DIMENSIONS.md) · [安装包说明](docs/ADDON-INSTALL.md) · [Desk自包含资源](docs/DESK-RESOURCE.md) · [单页导出合同](docs/TECHDRAW-EXPORT-PLAN.md) · [批量出图方案](docs/BATCH-EXPORT-PLAN.md) · [命名迁移](docs/RENAME-ADDON.md) · [Wing 复用](docs/WING-REUSE.md) · [循环迭代计划](docs/NEXT-ITERATION.md) · [开发与发布计划](docs/RELEASE-PLAN.md) · [MCP 调研](docs/MCP-RESEARCH.md) · [Desk 集成计划](docs/DESK-INTEGRATION.md) · [接入说明](docs/CODEX.md) · [接口协议](docs/PROTOCOL.md) · [架构](docs/ARCHITECTURE.md) · [能力计划](docs/CAPABILITY-PLAN.md) · [验证记录](docs/VERIFICATION.md)
 
@@ -30,14 +30,14 @@ FreeCAD 中的 **Phoenix Tools** 提供普通工具、当前文档面板、语�
 
 ## 安装与启动
 
-独立工作台只需要带 GUI 的 FreeCAD，使用其内置 Python。聊天 MCP 另需 Node.js 22+ 和 npm。本源码候选完整28项、聊天22项、明确发现30项；正式0.3.2仍为完整25项、聊天19项、明确发现27项。专属worker4项，桥接协议仍为v1；优先适配 FreeCAD 1.1.0，所有宣称平台的原生安装和功能须分别验收。
+独立工作台只需要带 GUI 的 FreeCAD，使用其内置 Python。聊天 MCP 另需 Node.js 22+ 和 npm。0.4.1 与 0.4.2 的默认完整模式为 28 项、聊天模式为 22 项，启用发现后完整模式为 30 项。专属worker4项，桥接协议仍为v1；优先适配 FreeCAD 1.1.0，所有宣称平台的原生安装和功能须分别验收。
 
 工作台使用 Release 附件 `phoenix-freecad-tools-addon-<版本>.zip`，按[安装包说明](docs/ADDON-INSTALL.md)解压到 Mod。版本及附件是否可用，以[实际发行页](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases)为准；GitHub 自动生成的整个仓库 Source ZIP 不等同于工作台安装包。普通工作台按钮无需 Node。
 
 Node MCP 的正式安装身份如下；需目标版本已实际发布到 npm 后使用：
 
 ```bash
-npm install --global @phoenix-wing/phoenix-freecad-mcp@0.3.2
+npm install --global @phoenix-wing/phoenix-freecad-mcp@0.4.1
 ```
 
 安装后可执行命令为 `phoenix-freecad-mcp`，由客户端作为 stdio 子进程启动，不需要另开终端重复运行。也可用下文固定版本的 `npx` 配置，无需全局安装。
@@ -94,7 +94,7 @@ pft_bridge.start_server()
   "mcpServers": {
     "phoenix-freecad": {
       "command": "npx",
-      "args": ["--yes", "--package", "@phoenix-wing/phoenix-freecad-mcp@0.3.2", "phoenix-freecad-mcp"]
+      "args": ["--yes", "--package", "@phoenix-wing/phoenix-freecad-mcp@0.4.1", "phoenix-freecad-mcp"]
     }
   }
 }
@@ -237,7 +237,7 @@ npm pack --dry-run
 npm run addon:uninstall -- --mod-dir "/absolute/path/to/FreeCAD/Mod"
 ```
 
-安装器只管理带本项目标记且内容校验通过的安装，不覆盖未知文件或用户修改。ZIP 手工安装不带该标记，升级须先备份旧目录后完整替换。当前源码候选为0.4.1，正式发布仍待完成；0.3.2是先前已发布版本，Addon Manager收录单独核实。实际归档按包旁清单的提交和摘要识别，旧包、旧标签与历史回执不代表本次放行，见[版本约定](docs/VERSIONING.md)。
+安装器只管理带本项目标记且内容校验通过的安装，不覆盖未知文件或用户修改。ZIP 手工安装不带该标记，升级须先备份旧目录后完整替换。当前源码候选为 0.4.2，最新正式版为 0.4.1，Addon Manager 收录情况另行核实。实际归档按包旁清单的提交和摘要识别，旧包、旧标签与历史回执不代表本次放行，见[版本约定](docs/VERSIONING.md)。
 
 后续优先扩展真实设计和图纸案例，再封装高频建模/出图写入，并完善业务和语言覆盖，见 [TODO](docs/TODO.md)。内嵌聊天见 [路线图](docs/ROADMAP.md)，长期方向见 [愿景](docs/VISION.md)。大型 Tool 的下载、编译和启动后置，不是当前轻量插件的运行依赖。
 

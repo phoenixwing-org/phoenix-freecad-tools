@@ -1,6 +1,6 @@
 # Phoenix Tools 帮助
 
-Phoenix Tools 是 FreeCAD 工作台、原生 AI 聊天入口及可选 MCP/Desk 连接工具的集合。当前源码候选版本为 **0.4.1（待发布）**，最后已发布版本仍为 **0.3.2**；版本号不代表已经正式发布或完成所有平台验收。本文件随 Addon 分发，也是仓库内整个工具集的规范帮助文档。
+Phoenix Tools 是 FreeCAD 工作台、原生 AI 聊天入口及可选 MCP/Desk 连接工具的集合。当前源码候选版本为 **0.4.2（待试用）**，最新正式版为 **0.4.1**。本文件随 Addon 分发，也是仓库内整个工具集的规范帮助文档。
 
 常用入口位于 **工具 → Phoenix**，可打开聊天、当前文档工具、设置、Desk及帮助。Phoenix工作台的一级菜单默认隐藏，可在设置中开启 **显示 Phoenix 一级菜单**；开发界面重载命令合并在Phoenix菜单中。聊天内的文档、轴测Fit和外观图标复用同一组FreeCAD原生命令。外观预览保留自己的快照和事务，确定提交，取消或Esc恢复，不与聊天共享预览状态。
 
@@ -20,6 +20,8 @@ Phoenix Tools 是 FreeCAD 工作台、原生 AI 聊天入口及可选 MCP/Desk �
 ## MCP 连接设置
 
 在工作台齿轮“设置”中点击 **MCP 连接设置…**，可查看当前用户共享的配置位置、保存首选桥接端口，并明确勾选“自动发现本机 FreeCAD 实例”。此窗口不修改 CAD，也不启停或重连服务。配置缺失时默认直连9876，原有v1按保存的首选端口直连且保持发现关闭；打开、取消、Esc和关闭不创建或改写文件。保存只影响下一次普通桥接启动和下一次Node连接，现有连接保持原目标。
+
+在支持发现的平台，普通窗口启动 MCP 时如果固定端口已被占用，可选择 **改用自动发现实例并启动**。确认后保存共享设置并启动本窗口；后续普通窗口也会采用发现。点取消或按 Esc 可保留当前配置。
 
 开启发现保存严格v2：`{"schema_version":2,"bridge":{"preferred_port":9876},"discovery":{"enabled":true}}`。旧v1不自动迁移；已有v2取消勾选后保留v2的false。保存使用原读取etag，外部更改、损坏、未知版本或不安全权限均拒绝，不自动修复；写后结果不确定时先重新检查，不重复保存。
 
@@ -60,6 +62,23 @@ MCP 的 `set_appearance`直接提交其明确目标的外观事务，与本地�
 预览 token 仅在当前服务内存中保存，通常有效 5 分钟。用原 token 查询 `get_part_change_status`；`applied` 的结果才报告实际修改。超时先查状态，不新建请求绕过未知结果。取消、关闭、Esc、过期或目标变化均不授予确认；已进入原生确认链的 token 不能通过直接 apply 确认。
 
 ## 有限 Pad 修改与基础图纸草稿
+
+### 从空白窗口创建基础零件
+
+`prepare_part_changes` 的 `create_basic_part` 适用于没有打开文档的 FreeCAD 窗口。只需传入 `operation` 和 `newPart`。在 `newPart` 内提供英文文档内部名 `name`、轮廓 `profile`、厚度 `thicknessMm` 和对应尺寸。
+
+| 轮廓 | `profile` | 必填毫米尺寸 |
+| --- | --- | --- |
+| 平垫 | `annulus` | `outerDiameterMm`、`innerDiameterMm`、`thicknessMm` |
+| 矩形 | `rectangle` | `widthMm`、`heightMm`、`thicknessMm` |
+| 圆形 | `circle` | `diameterMm`、`thicknessMm` |
+
+各输入为 0.1–1000 mm，圆环径向壁厚至少 0.1 mm。可用 `WasherTrial`、外径 20 mm、内径 10.5 mm、厚 2 mm 做中性平垫试验。
+
+1. 在空白试用窗口请求平垫预览。核对新文档、Body、可编辑草图和 Pad，以及三项尺寸。在原生确认窗口点击「取消」，确认打开文档仍为零。
+2. 重新预览，核对后在 FreeCAD 原生窗口点「确认修改」。以本次预览的原 token 调用 `get_part_change_status`，核对 `applied`、尺寸、通孔、体积和未保存状态。
+3. 执行 FreeCAD 撤销，检查 Body、草图和 Pad 已移除。空文档壳可能保留。关闭样件时选择不保存。
+4. 在齿轮中选择一种 API 模式，启用当前窗口的 FreeCAD 工具，重复预览并在原生窗口确认。ChatGPT 登录和两种 API 模式各发送一条消息，再要求列出本窗口打开的文档，以核对连接来源。Key 填在设置栏。
 
 `prepare_part_changes` 的 `set_pad_length` 是有限的类型化操作：明确指定一个 Pad、所属 Body 和 `lengthMm`（0.01–10000 毫米）。当前限单打开文档、Body 中首个且最终的单侧固定 Length Pad；复杂特征、表达式、未知依赖或不支持状态会拒绝。完整预览后必须原生人工确认，确认后重算并反验几何；不自动保存，不承诺隔离所有原生回调。
 
@@ -128,7 +147,7 @@ MCP 的 `set_appearance`直接提交其明确目标的外观事务，与本地�
 | `set_selection` | 否 | 替换明确活动文档的对象选择，空列表清除该文档选择。 |
 | `set_visibility` | 否 | 对明确对象统一显隐，事务可撤销，不保存。 |
 | `recompute_document` | 否 | 显式执行原生求解，可能改变缓存；返回对象数不证明几何有效或新鲜。 |
-| `prepare_part_changes` | 是 | 完整预览命名、链接、五字段属性、有限Pad、A4草稿或关联尺寸，不在预览阶段修改。 |
+| `prepare_part_changes` | 是 | 完整预览基础零件、命名、链接、五字段属性、有限 Pad、A4 草稿或关联尺寸，不在预览阶段修改。 |
 | `request_part_change_approval` | 是 | 用原 token 打开/复用原生确认窗口，请求不等于授予确认。 |
 | `get_part_change_status` | 是 | 查询原 token 的内存状态及实际结果，不打开窗口或应用。 |
 | `apply_part_changes` | 否 | 仅原五类零件业务可在未进入确认链时写入，或重放其保留的成功摘要；Pad、草稿与关联尺寸始终拒绝此入口，含成功重放。 |
@@ -160,7 +179,7 @@ Desk 数据来自已保存索引/缓存，不等于当前 FreeCAD 未保存内�
 
 ## 聊天、登录与状态
 
-内置聊天使用独立配置与官方 app-server 子进程。点击连接才创建本窗口拥有的会话；未登录时点击 **使用 ChatGPT 登录**，取得有效官方链接后才请求系统浏览器。登录等待期间可重开或复制该次链接，完成后收起。插件不复制桌面客户端的凭据、cookies 或聊天历史；桌面已登录不代表本插件的独立配置已登录。
+ChatGPT 登录与 Codex · OpenAI API Key 使用各自的专属配置和 Codex app-server。DeepSeek · API Key 直连使用官方 HTTPS API，纯聊天只需 FreeCAD 和 Key。OpenAI Key 在首条成功回复后、DeepSeek Key 在连接测试通过后才按当前服务商保存，齿轮可清除本地保存项。点击连接才创建本窗口拥有的会话；ChatGPT 模式未登录时点击 **使用 ChatGPT 登录**，取得有效官方链接后才请求系统浏览器。登录等待期间可重开或复制该次链接，完成后收起。插件不复制桌面客户端的凭据、cookies 或聊天历史；桌面已登录不代表本插件的独立配置已登录。
 
 新聊天连接会检查专属进程登记；已有或状态不明的登记会阻止重复启动，不因重启应用、父进程退出或登记时间久而接管。正常自有子进程退出后释放。异常退出后，可在齿轮设置点“检查聊天进程登记”；只有有效登记中的PID已不存在时才允许默认取消的本机确认清理，清理前再次核对原登记和PID。取消、Esc、连接变化或状态不明均不清理；成功后由用户手动连接，不自动启动或重发消息。该锁只覆盖采用新协议的客户端，旧版残留与跨平台边界见[聊天操作](https://github.com/phoenixwing-org/phoenix-freecad-tools/blob/master/docs/CHAT-USAGE.md#专属进程登记)。
 

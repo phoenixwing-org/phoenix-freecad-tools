@@ -11,6 +11,8 @@ import { PftAppearanceInputSchema, pftAppearanceScript, pftAppearanceJob } from 
 import { PftDesignInspectionInputSchema, PftDesignInspectionSuccessSchema } from './pft-design-inspection.js';
 import { PFT_RECOMPUTE_CAPABILITY, PftRecomputeSuccessSchema } from './pft-recompute.js';
 import { PFT_PART_APPROVAL_CAPABILITY, PftPartApprovalInputSchema, PftPartApprovalSuccessSchema } from './pft-part-approval.js';
+import { PFT_BASIC_PART_CAPABILITY, PFT_BASIC_PART_OPERATION, PftBasicPartInputSchema,
+  PftBasicPartRequestSchema } from './pft-basic-part.js';
 import { PFT_PAD_LENGTH_CAPABILITY, PftPadLengthInputSchema } from './pft-pad-length.js';
 import { PFT_INSTANCE_TOOL_NAMES, PftInstanceRouter } from './pft-instance-router.js';
 import { PFT_DRAWING_CAPABILITY, PftDrawingInputSchema, PftDrawingDocumentNameSchema } from './pft-drawing.js';
@@ -20,7 +22,7 @@ import { PFT_DRAWING_REFERENCES_CAPABILITY } from './pft-drawing-references.js';
 import { PFT_DRAWING_EXPORT_CAPABILITY, PftDrawingExportPrepareInputSchema, PftDrawingExportTokenInputSchema,
   PftDrawingExportSuccessSchema, type PftDrawingExportData } from './pft-drawing-export.js';
 
-export const VERSION = '0.4.1';
+export const VERSION = '0.4.2';
 export const TOOL_NAMES = [
   'get_capabilities', 'get_connection_status', 'list_documents', 'fit_view', 'set_axonometric_view',
   'get_document_info', 'list_objects', 'get_object_info', 'get_selection', 'measure_geometry', 'inspect_design',
@@ -120,7 +122,7 @@ export function createServer(config: Config): McpServer {
       general_actions: '对明确活动文档操作选择、可撤销显隐或调用原生重算；重算不承诺原生回调或跨文档隔离，不自动保存',
       phoenix: toolScope === 'chat'
         ? '只预览并请求FreeCAD原生人工确认；AI不能授予确认或调用apply；查询原token状态，等待确认不表示已写入，可撤销且不自动保存'
-        : '先完整预览；Pad Length、出图草稿及关联尺寸始终须FreeCAD原生人工确认，原五项也可在明确授权下应用尚未进入确认链的token；写后校验、可撤销、不保存',
+        : '先完整预览；新建基础零件、Pad Length、出图草稿及关联尺寸始终须FreeCAD原生人工确认，原五项也可在明确授权下应用尚未进入确认链的token；写后校验、可撤销、不保存',
       image: '仅在明确请求时导出 FreeCAD 三维视图，图像可能包含当前模型信息；不截图桌面、不改变视角',
       desk: '可选 Desk 适配：正式 CLI 检查状态，可显式读取运行态能力观察但不授予Native权限；显式工作空间查询已有索引/缩略图与尺寸缓存；缓存另需版本化运行态能力。不启动后台、扫描、生成或修改业务记录及CAD；读租约临时协调锁，缓存和索引均与FreeCAD当前内存分开。',
       advanced: toolScope === 'chat' ? '只读查询当前桥接会话已存在请求的状态，不提供任意脚本执行入口'
@@ -128,10 +130,11 @@ export function createServer(config: Config): McpServer {
     };
     const value = { ok: true, source_kind: 'server_manifest', version: VERSION, bridge_protocol: 1, tool_scope: toolScope, tools: activeTools,
       groups, effects: Object.fromEntries(Object.keys(groups).map(group => [group, allEffects[group]])),
-      phoenix_operations: ['normalize_names', 'sync_link_labels', 'initialize_properties', 'recommend_properties', 'set_properties', 'set_pad_length', 'create_drawing', 'add_drawing_dimensions'],
+      phoenix_operations: ['normalize_names', 'sync_link_labels', 'initialize_properties', 'recommend_properties', 'set_properties', 'set_pad_length', 'create_drawing', 'add_drawing_dimensions', PFT_BASIC_PART_OPERATION],
       part_previews: { ttl_seconds: 300, max_plans: 32, max_preview_bytes: 128 * 1024, storage: 'memory_only', application_requires_preview: true },
       part_approvals: PFT_PART_APPROVAL_CAPABILITY,
       pad_length_write: PFT_PAD_LENGTH_CAPABILITY,
+      basic_part_create: PFT_BASIC_PART_CAPABILITY,
       drawing_create: PFT_DRAWING_CAPABILITY,
       drawing_dimensions: PFT_DRAWING_DIMENSIONS_CAPABILITY,
       drawing_dimension_layout: PFT_DRAWING_DIMENSION_LAYOUT_CAPABILITY,
@@ -176,10 +179,19 @@ export function createServer(config: Config): McpServer {
     description: '仅更改明确活动文档及完整目标对象的原生颜色或透明度。random_color 固定本次随机色；set_transparency 必须指定 transparency 整数0–100（0不透明、100完全透明）；兼容 half_transparent 为50%，opaque为0%。单事务、可撤销，不重算、不保存、不改选择或Link来源；复杂Link拒绝。返回真实脚本任务状态，queued/starting/running不表示已应用；用同一requestId调用get_script_status查询，重放必须保留相同参数与ID。',
     inputSchema: PftAppearanceInputSchema, annotations: { ...camera, idempotentHint: true } },
     args => runBound(async freecad => pftAppearanceJob(await freecad.executeScript(pftAppearanceScript(args), args.requestId), args), result, { requestId: args.requestId }));
-  server.registerTool('prepare_part_changes', { title: '预览 Phoenix 零件、Pad或出图草稿', description: '只预览命名、Link名称、五字段属性或有限Pad Length，不改模型。set_pad_length仅接受一个明确Pad内部Name、body及lengthMm（0.01至10000毫米）；限单打开文档的Body首个且最终单侧固定Length Pad，未知依赖拒绝。预览只显示原值、请求值及将执行的重算，不虚构新几何；该操作始终须用户在FreeCAD原生窗口确认，不能直接apply，不自动保存，也不承诺原生回调隔离。create_drawing只接受明确document及一个源objects，预览A4横向、第一角法front/top/axonometric草稿五节点，不接受values/body/lengthMm或模板路径；确认前不创建，必须原生窗口人工确认，不得直接apply。projection_verification为not_checked，必须人工复核并用inspect_drawing_page检查，不承诺投影已完成或生产尺寸完整。add_drawing_dimensions仅接受明确page/view及1至8项尺寸：手动row为edge/kind/xMm/yMm；仅明确placement=auto的row请求自动布局建议，两者可混用且已有手动坐标不移动，不接受objects、外部数值或格式覆写。Edge0至Edge2047必须从inspect_drawing_page的view投影引用获取，类型仅Distance/DistanceX/DistanceY/Diameter/Radius；xMm/yMm为相对视图的纸面mm偏移[-1000,1000]。预览值来自原生缓存几何，创建后核原生引用和实际值；自动建议另需drawing_dimension_layout运行态能力并返回完整意图、计划图与解出的坐标，整批无解或原生范围不足不应用；布局为suggested_only估算，必须展示完整预览并经原生人工确认，投影仍须复核。原五操作仍按既有规则；仅set_properties接受values且所有对象字段集一致。返回5分钟token和完整差异/冲突，AI必须完整展示，再调用request_part_change_approval等待人工操作，不能把等待当写入。', inputSchema: z.object({ document: PftDrawingDocumentNameSchema, objects: nonemptyObjects.optional(),
-    operation: z.enum(['normalize_names', 'sync_link_labels', 'initialize_properties', 'recommend_properties', 'set_properties', 'set_pad_length', 'create_drawing', 'add_drawing_dimensions']),
+  server.registerTool('prepare_part_changes', { title: '预览 Phoenix 零件、Pad或出图草稿', description: '只预览，不改模型。create_basic_part 从无打开文档的窗口创建未保存文档、Body、参数草图和 Pad；仅传 operation 与 newPart。newPart 填 name、profile 和毫米尺寸。annulus 填 outerDiameterMm、innerDiameterMm、thicknessMm，rectangle 填 widthMm、heightMm、thicknessMm，circle 填 diameterMm、thicknessMm。仅有公称规格时先确认实值。完整展示预览，使用原生人工确认，撤销建模节点，文档壳可能保留。set_pad_length仅接受一个明确Pad内部Name、body及lengthMm（0.01至10000毫米）；限单打开文档的Body首个且最终单侧固定Length Pad，未知依赖拒绝。预览只显示原值、请求值及将执行的重算，不虚构新几何；该操作始终须用户在FreeCAD原生窗口确认，不能直接apply，不自动保存，也不承诺原生回调隔离。create_drawing只接受明确document及一个源objects，预览A4横向、第一角法front/top/axonometric草稿五节点，不接受values/body/lengthMm或模板路径；确认前不创建，必须原生窗口人工确认，不得直接apply。projection_verification为not_checked，必须人工复核并用inspect_drawing_page检查，不承诺投影已完成或生产尺寸完整。add_drawing_dimensions仅接受明确page/view及1至8项尺寸：手动row为edge/kind/xMm/yMm；仅明确placement=auto的row请求自动布局建议，两者可混用且已有手动坐标不移动，不接受objects、外部数值或格式覆写。Edge0至Edge2047必须从inspect_drawing_page的view投影引用获取，类型仅Distance/DistanceX/DistanceY/Diameter/Radius；xMm/yMm为相对视图的纸面mm偏移[-1000,1000]。预览值来自原生缓存几何，创建后核原生引用和实际值；自动建议另需drawing_dimension_layout运行态能力并返回完整意图、计划图与解出的坐标，整批无解或原生范围不足不应用；布局为suggested_only估算，必须展示完整预览并经原生人工确认，投影仍须复核。原五操作仍按既有规则；仅set_properties接受values且所有对象字段集一致。返回5分钟token和完整差异/冲突，AI必须完整展示，再调用request_part_change_approval等待人工操作，不能把等待当写入。', inputSchema: z.object({ document: PftDrawingDocumentNameSchema.optional(), objects: nonemptyObjects.optional(),
+    operation: z.enum(['normalize_names', 'sync_link_labels', 'initialize_properties', 'recommend_properties', 'set_properties', 'set_pad_length', 'create_drawing', 'add_drawing_dimensions', PFT_BASIC_PART_OPERATION]),
+    newPart: PftBasicPartRequestSchema.optional(),
     page: name.optional(), view: name.optional(), dimensions: z.array(PftDrawingDimensionInputItemSchema).min(1).max(8).optional(),
     values: partValues.optional(), body: name.optional(), lengthMm: z.number().finite().min(0.01).max(10000).optional() }).strict().superRefine((value, context) => {
+      if (value.operation === PFT_BASIC_PART_OPERATION) {
+        if (!PftBasicPartInputSchema.safeParse(value).success) context.addIssue({ code: 'custom', message: '新建零件仅接受 operation 和 newPart' });
+        return;
+      }
+      if (value.document === undefined || Object.hasOwn(value, 'newPart')) {
+        context.addIssue({ code: 'custom', message: '已有文档操作必须指定 document，不接受 newPart' });
+        return;
+      }
       if (value.operation === 'add_drawing_dimensions') {
         if (!PftDrawingDimensionsInputSchema.safeParse(value).success) context.addIssue({ code: 'custom', message: '尺寸预览须明确page/view及1至8项手动坐标或placement=auto，不接受同一项同时含auto与坐标、objects、外部数值或确认' });
         return;
@@ -198,19 +210,21 @@ export function createServer(config: Config): McpServer {
       if ((value.operation === 'set_properties') !== (value.values !== undefined)) context.addIssue({ code: 'custom', message: '仅set_properties需要且允许values', path: ['values'] });
       if (value.values && (Object.keys(value.values).length !== value.objects!.length || value.objects!.some(object => !Object.hasOwn(value.values!, object)))) context.addIssue({ code: 'custom', message: 'values必须与所有目标对象精确对应', path: ['values'] });
       if (value.values && new Set(Object.values(value.values).map(fields => Object.keys(fields).sort().join(','))).size > 1) context.addIssue({ code: 'custom', message: '所有对象必须使用相同字段集', path: ['values'] });
-    }), annotations: { ...read, idempotentHint: false } }, args => runBound(freecad => args.operation === 'add_drawing_dimensions'
+    }), annotations: { ...read, idempotentHint: false } }, args => runBound(freecad => args.operation === PFT_BASIC_PART_OPERATION
+      ? freecad.preparePartChanges(PftBasicPartInputSchema.parse(args))
+      : args.operation === 'add_drawing_dimensions'
       ? freecad.preparePartChanges(PftDrawingDimensionsInputSchema.parse(args))
       : args.operation === 'create_drawing'
       ? freecad.preparePartChanges(PftDrawingInputSchema.parse(args))
       : args.operation === 'set_pad_length' ? freecad.preparePartChanges(PftPadLengthInputSchema.parse(args))
-      : freecad.preparePartChanges({ document: args.document, objects: args.objects!, operation: args.operation,
+      : freecad.preparePartChanges({ document: PftDrawingDocumentNameSchema.parse(args.document), objects: args.objects!, operation: args.operation,
           ...(args.values === undefined ? {} : { values: args.values }) }), result, { captureToken: true }));
   server.registerTool('request_part_change_approval', { title: '请求原生确认零件修改',
     description: '先将prepare_part_changes的完整预览展示给用户，再用原token打开或复用FreeCAD原生确认窗口。请求本身不授予确认；等待用户亲自点击应用，只有GUI回调能执行此确认链写入。awaiting_confirmation或applying不表示已写入；用get_part_change_status查询原token。超时不自动循环或重试；调用者可显式查询或用同一token再次请求复用窗口，不创建新token规避状态。不自动保存。',
     inputSchema: PftPartApprovalInputSchema, outputSchema: PftPartApprovalSuccessSchema,
     annotations: { ...camera, destructiveHint: false, idempotentHint: true } }, args => runBound(freecad => freecad.requestPartChangeApproval(args.token), result, { token: args.token }));
   server.registerTool('get_part_change_status', { title: '查询零件修改确认状态',
-    description: '仅查询原预览token的内存状态，不打开窗口、不授予确认、不应用或保存。prepared/awaiting_confirmation/applying均不是完成；applied的result才报告实际修改数量；Pad另含独立几何反验摘要且须原生确认，不把重算计数当成功；出图另含drawing_draft五节点摘要，投影为not_checked且必须人工复核，不能当成生产图完成。native_confirmation单独表明是否经过原生GUI确认。尺寸另含drawing_dimensions结果，关联引用和当前测量值已核对，但projection_verification仍为not_checked且须人工复核。失败只返回固定错误码。超时或无效结果不自动重试，不把未知状态当成已确认或已写入。',
+    description: '仅查询原预览token的内存状态，不打开窗口、不授予确认、不应用或保存。prepared/awaiting_confirmation/applying均不是完成；applied的result才报告实际修改数量；新建基础零件返回文档、Body、草图、Pad 和核验后的尺寸、包围盒及体积；Pad另含独立几何反验摘要且须原生确认，不把重算计数当成功；出图另含drawing_draft五节点摘要，投影为not_checked且必须人工复核，不能当成生产图完成。native_confirmation单独表明是否经过原生GUI确认。尺寸另含drawing_dimensions结果，关联引用和当前测量值已核对，但projection_verification仍为not_checked且须人工复核。失败只返回固定错误码。超时或无效结果不自动重试，不把未知状态当成已确认或已写入。',
     inputSchema: PftPartApprovalInputSchema, outputSchema: PftPartApprovalSuccessSchema, annotations: read },
     args => runBound(freecad => freecad.getPartChangeStatus(args.token), result, { token: args.token }));
   server.registerTool('prepare_drawing_export', { title: '准备单页PDF导出',
@@ -232,7 +246,7 @@ export function createServer(config: Config): McpServer {
   server.registerTool('set_selection', { title: '选择对象', description: '用明确的内部 Name 替换目标活动文档的对象选择；空列表清除此文档选择。保留其他文档选择，不修改模型或保存。', inputSchema: z.object({ document: name, objects: objectList }).strict(), annotations: camera }, args => runBound(freecad => freecad.setSelection(args)));
   server.registerTool('set_visibility', { title: '设置对象显隐', description: '对明确活动文档的所选目标统一设置可见性。先校验全部目标，事务可撤销，不自动保存；不会改 Label 或其他属性。', inputSchema: z.object({ document: name, objects: nonemptyObjects, visible: z.boolean() }).strict(), annotations: camera }, args => runBound(freecad => freecad.setVisibility(args)));
   server.registerTool('recompute_document', { title: '重算文档', description: '显式调用明确活动文档的原生重算，要求未处于编辑或事务中，会执行特征求解并可能改变缓存几何。先检查兼容结果能力，原生返回值仅为非负对象数量；对象检查仅限入口文档当前对象，不承诺原生回调或跨文档隔离；不将数量或对象状态视为完成、几何有效或几何新鲜的证明。不保存、不自动重试；超时或结果无效时请求可能已经执行。', inputSchema: z.object({ document: name }).strict(), outputSchema: PftRecomputeSuccessSchema, annotations: { ...camera, destructiveHint: true, idempotentHint: false } }, args => runBound(freecad => freecad.recomputeDocument(args.document)));
-  server.registerTool('apply_part_changes', { title: '应用 Phoenix 零件工具预览', description: '仅在用户授权的范围内，应用prepare_part_changes返回的5分钟token。复核文档实例、对象快照和来源，冲突则拒绝。写入经工作台Controller事务，可撤销但不保存；相同token不会再次执行，过期或失败须重新预览；已进入原生确认链的token不能通过此入口确认或应用；set_pad_length、create_drawing和add_drawing_dimensions始终拒绝直接apply，只能由原生GUI人工确认。', inputSchema: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/u) }).strict(), annotations: { ...camera, destructiveHint: true } }, args => runBound(freecad => freecad.applyPartChanges(args.token), result, { token: args.token }));
+  server.registerTool('apply_part_changes', { title: '应用 Phoenix 零件工具预览', description: '仅在用户授权的范围内，应用prepare_part_changes返回的5分钟token。复核文档实例、对象快照和来源，冲突则拒绝。写入经工作台Controller事务，可撤销但不保存；相同token不会再次执行，过期或失败须重新预览；已进入原生确认链的token不能通过此入口确认或应用；create_basic_part、set_pad_length、create_drawing和add_drawing_dimensions始终拒绝直接apply，只能由原生GUI人工确认。', inputSchema: z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/u) }).strict(), annotations: { ...camera, destructiveHint: true } }, args => runBound(freecad => freecad.applyPartChanges(args.token), result, { token: args.token }));
   server.registerTool('execute_script', { title: '执行高级 FreeCAD 脚本', description: '高级能力：与 FreeCAD Python 控制台同权限，在 GUI 主线程执行，可修改模型、读写文件或自行保存。框架不额外保存，也不承诺异常自动回滚。超时后先用 get_script_status 查询，重放须使用相同 requestId 和代码。去重仅限同一桥接服务会话；重载或重启会重置，通过 get_connection_status 的 script_session_id 识别。完整结果保留最近 20 份，过期 ID 在该会话中仍拒绝重执行。', inputSchema: z.object({
     code: z.string().min(1).max(32768).regex(/^[^\u0000\p{Cs}]*$/u), requestId }).strict(), annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } }, args => runBound(freecad => freecad.executeScript(args.code, args.requestId), result, { requestId: args.requestId }));
   }

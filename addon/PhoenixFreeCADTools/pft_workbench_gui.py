@@ -13,6 +13,7 @@ if _workbench_base is None:
     raise RuntimeError("FreeCAD workbench base class is unavailable.")
 
 import pft_bridge
+import pft_mcp_settings
 import pft_workbench_tools
 import pft_workbench_settings as settings
 import pft_global_menu
@@ -28,6 +29,50 @@ def _feedback(message, error=False):
     message = tr(message)
     printer("[Phoenix Tools] " + message + "\n")
     Gui.getMainWindow().statusBar().showMessage(message, 12000)
+
+
+_START_BUSY = "PhoenixTools_BridgeStartBusy"
+
+
+def _start_mcp(window):
+    """One normal start; only its occupied fixed port can offer recovery."""
+    if window.property(_START_BUSY):
+        return None
+    window.setProperty(_START_BUSY, True)
+    try:
+        try:
+            return pft_bridge.start_server()
+        except pft_bridge.PftBridgeError as error:
+            recovery = getattr(error, "discovery_recovery", None)
+            if recovery is None:
+                raise
+        port, etag = recovery
+        from pft_workbench_views import confirm_mcp_port_conflict
+        if not confirm_mcp_port_conflict(window, port):
+            return None
+        status = pft_bridge.get_status()
+        if Gui.getMainWindow() is not window or status.get("running") or status.get("stopping"):
+            _feedback(tr("桥接状态已变化；未保存连接设置或重试启动。"), error=True)
+            return None
+        try:
+            saved = pft_mcp_settings.save_config(
+                {"schema_version": 2, "bridge": {"preferred_port": port}, "discovery": {"enabled": True}},
+                expected_etag=etag)
+        except pft_mcp_settings.PftMcpSettingsError as error:
+            if error.may_have_saved:
+                message = tr("连接配置写入后的持久状态无法确认；请重新读取检查，不要直接重复保存。")
+            else:
+                message = tr("连接设置未保存（%s）。") % error.code
+            _feedback(message, error=True)
+            return None
+        try:
+            # Only the exact, verified shared settings just saved can start this listener.
+            return pft_bridge.start_server(_expected_discovery_etag=saved["etag"])
+        except pft_bridge.PftBridgeError as error:
+            _feedback(tr("已保存自动发现设置，但当前桥接未启动（%s）。") % error.code, error=True)
+            return None
+    finally:
+        window.setProperty(_START_BUSY, False)
 
 
 class _PftCommand:
@@ -354,6 +399,9 @@ class _PftToggleMCPCommand(_PftMCPActionCommand):
 
     def Activated(self):
         try:
+            window = Gui.getMainWindow()
+            if window.property(_START_BUSY):
+                return
             status = pft_bridge.get_status()
             if status.get("stopping"):
                 return
@@ -364,7 +412,6 @@ class _PftToggleMCPCommand(_PftMCPActionCommand):
                     return
                 # A confirmed stop intent also suppresses a startup callback
                 # still pending when another caller has already stopped it.
-                window = Gui.getMainWindow()
                 window.setProperty("PhoenixTools_AutoStartSuppressed", True)
                 # The modal confirmation can process events. Never turn a stop
                 # request into a start if the bridge changed while it was open.
@@ -373,7 +420,9 @@ class _PftToggleMCPCommand(_PftMCPActionCommand):
                     return
                 result = pft_bridge.stop_server()
             else:
-                result = pft_bridge.start_server()
+                result = _start_mcp(window)
+                if result is None:
+                    return
             if result.get("stopping"):
                 _feedback(tr("MCP 服务正在停止。"))
             elif result.get("running"):
@@ -398,8 +447,8 @@ def _auto_start_mcp(window):
         snapshot = pft_bridge.get_status()
         if snapshot.get("running") or snapshot.get("stopping"):
             return
-        result = pft_bridge.start_server()
-        if result.get("running"):
+        result = _start_mcp(window)
+        if result is not None and result.get("running"):
             _feedback(tr("MCP 服务已启动：127.0.0.1:%s。") % result["port"])
     except Exception as error:
         _feedback(tr("桥接自动启动失败（%s）；可稍后手动启动。") % type(error).__name__, error=True)

@@ -19,6 +19,9 @@ _STATES = frozenset(("prepared", "awaiting_confirmation", "applying", "applied",
 _ERROR_CODES = frozenset((
     "PART_CHANGE_FAILED", "PART_APPROVAL_UI_UNAVAILABLE", "PART_APPROVAL_NO_CHANGES", "PART_PREVIEW_BLOCKED",
     "PART_PLAN_STALE", "DOCUMENT_NOT_FOUND", "DOCUMENT_NOT_ACTIVE", "GUI_THREAD_REQUIRED",
+    "BASIC_PART_INVALID", "BASIC_PART_CONTEXT_CHANGED", "BASIC_PART_NATIVE_UNAVAILABLE",
+    "BASIC_PART_CREATE_UNVERIFIED", "BASIC_PART_GEOMETRY_UNVERIFIED", "BASIC_PART_WRITE_FAILED",
+    "BASIC_PART_NATIVE_CONFIRMATION_REQUIRED",
     "PART_TRANSACTION_STATE_UNAVAILABLE", "PART_TRANSACTION_OPEN_UNVERIFIED", "PART_TRANSACTION_CHANGED",
     "PART_COMMIT_UNVERIFIED", "PART_ROLLBACK_UNVERIFIED", "PART_PROPERTY_VERIFY_FAILED",
     "PART_PREFERENCE_RESTORE_UNVERIFIED", "PART_ROLLBACK_AND_PREFERENCE_UNVERIFIED",
@@ -96,7 +99,8 @@ def _dimension_contract():
 
 
 def _layout_sibling(name):
-    if name not in ("pft_drawing_layout_plan", "pft_drawing_layout_views", "pft_draft_layout", "pft_draft_layout_views"):
+    if name not in ("pft_drawing_layout_plan", "pft_drawing_layout_views", "pft_draft_layout", "pft_draft_layout_views",
+                    "pft_basic_part"):
         raise ValueError("PART_APPROVAL_PREVIEW_INVALID")
     filename = Path(__file__).resolve().with_name(name + ".py")
     module = _LAYOUT_MODULES.get(name)
@@ -173,6 +177,13 @@ def _preview_copy(preview):
             if result["can_apply"] is not True or pair["draft_layout"] is None or pair["draft_layout_reason"] is not None:
                 raise ValueError()
             result.update(pair)
+        if result["operation"] == "create_basic_part":
+            basic_part = _layout_sibling("pft_basic_part")
+            request = basic_part.validate_request(result.get("design_request"))
+            rows = basic_part.preview_rows(request)
+            if (request["name"] != result["document"] or result["can_apply"] is not True
+                    or len(rows) != result["changed_count"] or rows != result["rows"]):
+                raise ValueError()
         if result["operation"] == "set_pad_length":
             request = result.get("design_request")
             if (type(request) is not dict or set(request) != {"body", "pad", "length_mm"}
@@ -222,7 +233,8 @@ class _ApprovalHandle:
             self.dialog = ApprovalDialog(gui.getMainWindow())
             self.dialog.setObjectName("pftPartApprovalDialog")
             self.dialog.setWindowTitle(translate("确认图纸尺寸" if preview["operation"] == "add_drawing_dimensions" else
-                                                 "确认图纸创建" if preview["operation"] == "create_drawing" else "确认零件修改"))
+                                                 "确认图纸创建" if preview["operation"] == "create_drawing" else
+                                                 "确认新建零件" if preview["operation"] == "create_basic_part" else "确认零件修改"))
             self.dialog.setModal(False)
             self.dialog.setWindowModality(_enum(core.Qt, "WindowModality", "NonModal"))
             self.dialog.setMinimumWidth(0)
@@ -232,7 +244,10 @@ class _ApprovalHandle:
             for key, value in (("文档：%s", preview["document"]), ("操作：%s", preview["operation"]),
                                ("原预览到期时间：%s", preview["expires_at"])):
                 layout.addWidget(self._label(translate(key) % value))
-            layout.addWidget(self._label(translate("仅点击“确认修改”会修改文档；可撤销，不会自动保存。")))
+            if preview["operation"] == "create_basic_part":
+                layout.addWidget(self._label(translate("确认后新建未保存文档。撤销会移除建模节点，文档可能仍保留。")))
+            else:
+                layout.addWidget(self._label(translate("仅点击“确认修改”会修改文档；可撤销，不会自动保存。")))
             if "layout" in preview:
                 self.layout_widget = _layout_sibling("pft_drawing_layout_views").create_drawing_layout_widget(
                     self.dialog, translate=translate)
@@ -339,6 +354,16 @@ class _ApprovalHandle:
                 if set(status["result"]) != {"changed_count", "saves_document", "design_result"}:
                     raise ValueError("PART_APPROVAL_STATUS_INVALID")
                 _drawing_contract().validate_design_result(status["result"]["design_result"], self.preview["design_request"])
+            elif status.get("result") is not None:
+                raise ValueError("PART_APPROVAL_STATUS_INVALID")
+        if self.preview["operation"] == "create_basic_part":
+            if (status["changed_count"] != self.preview["changed_count"]
+                    or status["state"] in {"applying", "applied"} and status["native_confirmation"] is not True):
+                raise ValueError("PART_APPROVAL_STATUS_INVALID")
+            if status["state"] == "applied":
+                if set(status["result"]) != {"changed_count", "saves_document", "design_result"}:
+                    raise ValueError("PART_APPROVAL_STATUS_INVALID")
+                _layout_sibling("pft_basic_part").validate_result(status["result"]["design_result"], self.preview["design_request"])
             elif status.get("result") is not None:
                 raise ValueError("PART_APPROVAL_STATUS_INVALID")
         if self.preview["operation"] == "set_pad_length":

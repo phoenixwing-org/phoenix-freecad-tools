@@ -9,7 +9,7 @@ ADDON = Path(__file__).resolve().parents[2] / "addon" / "PhoenixFreeCADTools"
 _previous_path = list(sys.path)
 try:
     sys.path.insert(0, str(ADDON))
-    from pft_chat_transcript import render_chat_transcript
+    from pft_chat_transcript import _PftMarkdownFragment, render_chat_transcript
 finally:
     sys.path[:] = _previous_path
 
@@ -45,6 +45,23 @@ class ChatTranscriptTests(unittest.TestCase):
         self.assertIn('<a href="https://example.invalid">time</a>', text)
         self.assertFalse(set(document.tags) & {"img", "script", "a", "link", "style", "iframe"})
         self.assertFalse(any(key in ("src", "href") for key, _ in document.attributes))
+
+    def test_markdown_fragment_keeps_table_and_emphasis_and_strips_resource_attributes(self):
+        qt = ('<html><head><meta name="ignore"></head><body><table><tr><td><p>'
+              '<span style="font-weight:700; background-image: url(file:///fixture)">bold</span>'
+              '<a href="https://example.invalid">caption</a><img src="file:///fixture"/>'
+              '</p></td></tr></table></body></html>')
+        markdown = lambda _: "".join(_PftMarkdownFragment(qt).parts)
+        source = render_chat_transcript([{"role": "assistant", "text": "fixture"},
+                                        {"role": "user", "text": "**literal**"}], markdown=markdown)
+        doc = Document(source)
+        self.assertIn("td", doc.tags)
+        self.assertIn("caption", doc.text)
+        self.assertIn("**literal**", doc.text)
+        self.assertIn("font-weight:700", source)
+        self.assertNotIn("url(", source)
+        self.assertFalse(set(doc.tags) & {"a", "img", "meta"})
+        self.assertFalse(any(key in ("src", "href") for key, _ in doc.attributes))
 
     def test_local_times_align_with_messages_and_missing_times_stay_empty(self):
         rows = [{"role": "user", "text": "Example input"},

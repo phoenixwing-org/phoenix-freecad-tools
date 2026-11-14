@@ -18,7 +18,9 @@ _CHAT_HISTORY_KEYS = {"retain_history": ("Bool", "RetainChatHistory", False)}
 
 
 class PftChatSettingsError(ValueError):
-    pass
+    def __init__(self, message, *, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 def _absolute_file(value, executable=False):
@@ -167,8 +169,14 @@ def build_chat_mcp_config(options, bridge_status, desk_configuration=None):
     if options.get("enabled") is not True:
         return None
     paths = validate_mcp_paths(options.get("node_executable"), options.get("cli_entry"))
-    if not isinstance(bridge_status, dict) or bridge_status.get("running") is not True or bridge_status.get("stopping"):
-        raise PftChatSettingsError("请先启动 Phoenix MCP 服务，再连接带工具的聊天。")
+    if isinstance(bridge_status, dict) and bridge_status.get("stopping"):
+        raise PftChatSettingsError(
+            "本窗口的 Phoenix MCP 服务正在停止。请等待停止完成，点击「启动 MCP」后再连接。",
+            code="CHAT_BRIDGE_STOPPING")
+    if not isinstance(bridge_status, dict) or bridge_status.get("running") is not True:
+        raise PftChatSettingsError(
+            "请先在本窗口的 Phoenix 工具条点击「启动 MCP」，再连接带工具的聊天。",
+            code="CHAT_BRIDGE_NOT_RUNNING")
     port = bridge_status.get("port")
     if type(port) is not int or not 1 <= port <= 65535:
         raise PftChatSettingsError("无法确定 Phoenix MCP 的本机端口。")

@@ -20,6 +20,7 @@ import unicodedata
 
 METHODS = frozenset({"prepare_part_changes", "apply_part_changes", "request_part_change_approval", "get_part_change_status"})
 OPERATIONS = frozenset({"normalize_names", "sync_link_labels", "initialize_properties", "recommend_properties", "set_properties", "set_pad_length", "create_drawing", "add_drawing_dimensions"})
+BASIC_PART_OPERATION = "create_basic_part"
 FIELDS = ("PartNumber", "PartVersion", "TypeCode", "ModelSeries", "PartName")
 MAX_PLANS = 32
 TTL_SECONDS = 300
@@ -50,6 +51,9 @@ DRAWING_DIMENSION_LAYOUT_CAPABILITIES = {"version": 1, "operation": "add_drawing
     "max_input_bytes": 65536, "max_result_bytes": 32768, "max_plan_bytes": 114688,
     "max_candidates_per_dimension": 64, "max_search_attempts": 8192, "max_geometry_checks": 131072,
     "layout_verification": "suggested_only", "saves_document": False}
+BASIC_PART_CAPABILITIES = {"version": 1, "operation": BASIC_PART_OPERATION, "confirmation": "native_gui_only",
+    "target": "new_unsaved_document", "profiles": ["annulus", "rectangle", "circle"],
+    "length_unit": "mm", "minimum_mm": 0.1, "maximum_mm": 1000, "saves_document": False}
 APPROVAL_CAPABILITIES = {"version": 1, "request_method": "request_part_change_approval",
     "status_method": "get_part_change_status", "confirmation": "native_gui_only", "max_pending": 1,
     "storage": "memory_only", "ttl_seconds": TTL_SECONDS, "max_status_bytes": MAX_STATUS_BYTES}
@@ -58,6 +62,9 @@ _FIXED_ERRORS = frozenset({"PART_CHANGE_FAILED", "PART_APPROVAL_UI_UNAVAILABLE",
     "PART_TRANSACTION_STATE_UNAVAILABLE", "PART_TRANSACTION_OPEN_UNVERIFIED", "PART_TRANSACTION_CHANGED",
     "PART_COMMIT_UNVERIFIED", "PART_ROLLBACK_UNVERIFIED", "PART_PROPERTY_VERIFY_FAILED",
     "PART_PREFERENCE_RESTORE_UNVERIFIED", "PART_ROLLBACK_AND_PREFERENCE_UNVERIFIED", "PAD_UNSUPPORTED", "PAD_PLAN_STALE",
+    "BASIC_PART_INVALID", "BASIC_PART_CONTEXT_CHANGED", "BASIC_PART_NATIVE_UNAVAILABLE",
+    "BASIC_PART_CREATE_UNVERIFIED", "BASIC_PART_GEOMETRY_UNVERIFIED", "BASIC_PART_WRITE_FAILED",
+    "BASIC_PART_NATIVE_CONFIRMATION_REQUIRED",
     "PAD_PARAMETER_VERIFY_FAILED", "PAD_GEOMETRY_VERIFY_FAILED", "PAD_RECOMPUTE_UNVERIFIED", "PAD_NATIVE_CONFIRMATION_REQUIRED",
     "DRAWING_UNSUPPORTED", "DRAWING_PLAN_STALE", "DRAWING_TEMPLATE_UNAVAILABLE", "DRAWING_CREATE_FAILED",
     "DRAWING_RECOMPUTE_UNVERIFIED", "DRAWING_PROJECTION_UNAVAILABLE", "DRAWING_NATIVE_CONFIRMATION_REQUIRED", "DRAWING_RESULT_INVALID",
@@ -95,6 +102,11 @@ def validate(method, params, Error):
     if method in {"apply_part_changes", "request_part_change_approval", "get_part_change_status"}:
         if set(params) != {"token"} or not isinstance(params["token"], str) or not _TOKEN.fullmatch(params["token"]):
             raise Error("INVALID_PARAMS", "该操作仅接受预览返回的 token。")
+        return True
+    if params.get("operation") == BASIC_PART_OPERATION:
+        if set(params) != {"operation", "newPart"}:
+            raise Error("INVALID_PARAMS", "新建零件仅接受 operation 和 newPart。")
+        _basic_part_request(params["newPart"], Error)
         return True
     if set(params) - {"docName", "objectNames", "operation", "values", "bodyName", "lengthMm", "viewName", "dimensions", "draftLayoutVersion"}:
         raise Error("INVALID_PARAMS", "预览参数包含未开放字段。")
@@ -185,6 +197,29 @@ def _mvc():
     model = _load_sibling("pft_workbench_model")
     controller = _load_sibling("pft_workbench_controller")
     return model, controller
+
+
+def _basic_part():
+    module = _load_sibling("pft_basic_part")
+    if module.CAPABILITIES != BASIC_PART_CAPABILITIES:
+        raise RuntimeError("Incompatible basic part controller")
+    return module
+
+
+def _basic_part_request(value, Error):
+    basic_part = _basic_part()
+    try:
+        return basic_part.validate_request(value)
+    except basic_part.PftBasicPartError as error:
+        raise Error(error.code, str(error)) from None
+
+
+def _require_blank_part_context(app, gui, controller, Error):
+    basic_part = _basic_part()
+    try:
+        basic_part.require_blank_context(app, gui, controller)
+    except basic_part.PftBasicPartError as error:
+        raise Error(error.code, str(error)) from None
 
 
 def _pad():
@@ -370,7 +405,7 @@ def _fail(record, code):
 def _status_dto(record, token):
     state = record["state"]
     result = {"changed_count": record["result"]["changed_count"], "saves_document": False} if state == "applied" else None
-    if result is not None and record["operation"] in {"set_pad_length", "create_drawing", "add_drawing_dimensions"}:
+    if result is not None and record["operation"] in {"set_pad_length", "create_drawing", "add_drawing_dimensions", BASIC_PART_OPERATION}:
         result["design_result"] = deepcopy(record["result"]["design_result"])
     return {"document": record["document"], "operation": record["operation"], "token": token,
             "state": state, "changed_count": record["changed_count"], "requires_confirmation": True,
@@ -720,12 +755,32 @@ def _verify_draft_layout_binding(record, Error):
         raise Error("DRAWING_DRAFT_LAYOUT_STALE", "新建图纸的完整布局计划已变化，请重新预览。") from None
 
 
+def _prepare_basic_part(params, app, gui, controller, Error):
+    request = _basic_part_request(params["newPart"], Error)
+    _require_blank_part_context(app, gui, controller, Error)
+    rows = _basic_part().preview_rows(request)
+    expires_at = datetime.fromtimestamp(time.time() + TTL_SECONDS, timezone.utc).isoformat().replace("+00:00", "Z")
+    record = {"state": "prepared", "document": request["name"], "operation": BASIC_PART_OPERATION,
+              "plan": {"basic_part_input": request}, "deadline": time.monotonic() + TTL_SECONDS,
+              "can_apply": True, "changed_count": len(rows), "native_confirmation": False}
+    response = {"document": request["name"], "operation": BASIC_PART_OPERATION, "state": "prepared",
+                "can_apply": True, "expires_at": expires_at, "ttl_seconds": TTL_SECONDS,
+                "changed_count": len(rows), "rows": rows, "design_request": request,
+                "requires_confirmation": True, "saves_document": False, "storage": "memory_only"}
+    with _lock:
+        response["token"] = _store(record, Error)
+        record["public_preview"] = deepcopy(response)
+    return response
+
+
 def _prepare(params, app, gui, Error):
     model, controller = _mvc()
     try:
         controller._ensure_main_thread()
     except model.PftToolError:
         raise Error("GUI_THREAD_REQUIRED", "零件预览必须从 FreeCAD 界面线程执行。")
+    if params["operation"] == BASIC_PART_OPERATION:
+        return _prepare_basic_part(params, app, gui, controller, Error)
     document = _document(app, params["docName"], Error)
     try:
         controller._ensure_idle(app, gui, document)
@@ -852,6 +907,9 @@ def _prepare(params, app, gui, Error):
 
 
 def _binding(record, model, controller, app, gui, Error):
+    if record["operation"] == BASIC_PART_OPERATION:
+        _require_blank_part_context(app, gui, controller, Error)
+        return None
     document = _document(app, record["document"], Error)
     if document is not record["document_ref"]:
         raise Error("PART_PLAN_STALE", "文档已关闭或重开，请重新预览。")
@@ -932,6 +990,8 @@ def _apply(params, app, gui, Error, _native_grant=None):
             raise Error("DIMENSION_NATIVE_CONFIRMATION_REQUIRED", "图纸尺寸只能由原生窗口的人工确认回调添加，未消费预览。")
         if record["operation"] == "create_drawing" and _native_grant is None:
             raise Error("DRAWING_NATIVE_CONFIRMATION_REQUIRED", "图纸草稿只能由原生确认窗口的人工确认回调创建，未消费预览。")
+        if record["operation"] == BASIC_PART_OPERATION and _native_grant is None:
+            raise Error("BASIC_PART_NATIVE_CONFIRMATION_REQUIRED", "新建零件只能由 FreeCAD 原生窗口确认。")
         if record["operation"] == "set_pad_length" and _native_grant is None:
             raise Error("PAD_NATIVE_CONFIRMATION_REQUIRED", "Pad 长度只能由原生确认窗口的人工确认回调执行，未消费预览。")
         if record["state"] == "applied":
@@ -957,10 +1017,17 @@ def _apply(params, app, gui, Error, _native_grant=None):
         frozen_layout = record["plan"].get("layout_plan") if uses_layout else None
         frozen_draft = record["plan"].get("drawing_plan") if uses_draft_layout else None
         document = _binding(record, model, controller, app, gui, Error)
-        objects, snapshots, plan = record["objects"], record["snapshots"], record["plan"]
+        objects, snapshots, plan = record.get("objects"), record.get("snapshots"), record["plan"]
         operation = record["operation"]
         design_result = None
-        if operation == "add_drawing_dimensions":
+        if operation == BASIC_PART_OPERATION:
+            basic_part = _basic_part()
+            try:
+                design_result = basic_part.apply_plan(app, gui, plan["basic_part_input"], controller)
+            except basic_part.PftBasicPartError as error:
+                raise Error(error.code, str(error)) from None
+            changed = record["changed_count"]
+        elif operation == "add_drawing_dimensions":
             dimensions = _dimensions()
             try:
                 if uses_layout:

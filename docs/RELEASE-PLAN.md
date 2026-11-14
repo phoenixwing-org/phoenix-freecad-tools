@@ -1,6 +1,6 @@
 # 开发与发布计划
 
-当前源码候选为 **0.4.1（待发布）**，最后已发布版本仍为0.3.2，npm源码采用`@phoenix-wing/phoenix-freecad-mcp`；实际发行以GitHub Release与npm Registry各自的回执为准。能力与待验范围见[TODO](TODO.md)；验证方法见[验证与验收](VERIFICATION.md)。源码实现、运行中模块、实际归档和正式发行分别核对，不继承旧运行回执作为新候选证据。
+当前源码候选为 **0.4.2（待试用）**，最新正式版为 0.4.1，npm源码采用`@phoenix-wing/phoenix-freecad-mcp`；实际发行以GitHub Release与npm Registry各自的回执为准。能力与待验范围见[TODO](TODO.md)；验证方法见[验证与验收](VERIFICATION.md)。源码实现、运行中模块、实际归档和正式发行分别核对，不继承旧运行回执作为新候选证据。
 
 每版先执行 [发布点检表](RELEASE-CHECKLIST.md)。具体操作见 [FreeCAD 发布步骤](FREECAD-RELEASE-STEPS.md)，覆盖账号与元数据、实际打包、GitHub Release、npm 和 Addon Manager 收录。
 

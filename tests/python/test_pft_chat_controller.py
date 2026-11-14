@@ -159,6 +159,69 @@ class PftChatControllerTests(unittest.TestCase):
         self.transport.notify('turn/completed', {'threadId': 'private-thread-fixture',
             'turn': {'id': 'private-turn-fixture', 'items': items or [], 'status': status}})
 
+    def api_config(self, **changes):
+        config = self.effective_config()
+        config.update(forced_login_method="api", cli_auth_credentials_store="ephemeral",
+                      openai_base_url="https://api.openai.com/v1")
+        config.update(changes)
+        return config
+
+    def begin_api_connection(self, *, remember=None, mcp=None, version="0.167.0-alpha.3.2"):
+        self.configured_mcp = mcp
+        self.controller.connect("/opt/example/codex", "/var/example/freecad-api/config", self.cwd,
+                                mcp=mcp, api_key="synthetic-platform-key", remember_key=remember)
+        self.transport.result("initialize", {"userAgent": "codex_cli_rs/" + version + " (fixture)"})
+
+    def test_api_key_only_leaves_ui_over_verified_local_auth_rpc_and_remembers_after_reply(self):
+        saved = []
+        self.begin_api_connection(remember=saved.append, mcp=self.mcp_config())
+        self.assertNotIn("account/login/start", self.transport.methods())
+        self.transport.result("config/read", {"config": self.api_config()})
+        self.transport.result("account/read", {"requiresOpenaiAuth": True})
+        login = self.transport.messages[-1]
+        self.assertEqual(login["method"], "account/login/start")
+        self.assertEqual(login["params"], {"type": "apiKey", "apiKey": "synthetic-platform-key"})
+        self.transport.notify("account/login/completed", {"loginId": None, "success": True})
+        self.transport.notify("account/updated", {"authMode": "apikey"})
+        self.transport.result("account/login/start", {"type": "apiKey"})
+        self.transport.result("account/read", {"account": {"type": "apiKey"}, "requiresOpenaiAuth": True})
+        self.transport.result("model/list", {"data": [self.model_row()]})
+        self.assertTrue(self.controller.snapshot["can_send"])
+        self.assertFalse(self.controller.snapshot["api_verified"])
+        self.assertEqual(saved, [])
+        self.controller.send("Do not echo synthetic-platform-key")
+        self.assertEqual(self.controller.snapshot["error"]["code"], "CHAT_API_KEY_IN_MESSAGE")
+        self.controller.send("Read the neutral fixture")
+        self.transport.result("config/read", {"config": self.api_config()})
+        self.transport.result("mcpServerStatus/list", self.inventory())
+        thread = self.thread_result()
+        thread["thread"]["cliVersion"] = "0.167.0-alpha.3.2"
+        self.transport.result("thread/start", thread)
+        self.transport.result("mcpServerStatus/list", self.inventory(True))
+        self.transport.result("turn/start", {"turn": {"id": "private-turn-fixture", "status": "inProgress", "items": []}})
+        self.complete(items=[{"type": "agentMessage", "id": "fixture-answer", "text": "Neutral reply"}])
+        self.assertTrue(self.controller.snapshot["api_verified"])
+        self.assertEqual(saved, ["synthetic-platform-key"])
+        self.assertFalse(self.urls)
+        self.assertNotIn("synthetic-platform-key", str(self.transport.starts))
+        self.assertNotIn("synthetic-platform-key", str(self.events))
+        other = [message for message in self.transport.messages if message is not login]
+        self.assertNotIn("synthetic-platform-key", str(other))
+        self.controller.disconnect()
+        self.assertIsNone(self.controller._api_key)
+
+    def test_api_rejects_unverified_endpoints_old_cli_and_unexpected_accounts_before_submitting_key(self):
+        self.begin_api_connection(version="0.160.0")
+        self.assertEqual(self.controller.snapshot["error"]["code"], "CHAT_API_CLI_UNSUPPORTED")
+        self.begin_api_connection()
+        self.transport.result("config/read", {"config": self.api_config(openai_base_url="https://example.invalid/v1")})
+        self.assertEqual(self.controller.snapshot["error"]["code"], "CHAT_EFFECTIVE_CONFIG_REJECTED")
+        self.begin_api_connection()
+        self.transport.result("config/read", {"config": self.api_config()})
+        self.transport.result("account/read", {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True})
+        self.assertEqual(self.controller.snapshot["error"]["code"], "CHAT_API_ACCOUNT_CONFLICT")
+        self.assertNotIn("account/login/start", self.transport.methods())
+
     def test_public_connection_generation_changes_on_connect_and_disconnect(self):
         before = self.controller.snapshot['connection_generation']
         self.assertIs(type(before), int)

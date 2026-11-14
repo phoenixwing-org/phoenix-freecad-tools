@@ -110,6 +110,26 @@ def _reference(obj, document):
     return {"document": owner_name, "object": name, "external": owner is not document}
 
 
+def _scan_reference_registry(document, native_objects):
+    # Reuse the initial live-registration Name/Document reads; a later reference
+    # value is encoded only by id/is against this strong-reference snapshot.
+    # Membership is registered_at_scan, not an atomic/current link guarantee.
+    objects, registry = [], {}
+    for obj in native_objects:
+        try:
+            if obj.Document is not document:
+                continue
+            name = obj.Name
+            if type(name) is not str or document.getObject(name) is not obj:
+                continue
+        except Exception:
+            continue
+        objects.append(obj)
+        if _reference_text(name, allow_empty=False) is not None and len(name) <= 256:
+            registry[id(obj)] = (obj, name)
+    return objects, registry
+
+
 def _live(document, obj):
     try:
         return obj.Document is document and document.getObject(obj.Name) is obj
@@ -224,6 +244,19 @@ _VECTOR_LENGTH_TYPES = frozenset(("App::PropertyVectorDistance", "App::PropertyP
 _VECTOR_LIST_TYPE = "App::PropertyVectorList"
 _TRANSFORM_PROPERTY_KINDS = {"App::PropertyRotation": "rotation", "App::PropertyPlacement": "placement"}
 _PLACEMENT_LIST_TYPE = "App::PropertyPlacementList"
+# Fixed standard 1.1 reference families. Unknown/XLink unions stay unsupported.
+_REFERENCE_PROPERTY_KINDS = {
+    "App::PropertyLink": "reference", "App::PropertyLinkChild": "reference",
+    "App::PropertyLinkGlobal": "reference", "App::PropertyLinkHidden": "reference",
+    "App::PropertyLinkList": "reference_list", "App::PropertyLinkListChild": "reference_list",
+    "App::PropertyLinkListGlobal": "reference_list", "App::PropertyLinkListHidden": "reference_list",
+    "App::PropertyLinkSub": "subreference", "App::PropertyLinkSubChild": "subreference",
+    "App::PropertyLinkSubGlobal": "subreference", "App::PropertyLinkSubHidden": "subreference",
+    "App::PropertyLinkSubList": "subreference_list", "App::PropertyLinkSubListChild": "subreference_list",
+    "App::PropertyLinkSubListGlobal": "subreference_list", "App::PropertyLinkSubListHidden": "subreference_list",
+}
+_REFERENCE_KINDS = frozenset(_REFERENCE_PROPERTY_KINDS.values())
+
 # Fixed 1.1 native types inherit scalar getters, not their setter tuples.
 # Constraints are editable metadata, not a unit or a reader-side range rule.
 _CONSTRAINED_SCALAR_KINDS = {"App::PropertyIntegerConstraint": "integer", "App::PropertyPercent": "integer",
@@ -564,7 +597,99 @@ def _dimension_displays(app, dimensions, properties):
         row["display_dimensions"] = displays
 
 
-def _property_field(obj, name, properties, valid_list, explicit, use_user_units=False):
+def _reference_text(value, allow_empty=True):
+    # Copy native getter subname text; do not parse or resolve topology paths.
+    if type(value) is not str or len(value) > PFT_MAX_PROPERTY_BYTES or (not allow_empty and not value):
+        return None
+    if any(unicodedata.category(char) in ("Cc", "Cf", "Cs") for char in value):
+        return None
+    return value if len(value.encode("utf-8")) <= PFT_MAX_PROPERTY_BYTES else None
+
+
+def _reference_metadata():
+    return {"reference_source": "reported_native_reference", "registry_scope": "captured_document_registry",
+            "registry_membership": "registered_at_scan", "none_semantics": "no_live_target_reported",
+            "link_source_resolved": False, "subelement_validation": "not_performed"}
+
+
+def _property_reference(value, kind, reference_context):
+    # Bounds limit DTO work/output after the native getter has allocated its
+    # complete return value. No target Name/Document/Label/Shape is read here.
+    metadata = _reference_metadata()
+    def bad(status="unsupported", reason=None, limit=None):
+        result = {**metadata, "value": None, "status": status}
+        if reason is not None:
+            result["reference_status"] = reason
+        if limit is not None:
+            result.update(truncated=True, limit_reason=limit)
+        return result
+    if kind not in _REFERENCE_KINDS:
+        return bad()
+    if kind in ("reference_list", "subreference_list"):
+        if type(value) is not list:
+            return bad()
+        if len(value) > PFT_MAX_PROPERTY_LIST_ITEMS:
+            return bad("unknown", limit="item_limit")
+        entries = value
+    else:
+        entries = [value]
+    copied, sub_count = [], 0
+    for entry in entries:
+        # Scalar LinkSub None reports no target or subname list. Preserve that
+        # absence as null, not an invented empty stored subname sequence.
+        subnames = None if kind == "subreference" and entry is None else []
+        if kind in ("subreference", "subreference_list") and entry is not None:
+            if type(entry) is not tuple or len(entry) != 2 or entry[0] is None:
+                return bad()
+            target, names = entry
+            expected_type = list if kind == "subreference" else tuple
+            if type(names) is not expected_type:
+                return bad()
+            sub_count += len(names)
+            if sub_count > PFT_MAX_PROPERTY_LIST_ITEMS:
+                return bad("unknown", limit="subelement_limit")
+            text_bytes = 2
+            for text in names:
+                if type(text) is not str:
+                    return bad()
+                if _reference_text(text) is None:
+                    return bad("unknown", "invalid_reference_text")
+                text_bytes += len(json.dumps(text, ensure_ascii=False).encode("utf-8")) + bool(subnames)
+                if text_bytes > PFT_MAX_PROPERTY_BYTES:
+                    return bad("unknown", limit="utf8_budget")
+                subnames.append(text)
+        elif kind == "subreference_list":
+            return bad()
+        else:
+            target = entry
+        if target is None:
+            reference = None
+        else:
+            if type(reference_context) is not tuple or len(reference_context) != 2:
+                return bad("unknown", "registry_unavailable")
+            document_name, registry = reference_context
+            if type(registry) is not dict or _reference_text(document_name, allow_empty=False) is None:
+                return bad("unknown", "registry_unavailable")
+            registered = registry.get(id(target))
+            if type(registered) is not tuple or len(registered) != 2 or registered[0] is not target:
+                return bad("unknown", "not_in_captured_registry")
+            name = registered[1]
+            if _reference_text(name, allow_empty=False) is None:
+                return bad("unknown", "registry_unavailable")
+            reference = {"document": document_name, "object": name}
+        item = {"target": reference}
+        if kind in ("subreference", "subreference_list"):
+            item["subelements"] = subnames
+        copied.append(item)
+        result_value = copied if kind in ("reference_list", "subreference_list") else copied[0]
+        if len(json.dumps(result_value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > PFT_MAX_PROPERTY_BYTES:
+            return bad("unknown", limit="utf8_budget")
+    result_value = copied if kind in ("reference_list", "subreference_list") else copied[0]
+    return {**metadata, "value": result_value,
+            "status": "empty" if type(result_value) is list and not result_value else "available"}
+
+
+def _property_field(obj, name, properties, valid_list, explicit, use_user_units=False, reference_context=None):
     field = {"name": name, "type": None, "status": "read_failed", "value": None,
              "truncated": False, "sanitized": False}
     if explicit:
@@ -576,13 +701,15 @@ def _property_field(obj, name, properties, valid_list, explicit, use_user_units=
         return field
     try:
         native_type = obj.getTypeIdOfProperty(name)
-        field["type"] = _text(native_type, 256) if isinstance(native_type, str) else None
-        kind = _PROPERTY_KINDS.get(native_type) if isinstance(native_type, str) else None
-        if explicit and isinstance(native_type, str) and native_type in _QUANTITY_TYPES:
+        field["type"] = _text(native_type, 256) if type(native_type) is str else None
+        kind = _PROPERTY_KINDS.get(native_type) if type(native_type) is str else None
+        if explicit and type(native_type) is str and native_type in _REFERENCE_PROPERTY_KINDS:
+            kind = _REFERENCE_PROPERTY_KINDS[native_type]
+        if explicit and type(native_type) is str and native_type in _QUANTITY_TYPES:
             kind = "quantity"
         if kind is None or not explicit and kind != "string":
             field["status"] = "unsupported"
-            return field  # Do not even get unsupported properties (Links, Shape, Python objects).
+            return field  # Do not get unknown/XLink/Shape/Python properties or non-string BOM fields.
         if explicit:
             field["kind"] = kind
             if kind == "quantity" and use_user_units:
@@ -594,7 +721,9 @@ def _property_field(obj, name, properties, valid_list, explicit, use_user_units=
             elif kind in _TRANSFORM_PROPERTY_KINDS.values():
                 field.update(_transform_metadata(kind))
         value = getattr(obj, name)
-        if value is None:
+        if kind in _REFERENCE_KINDS:
+            field.update(_property_reference(value, kind, reference_context))
+        elif value is None:
             field["status"] = "unknown" if explicit else "unsupported"
         elif kind in ("string", "enumeration"):
             if not isinstance(value, str):
@@ -639,7 +768,7 @@ def _property_field(obj, name, properties, valid_list, explicit, use_user_units=
     return field
 
 
-def _object_properties(objects, names, explicit=False, use_user_units=False):
+def _object_properties(objects, names, explicit=False, use_user_units=False, reference_context=None):
     """Read selected native objects only; never follow Links or introspect arbitrary values."""
     if not names:
         return []
@@ -653,7 +782,7 @@ def _object_properties(objects, names, explicit=False, use_user_units=False):
                "locality": "not_verified", "link_source_resolved": False,
                "status": "available" if valid_list else "read_failed", "fields": []}
         for name in names:
-            field = _property_field(obj, name, properties, valid_list, explicit, use_user_units)
+            field = _property_field(obj, name, properties, valid_list, explicit, use_user_units, reference_context)
             if field["status"] == "read_failed":
                 row["status"] = "read_failed"
             row["fields"].append(field)
@@ -677,7 +806,12 @@ def read_document_tools(app, gui, document_name=None, target_names=None, propert
     native_objects = _items(_value(document, "Objects", []))
     if len(native_objects) > PFT_MAX_SCAN_OBJECTS:
         raise PftDocumentToolsError("DOCUMENT_TOO_LARGE", "当前文档对象超过2000项，未自动扫描；请使用较小文档或专用查询。")
-    objects = [obj for obj in native_objects if _live(document, obj)]
+    reference_registry, reference_document_name = None, None
+    if property_names is not None and names:
+        reference_document_name = _value(document, "Name")
+        objects, reference_registry = _scan_reference_registry(document, native_objects)
+    else:
+        objects = [obj for obj in native_objects if _live(document, obj)]
     containers = {id(obj): _items(_value(obj, "Group", [])) for obj in objects
                   if _value(obj, "TypeId") in ("PartDesign::Body", "App::Part")}
     body_members = {id(child) for obj in objects if _value(obj, "TypeId") == "PartDesign::Body" for child in containers.get(id(obj), [])}
@@ -745,7 +879,8 @@ def read_document_tools(app, gui, document_name=None, target_names=None, propert
         warnings.append("同时选择了容器和内部对象；尺寸逐对象报告，不合并几何。")
     dimensions = [_dimension(shapes[name], *_shape(shapes[name])) for name in selected_names]
     properties = _object_properties([shapes[name] for name in selected_names], names,
-                                    explicit=property_names is not None, use_user_units=use_user_units)
+                                    explicit=property_names is not None, use_user_units=use_user_units,
+                                    reference_context=(reference_document_name, reference_registry))
     if use_user_units:
         _dimension_displays(app, dimensions, properties)
     if any(not _live(document, shapes[name]) for name in selected_names):
@@ -846,6 +981,11 @@ def _property_display(field, tr, use_user_units=False):
                 "representation", "quaternion_normalization", "quaternion_normalized_by_tool")})
             if field["kind"] in ("placement", "placement_list"):
                 description["component_units"] = field["component_units"]
+        return json.dumps({"value": value, **description}, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    if field.get("kind") in _REFERENCE_KINDS and type(value) in (dict, list):
+        description = {key: field[key] for key in (
+            "reference_source", "registry_scope", "registry_membership", "none_semantics",
+            "link_source_resolved", "subelement_validation")}
         return json.dumps({"value": value, **description}, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     if (isinstance(value, dict) and value.get("kind") == "quantity" and value.get("unit_system") == "freecad_internal"
             and _finite_property_number(value.get("value")) is not None and isinstance(value.get("unit"), str)):

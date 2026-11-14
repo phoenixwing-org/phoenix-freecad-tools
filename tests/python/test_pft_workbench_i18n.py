@@ -85,6 +85,7 @@ class Button:
     def setToolTip(self, value): self.tooltip = value
     def setDefault(self, value): self.default = value
     def setAutoDefault(self, value): self.auto_default = value
+    def setFocus(self): self.focused = True
 
 
 class SizingPolicy:
@@ -112,11 +113,13 @@ class FakeWidgets:
             result = 0
             on_exec = None
 
-            def __init__(self, parent): owner.dialogs.append(self)
+            def __init__(self, parent): self.parent = parent; owner.dialogs.append(self)
+            def setObjectName(self, name): self.object_name = name
             def setWindowTitle(self, title): self.title = title
             def resize(self, *args): self.initial_size = args
             def accept(self): pass
             def reject(self): pass
+            def deleteLater(self): self.deleted = True
             def exec(self):
                 if type(self).on_exec:
                     type(self).on_exec()
@@ -481,6 +484,20 @@ class SettingsDialogTests(unittest.TestCase):
                 self.assertIn(expected, self.widgets.labels[-1].text)
         self.widgets.QDialog.result = 1
         self.assertTrue(views.confirm_mcp_stop(self.gui))
+
+    def test_port_conflict_requires_explicit_affirmative_button_and_defaults_cancel(self):
+        window = self.gui.getMainWindow()
+        self.widgets.QDialog.result = 1  # A direct accept does not authorize enabling discovery.
+        self.assertFalse(views.confirm_mcp_port_conflict(window, 12345))
+        dialog = self.widgets.dialogs[-1]
+        self.assertIs(dialog.parent, window)
+        self.assertTrue(dialog.deleted)
+        start, cancel = self.widgets.boxes[-1].button(1), self.widgets.boxes[-1].button(2)
+        self.assertTrue(cancel.default and cancel.focused)
+        self.assertFalse(start.default or start.auto_default)
+        self.assertIn("127.0.0.1:12345", self.widgets.labels[-1].text)
+        self.widgets.QDialog.on_exec = lambda: self.widgets.boxes[-1].button(1).clicked.emit()
+        self.assertTrue(views.confirm_mcp_port_conflict(window, 12345))
 
     def test_new_english_label_dialog_translates_chrome_and_keeps_user_values(self):
         i18n.set_language('en')

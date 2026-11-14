@@ -4,7 +4,7 @@ from datetime import datetime
 import re
 
 from pft_workbench_i18n import ENGLISH, tr
-from pft_chat_transcript import render_chat_transcript
+from pft_chat_transcript import make_chat_markdown_formatter, render_chat_transcript
 from pft_panel_host import mount_panel_dock, present_panel
 from pft_quick_toolbar import compact_icon_button, create_quick_toolbar
 
@@ -93,6 +93,7 @@ def show_chat_connection_dialog(app, gui, get_status):
 
     dialog = PftChatDock(parent)
     dialog._closed = False
+    mode, deepseek = "codex", None
     # Use real QObject slot receivers, not Qt's generic Python callable context.
     # Retain senders and receivers for this dock; never reconnect on use.
     dialog._action_bindings = []
@@ -138,6 +139,11 @@ def show_chat_connection_dialog(app, gui, get_status):
     def mark_destroyed(_object=None):
         dialog._closed = True
         dialog._quick_toolbar.invalidate()
+        if deepseek is not None:
+            try:
+                deepseek.disconnect()
+            except RuntimeError:
+                pass
         for receiver in dialog._action_receivers:
             receiver.invalidate()
         dialog._action_bindings.clear()
@@ -152,15 +158,13 @@ def show_chat_connection_dialog(app, gui, get_status):
     dialog.setMinimumWidth(300)
     content = QtWidgets.QWidget(dialog)
     layout = QtWidgets.QVBoxLayout(content)
-    shortcut_error = [None]
+    local_diagnostic = [None]
     def shortcut_succeeded():
-        shortcut_error[0] = None
+        local_diagnostic[0] = None
         refresh_status(controller.snapshot)
 
     def shortcut_failed(diagnostic):
-        message = _error_copy_text(diagnostic)
-        shortcut_error[0] = (controller.snapshot.get("connection_generation"), diagnostic)
-        set_status(message, diagnostic)
+        message = show_local_error(diagnostic)
         printer = getattr(getattr(app, "Console", None), "PrintError", None)
         if callable(printer):
             try:
@@ -202,10 +206,16 @@ def show_chat_connection_dialog(app, gui, get_status):
 
     def set_status(message, error=None):
         if error is None:
-            shortcut_error[0] = None
+            local_diagnostic[0] = None
         status.setText(message)
         error_clipboard_text[0] = _error_copy_text(error)
         copy_error.setVisible(bool(error_clipboard_text[0]))
+
+    def show_local_error(diagnostic):
+        local_diagnostic[0] = (controller.snapshot.get("connection_generation"), diagnostic)
+        message = _error_copy_text(diagnostic)
+        set_status(message, diagnostic)
+        return message
 
     def copy_status_error():
         if not dialog._closed and error_clipboard_text[0]:
@@ -221,19 +231,35 @@ def show_chat_connection_dialog(app, gui, get_status):
     preferences = load_chat_preferences(app)
     settings_box = shrink_horizontal(QtWidgets.QWidget(content))
     settings_box.setObjectName("PhoenixTools_ChatSettings")
-    settings_layout = QtWidgets.QVBoxLayout(settings_box)
+    settings_root = QtWidgets.QVBoxLayout(settings_box)
+    settings_root.addWidget(label(tr("连接方式")))
+    provider_choice = shrink_horizontal(QtWidgets.QComboBox())
+    provider_choice.setObjectName("PhoenixTools_ChatProvider")
+    provider_choice.addItem(tr("Codex · ChatGPT 登录"), "codex")
+    provider_choice.addItem(tr("Codex · OpenAI API Key"), "openai")
+    provider_choice.addItem(tr("DeepSeek · API Key 直连"), "deepseek")
+    settings_root.addWidget(provider_choice)
+    disconnect = QtWidgets.QPushButton(tr("断开"))
+    disconnect.setObjectName("PhoenixTools_ChatDisconnect")
+    settings_root.addWidget(disconnect)
+    codex_settings = QtWidgets.QWidget(settings_box)
+    settings_root.addWidget(codex_settings)
+    settings_layout = QtWidgets.QVBoxLayout(codex_settings)
+    settings_layout.setContentsMargins(0, 0, 0, 0)
     note = label(tr("在 FreeCAD 内使用 Codex 聊天，通过 ChatGPT 浏览器登录。使用本窗口的独立会话；可启用 FreeCAD 工具，改名和属性修改需在原生窗口确认。图纸 PDF 需在原生窗口捕获预览、选择路径并确认发布。"))
     settings_layout.addWidget(note)
-    settings_layout.addWidget(label(tr("Codex 执行文件")))
+    program_settings = QtWidgets.QWidget(settings_box)
+    settings_root.addWidget(program_settings)
+    program_layout = QtWidgets.QVBoxLayout(program_settings)
+    program_layout.setContentsMargins(0, 0, 0, 0)
+    program_layout.addWidget(label(tr("Codex 执行文件")))
     path_row = QtWidgets.QHBoxLayout()
     program = shrink_horizontal(QtWidgets.QLineEdit(detect_codex_executable()))
     program.setObjectName("PhoenixTools_ChatExecutable")
     browse = QtWidgets.QPushButton(tr("浏览…"))
     browse.setObjectName("PhoenixTools_ChatBrowse")
     path_row.addWidget(program, 1); path_row.addWidget(browse)
-    settings_layout.addLayout(path_row)
-    disconnect = QtWidgets.QPushButton(tr("断开")); disconnect.setObjectName("PhoenixTools_ChatDisconnect")
-    settings_layout.addWidget(disconnect)
+    program_layout.addLayout(path_row)
     check_registration = QtWidgets.QPushButton(tr("检查聊天进程登记"))
     check_registration.setObjectName("PhoenixTools_ChatCheckProcessRegistration")
     settings_layout.addWidget(check_registration)
@@ -256,6 +282,39 @@ def show_chat_connection_dialog(app, gui, get_status):
         enable_desk.setEnabled(enable_tools.isEnabled() and enable_tools.isChecked())
     connect_action(enable_tools, enable_tools.toggled, update_desk_option)
     update_desk_option()
+    deepseek_settings = QtWidgets.QWidget(settings_box)
+    deepseek_settings.hide()
+    settings_root.addWidget(deepseek_settings)
+    deep_layout = QtWidgets.QVBoxLayout(deepseek_settings)
+    deep_layout.setContentsMargins(0, 0, 0, 0)
+    api_key_label = label(tr("DeepSeek API Key"))
+    deep_layout.addWidget(api_key_label)
+    deepseek_key = shrink_horizontal(QtWidgets.QLineEdit())
+    deepseek_key.setObjectName("PhoenixTools_DeepSeekKey")
+    deepseek_key.setEchoMode(_qt_enum(QtWidgets.QLineEdit, "EchoMode", "Password"))
+    deepseek_key.setMaxLength(512)
+    deep_layout.addWidget(deepseek_key)
+    key_options = QtWidgets.QHBoxLayout()
+    remember_key = QtWidgets.QCheckBox(tr("记住 Key"))
+    remember_key.setObjectName("PhoenixTools_DeepSeekRememberKey")
+    remember_key.setChecked(True)
+    clear_key = QtWidgets.QPushButton(tr("清除 Key"))
+    clear_key.setObjectName("PhoenixTools_DeepSeekClearKey")
+    key_options.addWidget(remember_key)
+    key_options.addStretch(1)
+    key_options.addWidget(clear_key)
+    deep_layout.addLayout(key_options)
+    api_endpoint = label()
+    deep_layout.addWidget(api_endpoint)
+    deepseek_tools = QtWidgets.QCheckBox(tr("启用 FreeCAD 工具"))
+    deepseek_tools.setObjectName("PhoenixTools_DeepSeekEnableTools")
+    deep_layout.addWidget(deepseek_tools)
+    api_tool_note = label()
+    deep_layout.addWidget(api_tool_note)
+    deepseek_test = QtWidgets.QPushButton(tr("测试 DeepSeek 连接"))
+    deepseek_test.setObjectName("PhoenixTools_DeepSeekTest")
+    deep_layout.addWidget(deepseek_test)
+    settings_layout = settings_root
     settings_layout.addWidget(label(tr("聊天模型")))
     model_row = QtWidgets.QHBoxLayout()
     model_choice = shrink_horizontal(QtWidgets.QComboBox())
@@ -287,6 +346,10 @@ def show_chat_connection_dialog(app, gui, get_status):
     save_preferences = QtWidgets.QPushButton(tr("保存聊天设置"))
     save_preferences.setObjectName("PhoenixTools_ChatSavePreferences")
     settings_layout.addWidget(save_preferences)
+    codex_details = QtWidgets.QWidget(settings_box)
+    settings_root.addWidget(codex_details)
+    settings_layout = QtWidgets.QVBoxLayout(codex_details)
+    settings_layout.setContentsMargins(0, 0, 0, 0)
     retain_history = shrink_horizontal(QtWidgets.QCheckBox(tr("保留新聊天")))
     retain_history.setObjectName("PhoenixTools_ChatRetainHistory")
     retain_history.setChecked(load_chat_history_preference(app))
@@ -304,6 +367,10 @@ def show_chat_connection_dialog(app, gui, get_status):
     session_status = label(tr("尚未读取保存的会话。仅列出本插件登记的会话，选择后点击连接。"))
     session_status.setObjectName("PhoenixTools_ChatSavedSessionsStatus")
     settings_layout.addWidget(session_status)
+    tools_paths = QtWidgets.QWidget(settings_box)
+    settings_root.addWidget(tools_paths)
+    settings_layout = QtWidgets.QVBoxLayout(tools_paths)
+    settings_layout.setContentsMargins(0, 0, 0, 0)
     path_fields = []
     for title, key, object_name in (("Node 执行文件", "node_executable", "PhoenixTools_ChatNode"),
                                     ("MCP CLI 文件", "cli_entry", "PhoenixTools_ChatMCPCLI")):
@@ -322,10 +389,15 @@ def show_chat_connection_dialog(app, gui, get_status):
     save_tools.setObjectName("PhoenixTools_ChatSaveTools")
     settings_layout.addWidget(save_tools)
     settings_layout.addWidget(label(tr("需要 Node 22 或更新版本及已构建的 Phoenix MCP。设置在下次连接生效；不会下载、编译或启动桥接。")))
+    settings_layout = settings_root
+    def show_tool_paths():
+        tools_paths.setVisible(mode == "codex" or deepseek_tools.isChecked())
+    connect_action(deepseek_tools, deepseek_tools.toggled, show_tool_paths)
+
     copy = QtWidgets.QPushButton(tr("复制给现有聊天")); copy.setObjectName("PftChatCopyPrompt")
     official = QtWidgets.QPushButton(tr("官方接入说明")); official.setObjectName("PftChatOfficialDocs")
     close = QtWidgets.QPushButton(tr("关闭")); close.setObjectName("PftChatClose")
-    for button in (copy, official, close): settings_layout.addWidget(button)
+    for button in (copy, official): settings_layout.addWidget(button)
     bridge = label(); bridge.setObjectName("PftChatBridgeStatus")
     try:
         snapshot = get_status()
@@ -334,6 +406,8 @@ def show_chat_connection_dialog(app, gui, get_status):
     except Exception:
         bridge.setText(tr("桥接状态读取失败，请查看工作台状态。"))
     settings_layout.addWidget(bridge)
+    settings_layout = settings_root
+    settings_layout.addWidget(close)
     tool_status = label()
     tool_status.setObjectName("PhoenixTools_ChatToolStatus")
     tool_status.hide()
@@ -341,9 +415,14 @@ def show_chat_connection_dialog(app, gui, get_status):
     settings_box.hide()
     layout.addWidget(settings_box)
 
+    def blocked_resource():
+        return QtCore.QByteArray(b"pft-chat-resource-blocked")
+
+    markdown = make_chat_markdown_formatter(QtGui, blocked_resource)
+
     class PftChatTranscript(QtWidgets.QTextBrowser):
         def loadResource(self, _kind, _url):
-            return None
+            return blocked_resource()
 
     transcript = shrink_horizontal(PftChatTranscript()); transcript.setReadOnly(True)
     transcript.setOpenExternalLinks(False)
@@ -395,7 +474,7 @@ def show_chat_connection_dialog(app, gui, get_status):
 
     def registration_context():
         """Memory-only gate; opening settings never inspects the profile."""
-        if dialog._closed:
+        if dialog._closed or mode != "codex":
             return None
         try:
             snapshot = controller.snapshot
@@ -548,6 +627,8 @@ def show_chat_connection_dialog(app, gui, get_status):
         error = snapshot.get("error")
         recovering = bool(error and error.get("code") == "CHAT_SERVICE_RECONNECTING")
         message = tr(_PHASES.get(phase, "聊天连接失败"))
+        if phase == "connecting" and mode != "codex":
+            message = tr("正在测试 DeepSeek 连接…" if mode == "deepseek" else "正在连接 OpenAI API…")
         if phase == "logging_in":
             message = tr({"requesting_link": "正在获取登录链接…",
                           "browser_open_failed": "登录页面尚未打开"}.get(
@@ -567,13 +648,20 @@ def show_chat_connection_dialog(app, gui, get_status):
             message += " · " + tr(pattern) % elapsed
             if first is not None:
                 tooltip = tr("首条回复耗时：%s 秒") % ("%g" % round(first, 1))
+        if mode != "codex":
+            if mode == "openai" and phase == "ready" and not snapshot.get("api_verified"):
+                message = tr("Key 已载入，发送消息验证")
+            message += " · " + ("DeepSeek" if mode == "deepseek" else "OpenAI API")
+            displayed_model = snapshot.get("reported_model") if mode == "deepseek" else snapshot.get("model")
+            if displayed_model:
+                message += " · " + displayed_model
         if snapshot.get("mcp_enabled"):
             message += " · " + tr("FreeCAD 工具模式")
         if snapshot.get("desk_enabled"):
             message += " · " + tr("Desk 数据工具")
-        local_error = shortcut_error[0]
+        local_error = local_diagnostic[0]
         if local_error is not None and local_error[0] != snapshot.get("connection_generation"):
-            local_error = shortcut_error[0] = None
+            local_error = local_diagnostic[0] = None
         if local_error is not None:
             message += "\n" + _error_copy_text(local_error[1])
         set_status(message, local_error[1] if local_error is not None else error)
@@ -602,6 +690,11 @@ def show_chat_connection_dialog(app, gui, get_status):
             status_timer.stop()
         update_registration_availability()
         configurable = phase in ("disconnected", "error")
+        provider_choice.setEnabled(configurable and getattr(process, "has_active_session", False) is not True)
+        deepseek_key.setEnabled(configurable)
+        deepseek_test.setEnabled(configurable)
+        remember_key.setEnabled(configurable)
+        deepseek_tools.setEnabled(configurable)
         retain_history.setEnabled(configurable)
         saved_sessions.setEnabled(configurable)
         list_sessions.setEnabled(registration_context() is not None)
@@ -635,7 +728,7 @@ def show_chat_connection_dialog(app, gui, get_status):
             dark = False
         html = render_chat_transcript(snapshot["transcript"], tr("你"),
                                       snapshot.get("message_times", ()), dark=dark,
-                                      interrupted_label=tr("已停止"), error_label=tr("未完成"))
+                                      interrupted_label=tr("已停止"), error_label=tr("未完成"), markdown=markdown)
         if html != rendered_html[0]:
             bar = transcript.verticalScrollBar()
             follow = bar.value() >= bar.maximum() - 4
@@ -647,8 +740,21 @@ def show_chat_connection_dialog(app, gui, get_status):
     def open_url(url):
         return QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
-    process = PftChatProcess(QtCore, dialog, lease_factory=acquire_process_lease)
-    controller = PftChatController(process, changed, open_url)
+    api_profile = None
+
+    def claim_profile(home, cwd, executable):
+        if api_profile is not None:
+            return api_profile.claim(home, cwd, executable)
+        return acquire_process_lease(home, cwd, executable)
+
+    process = PftChatProcess(QtCore, dialog, lease_factory=claim_profile)
+    def codex_changed(snapshot):
+        if mode != "deepseek":
+            changed(snapshot)
+
+    codex = PftChatController(process, codex_changed, open_url)
+    controller = codex
+    codex_model = model_choice.currentData()
     dialog._controller = controller
     dialog._process = process
     status_timer = QtCore.QTimer(dialog)
@@ -658,14 +764,96 @@ def show_chat_connection_dialog(app, gui, get_status):
             return
         refresh_status(controller.snapshot)
         update_registration_availability()
+        provider_choice.setEnabled(controller.snapshot["phase"] in ("disconnected", "error")
+                                   and getattr(process, "has_active_session", False) is not True)
         if not controller.snapshot.get("is_busy") and getattr(process, "has_active_session", False) is not True:
             status_timer.stop()
     connect_action(status_timer, status_timer.timeout, refresh_memory_status, signature="none")
     dialog._status_timer = status_timer
 
+    def api_credentials(provider):
+        from pft_api_credentials import PftApiCredentialStore
+        if provider == "deepseek":
+            from pft_chat_deepseek import DEEPSEEK_BASE_URL
+            endpoint = DEEPSEEK_BASE_URL
+        else:
+            from pft_chat_profile import OPENAI_API_BASE_URL
+            endpoint = OPENAI_API_BASE_URL
+        return PftApiCredentialStore(app.getUserAppDataDir(), provider, endpoint)
+
+    def clear_api_key():
+        if mode == "codex":
+            return
+        controller.disconnect()
+        deepseek_key.setText("")
+        try:
+            api_credentials(mode).clear()
+        except (OSError, ValueError):
+            set_status(tr("无法清除已保存的 Key，请检查本地凭据目录的权限。"))
+        else:
+            set_status(tr("已清除 DeepSeek Key。" if mode == "deepseek" else "已清除 OpenAI Key。"))
+
     def connect_client():
-        shortcut_error[0] = None
+        nonlocal api_profile
+        local_diagnostic[0] = None
         registration_activity[0] += 1
+        if mode != "codex":
+            if controller.snapshot["phase"] not in ("disconnected", "error"):
+                return
+            key = deepseek_key.text().strip()
+            save_key = None
+            if key:
+                if remember_key.isChecked():
+                    def save_key(value, provider=mode):
+                        api_credentials(provider).save(value)
+            else:
+                try:
+                    key = api_credentials(mode).load()
+                except (OSError, ValueError):
+                    set_status(tr("无法读取已保存的 Key，请清除后重新填写。"))
+                    settings_toggle.setChecked(True)
+                    return
+            if not key:
+                settings_toggle.setChecked(True)
+                if mode == "openai":
+                    set_status(tr("请输入有效的 OpenAI API Key。"))
+                    return
+            mcp = None
+            if key and deepseek_tools.isChecked():
+                try:
+                    from pft_chat_mcp import PftChatMcp
+                    config = build_chat_mcp_config({"enabled": True, "node_executable": node.text(),
+                                                    "cli_entry": cli.text()}, get_status())
+                    mcp = (PftChatMcp(PftChatProcess(QtCore, dialog, mcp_stdio=True), config, get_status)
+                           if mode == "deepseek" else config)
+                except PftChatSettingsError as error:
+                    show_local_error({"code": error.code, "message": str(error)})
+                    return
+                except (OSError, ValueError, RuntimeError):
+                    set_status(tr("无法核验本窗口的 FreeCAD MCP 连接。"))
+                    return
+            if mode == "deepseek":
+                deepseek_key.setText("")
+                controller.connect(key, remember_key=save_key, mcp=mcp)
+                return
+            try:
+                from pft_chat_profile import prepare_chat_api_profile
+                executable = validate_executable(program.text())
+                profile = prepare_chat_api_profile(app.getUserAppDataDir())
+                lease = profile["lease"]
+                api_profile = lease
+                try:
+                    deepseek_key.setText("")
+                    controller.connect(executable, profile["home"], profile["cwd"], mcp=mcp,
+                                       api_key=key, remember_key=save_key)
+                finally:
+                    api_profile = None
+                    if not lease.claimed:
+                        lease.release_failed_to_start()
+            except (OSError, PftChatProfileError) as error:
+                message = str(error) if isinstance(error, PftChatProfileError) else "无法创建专属 API 聊天目录。"
+                set_status(tr(message))
+            return
         try:
             executable = validate_executable(program.text())
             selected = {"enabled": enable_tools.isChecked(), "desk_enabled": enable_desk.isChecked(),
@@ -684,13 +872,27 @@ def show_chat_connection_dialog(app, gui, get_status):
                                    "resume_session": selected_session}
             controller.connect(executable, profile["home"], profile["cwd"], mcp=mcp,
                                model_id=model_choice.currentData() or None, **history_options)
-        except (PftChatProfileError, PftChatSettingsError, PftChatSessionStoreError) as error:
+        except PftChatSettingsError as error:
+            if error.code in ("CHAT_BRIDGE_NOT_RUNNING", "CHAT_BRIDGE_STOPPING"):
+                show_local_error({"code": error.code, "message": str(error)})
+            else:
+                set_status(tr(str(error)))
+        except (PftChatProfileError, PftChatSessionStoreError) as error:
             set_status(tr(str(error)))
         except Exception:
             set_status(tr("无法连接聊天，请核对 Codex 与专属目录。"))
 
     def save_tool_settings():
         try:
+            if mode != "codex":
+                from pft_chat_settings import validate_mcp_paths
+                paths = validate_mcp_paths(node.text(), cli.text())
+                current = load_chat_options(app)
+                saved = save_chat_options(app, current["enabled"], **paths,
+                                          desk_enabled=current["desk_enabled"])
+                node.setText(saved["node_executable"]); cli.setText(saved["cli_entry"])
+                set_status(tr("工具设置已保存，下次连接生效。"))
+                return
             if enable_desk.isChecked():
                 load_chat_desk_configuration(app)
             saved = save_chat_options(app, enable_tools.isChecked(), node.text(), cli.text(),
@@ -709,6 +911,70 @@ def show_chat_connection_dialog(app, gui, get_status):
         except PftChatSettingsError as error:
             set_status(tr(str(error)))
 
+    def choose_provider():
+        nonlocal mode, controller, deepseek, codex_model
+        requested = provider_choice.currentData()
+        if requested == mode:
+            return
+        if controller.snapshot["phase"] not in ("disconnected", "error") or getattr(process, "has_active_session", False) is True:
+            provider_choice.setCurrentIndex(provider_choice.findData(mode))
+            return
+        if requested == "deepseek" and deepseek is None:
+            try:
+                from pft_chat_deepseek import PftDeepSeekChat
+                from pft_chat_http import make_deepseek_http
+                def direct_changed(snapshot):
+                    if mode == "deepseek":
+                        changed(snapshot)
+                deepseek = PftDeepSeekChat(make_deepseek_http(QtCore, dialog), direct_changed)
+            except Exception:
+                provider_choice.setCurrentIndex(provider_choice.findData(mode))
+                set_status(tr("当前 FreeCAD 无法初始化 DeepSeek 网络组件。"))
+                return
+        if mode == "codex":
+            codex_model = model_choice.currentData()
+        controller.disconnect()
+        mode = requested
+        controller = deepseek if mode == "deepseek" else codex
+        dialog._controller = controller
+        registration_activity[0] += 1
+        local_diagnostic[0] = pending_submission[0] = None
+        entry.clear()
+        deepseek_key.setText("")
+        model_choice.blockSignals(True)
+        try:
+            model_choice.clear()
+            model_choice.addItem(tr("服务默认"), "")
+            if mode == "codex" and codex_model:
+                model_choice.addItem(codex_model, codex_model)
+                model_choice.setCurrentIndex(1)
+        finally:
+            model_choice.blockSignals(False)
+        rendered_models[0] = None
+        codex_settings.setVisible(mode == "codex")
+        codex_details.setVisible(mode == "codex")
+        program_settings.setVisible(mode != "deepseek")
+        deepseek_tools.setChecked(False)
+        remember_key.setChecked(True)
+        show_tool_paths()
+        save_preferences.setVisible(mode == "codex")
+        deepseek_settings.setVisible(mode != "codex")
+        prefix = "PhoenixTools_OpenAI" if mode == "openai" else "PhoenixTools_DeepSeek"
+        for field, suffix in ((deepseek_key, "Key"), (remember_key, "RememberKey"),
+                              (clear_key, "ClearKey"), (deepseek_tools, "EnableTools"), (deepseek_test, "Test")):
+            field.setObjectName(prefix + suffix)
+        api_key_label.setText(tr("OpenAI API Key" if mode == "openai" else "DeepSeek API Key"))
+        api_endpoint.setText(tr("消息发送至 api.openai.com。首条回复成功后可记住 Key。" if mode == "openai"
+                                else "消息发送至 api.deepseek.com。留空可复用已保存的 Key。"))
+        api_tool_note.setText(tr("启用后，本窗口的工具结果会发送给当前服务商。"))
+        button = {"openai": "连接 OpenAI API", "deepseek": "测试 DeepSeek 连接", "codex": "连接 Codex"}[mode]
+        connect.setText(tr(button))
+        deepseek_test.setText(tr(button))
+        transcript.setPlaceholderText(tr("填写 OpenAI API Key 或留空复用已保存的 Key。" if mode == "openai"
+            else "填写 DeepSeek API Key 或复用已保存的 Key，测试连接后即可发送消息。" if mode == "deepseek"
+            else "点击“连接 Codex”，登录后即可发送消息。"))
+        changed(controller.snapshot)
+
     def choose_model():
         if controller.snapshot.get("can_select_model"):
             controller.select_model(model_choice.currentData() or None)
@@ -717,7 +983,10 @@ def show_chat_connection_dialog(app, gui, get_status):
     connect_action(save_preferences, save_preferences.clicked, save_chat_settings)
     connect_action(list_sessions, list_sessions.clicked, list_saved_sessions)
     connect_action(model_choice, model_choice.currentIndexChanged, choose_model, signature="int")
-    connect_action(refresh_models, refresh_models.clicked, controller.refresh_models)
+    connect_action(refresh_models, refresh_models.clicked, lambda: controller.refresh_models())
+    connect_action(provider_choice, provider_choice.currentIndexChanged, choose_provider, signature="int")
+    connect_action(deepseek_test, deepseek_test.clicked, connect_client)
+    connect_action(clear_key, clear_key.clicked, clear_api_key)
     connect_action(font_choice, font_choice.currentIndexChanged, apply_chat_font, signature="int")
     apply_chat_font()
 
@@ -732,7 +1001,7 @@ def show_chat_connection_dialog(app, gui, get_status):
                 or not snapshot.get("can_send")):
             return
         text = entry.toPlainText()
-        shortcut_error[0] = None
+        local_diagnostic[0] = None
         pending_submission[0] = (text, len(controller.snapshot["transcript"]))
         try:
             controller.send(text)
@@ -751,14 +1020,14 @@ def show_chat_connection_dialog(app, gui, get_status):
     connect_action(login, login.clicked, controller.login)
     connect_action(reopen_login, reopen_login.clicked, controller.reopen_login)
     connect_action(copy_login, copy_login.clicked, copy_pending_login_link)
-    connect_action(disconnect, disconnect.clicked, controller.disconnect)
+    connect_action(disconnect, disconnect.clicked, lambda: controller.disconnect())
     connect_action(check_registration, check_registration.clicked, check_process_registration)
     def toggle_settings(checked):
         settings_box.setVisible(checked)
         update_registration_availability()
     toolbar.bind_settings(toggle_settings, pass_checked=True)
     connect_action(send, send.clicked, send_message)
-    connect_action(stop, stop.clicked, controller.interrupt)
+    connect_action(stop, stop.clicked, lambda: controller.interrupt())
     connect_action(copy, copy.clicked, lambda: QtWidgets.QApplication.clipboard().setText(tr(PFT_CHAT_PROMPT)))
     connect_action(official, official.clicked, lambda: open_url("https://learn.chatgpt.com/docs/app-server"))
     connect_action(close, close.clicked, dialog.close)

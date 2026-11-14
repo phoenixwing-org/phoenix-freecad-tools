@@ -20,7 +20,7 @@ ADDON = "PhoenixFreeCADTools"
 ADDON_FILES = (
     "Init.py", "InitGui.py", "package.xml", "HELP.md",
     "pft_bridge.py", "pft_instance_registry.py", "pft_worker_input.py", "pft_thumbnail_worker.py", "pft_business.py", "pft_mcp_settings.py", "pft_mcp_settings_views.py",
-    "pft_part_approval_views.py", "pft_pad_length.py", "pft_pad_contract.py",
+    "pft_part_approval_views.py", "pft_pad_length.py", "pft_pad_contract.py", "pft_basic_part.py",
     "pft_drawing.py", "pft_drawing_contract.py", "pft_drawing_references.py",
     "pft_draft_layout.py", "pft_draft_layout_views.py",
     "pft_drawing_dimensions.py", "pft_drawing_dimensions_contract.py", "pft_development.py",
@@ -36,6 +36,7 @@ ADDON_FILES = (
     "pft_desk_service.py", "pft_desk_controller.py", "pft_desk_qprocess.py",
     "pft_desk_views.py", "pft_desk_prompt.py", "pft_chat_views.py",
     "pft_chat_transcript.py", "pft_chat_network.py", "pft_chat_profile.py", "pft_chat_process_lease.py", "pft_chat_session_store.py", "pft_chat_history.py", "pft_chat_settings.py", "pft_visual_tools.py", "pft_chat_controller.py", "pft_chat_qprocess.py",
+    "pft_chat_deepseek.py", "pft_chat_http.py", "pft_api_credentials.py", "pft_chat_mcp.py",
     "pft_document_tools.py", "pft_file_publish.py", "pft_document_tools_views.py", "pft_panel_host.py",
     "pft_thumbnail.py", "pft_thumbnail_framing.py", "pft_thumbnail_capture.py", "pft_thumbnail_views.py", "pft_appearance_views.py", "pft_appearance_controls.py", "pft_design_inspection.py",
     "Resources/icons/mcp-start.svg", "Resources/icons/mcp-stop.svg",

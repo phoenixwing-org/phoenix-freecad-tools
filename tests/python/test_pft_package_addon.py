@@ -37,7 +37,7 @@ class AddonPackageTests(unittest.TestCase):
 
     def archive(self):
         version, data = packager.build_archive(self.root)
-        self.assertEqual(version, "0.4.1")
+        self.assertEqual(version, "0.4.2")
         return data, zipfile.ZipFile(BytesIO(data))
 
     def test_archive_covers_every_shipped_module_and_contains_verifiable_legal_files(self):
@@ -50,7 +50,7 @@ class AddonPackageTests(unittest.TestCase):
             self.assertTrue(all(name.startswith("PhoenixFreeCADTools/") for name in names))
             self.assertEqual(len(names), len(set(names)))
             manifest = json.loads(archive.read("PhoenixFreeCADTools/MANIFEST.json"))
-            self.assertEqual(manifest["version"], "0.4.1")
+            self.assertEqual(manifest["version"], "0.4.2")
             self.assertIn("pft_quick_toolbar.py", manifest["files"])
             self.assertEqual(set(names), {"PhoenixFreeCADTools/" + name for name in manifest["files"]} | {"PhoenixFreeCADTools/MANIFEST.json"})
             for name, digest in manifest["files"].items():
@@ -95,7 +95,7 @@ class AddonPackageTests(unittest.TestCase):
     def test_missing_module_and_version_drift_prevent_packaging(self):
         version_file = self.root / "addon/PhoenixFreeCADTools/package.xml"
         content = version_file.read_text()
-        version_file.write_text(content.replace("<version>0.4.1</version>", "<version>0.1.0</version>"))
+        version_file.write_text(content.replace("<version>0.4.2</version>", "<version>0.1.0</version>"))
         with self.assertRaisesRegex(ValueError, "versions must agree"):
             packager.build_archive(self.root)
         version_file.write_text(content)
@@ -144,7 +144,7 @@ assert registered[0].MenuText == 'Phoenix Tools'
 assert Path(registered[0].Icon).is_file()
 import pft_bridge as bridge
 assert bridge.get_status()['running'] is False
-assert bridge.get_status()['addon_version'] == '0.4.1'
+assert bridge.get_status()['addon_version'] == '0.4.2'
 ''', str(addon)], capture_output=True, text=True, timeout=15, cwd=mod)
         self.assertEqual(result.returncode, 0, result.stderr)
 
