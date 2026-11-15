@@ -19,6 +19,7 @@ try:
     import pft_quick_toolbar as quick_toolbar
     import pft_chat_controller as chat_controller
     import pft_chat_network as chat_network
+    import pft_chat_settings as chat_settings
     import pft_workbench_i18n as i18n
 finally:
     sys.path[:] = _old_path
@@ -121,6 +122,9 @@ class ChatQt:
 
         class Text(Widget):
             def __init__(self, value="", parent=None): super().__init__(parent); self.value = value
+            Password = 2
+            def setEchoMode(self, value): self.echo_mode = value
+            def setMaxLength(self, value): self.maximum_length = value
 
         class Button(Text):
             def __init__(self, value="", parent=None):
@@ -314,7 +318,6 @@ class CompactChatViewTests(unittest.TestCase):
                 owner.controllers.append(self)
             def push(self, **updates): self.snapshot.update(deepcopy(updates)); self.changed(deepcopy(self.snapshot))
         class ProfileError(ValueError): pass
-        class SettingsError(ValueError): pass
         self.profile = types.SimpleNamespace(detect_codex_executable=Mock(return_value="/fixture/codex"),
             validate_executable=Mock(side_effect=lambda value: value),
             prepare_chat_profile=Mock(return_value={"home": "/fixture/home", "cwd": "/fixture/work"}),
@@ -327,7 +330,8 @@ class CompactChatViewTests(unittest.TestCase):
                 {"enabled": enabled, "desk_enabled": desk_enabled, "node_executable": node, "cli_entry": cli}),
             load_chat_desk_configuration=Mock(return_value={"node_executable": "/fixture/desk-node",
                 "cli_entry": "/fixture/desk/scripts/desk-web-service.mjs", "state_dir": "/fixture/desk-state"}),
-            save_chat_preferences=Mock(), build_chat_mcp_config=Mock(), PftChatSettingsError=SettingsError)
+            save_chat_preferences=Mock(), build_chat_mcp_config=Mock(),
+            PftChatSettingsError=chat_settings.PftChatSettingsError)
         self.lease_factory = Mock()
         class LeaseError(RuntimeError):
             def __init__(self, message):
@@ -359,6 +363,62 @@ class CompactChatViewTests(unittest.TestCase):
 
     def show(self): return views.show_chat_connection_dialog(self.app, self.gui, self.get_status)
     def named(self, suffix): return self.qt.named("PhoenixTools_Chat" + suffix)
+
+    def test_deepseek_view_uses_no_codex_executable_profile_or_account(self):
+        from test_pft_chat_deepseek import DeepSeekFixture, deepseek_module
+        transport, store = DeepSeekFixture(), Mock()
+        factory = Mock(return_value=store)
+        with patch.dict(sys.modules, {"pft_chat_deepseek": deepseek_module,
+                "pft_api_credentials": types.SimpleNamespace(PftApiCredentialStore=factory),
+                "pft_chat_http": types.SimpleNamespace(make_deepseek_http=lambda core, parent: transport)}):
+            dock = self.show()
+            provider = self.named("Provider")
+            provider.setCurrentIndex(provider.findData("deepseek"))
+            factory.assert_not_called()
+            key = self.qt.named("PhoenixTools_DeepSeekKey")
+            remember = self.qt.named("PhoenixTools_DeepSeekRememberKey")
+            self.assertEqual(key.echo_mode, key.Password)
+            self.assertTrue(remember.isChecked())
+            key.setText("neutral-test-secret")
+            test = self.qt.named("PhoenixTools_DeepSeekTest")
+            clear = self.qt.named("PhoenixTools_DeepSeekClearKey")
+            test.click()
+            self.assertEqual(key.text(), "")
+            store.save.assert_not_called()
+            transport.models()
+            store.save.assert_called_once_with("neutral-test-secret")
+            self.named("Disconnect").click()
+            store.load.return_value = "neutral-test-secret"
+            test.click()
+            self.assertEqual(transport.requests[-1][1], "neutral-test-secret")
+            transport.models()
+            store.load.assert_called_once_with()
+            store.save.assert_called_once_with("neutral-test-secret")
+            clear.click()
+            self.assertIsNone(dock._controller._key)
+            store.clear.assert_called_once_with()
+            remember.setChecked(False)
+            key.setText("neutral-session-key")
+            test.click()
+            transport.models()
+            store.save.assert_called_once_with("neutral-test-secret")
+        self.assertTrue(self.named("Send").isEnabled())
+        self.assertFalse(provider.isEnabled())
+        self.named("Input").setPlainText("neutral question")
+        self.named("Send").click()
+        self.assertTrue(self.named("Stop").isEnabled())
+        transport.answer("neutral answer")
+        self.assertIn("neutral answer", dock._controller.snapshot["transcript"][-1]["text"])
+        self.profile.validate_executable.assert_not_called()
+        self.profile.prepare_chat_profile.assert_not_called()
+        self.controllers[0].connect.assert_not_called()
+        self.controllers[0].login.assert_not_called()
+        self.settings.build_chat_mcp_config.assert_not_called()
+        self.settings.save_chat_preferences.assert_not_called()
+        self.named("Disconnect").click()
+        provider.setCurrentIndex(provider.findData("codex"))
+        self.assertIs(dock._controller, self.controllers[0])
+        self.assertFalse(dock._controller.snapshot["transcript"])
 
     def connected_real_chat(self, load_models=True, account="chatgpt"):
         transport = ChatRpcTransport()
@@ -477,7 +537,11 @@ class CompactChatViewTests(unittest.TestCase):
 
     def test_native_view_supplies_lease_factory_without_acquiring_on_open(self):
         self.show()
-        self.assertIs(self.processes[0].lease_factory, self.lease_factory)
+        self.lease_factory.assert_not_called()
+        args = ("/fixture/home", "/fixture/workspace", "/fixture/codex")
+        self.assertIs(self.processes[0].lease_factory(*args), self.lease_factory.return_value)
+        self.lease_factory.assert_called_once_with(*args)
+        self.lease_factory.reset_mock()
         self.lease_factory.assert_not_called()
         self.profile.prepare_chat_profile.assert_not_called()
 
@@ -736,6 +800,35 @@ class CompactChatViewTests(unittest.TestCase):
         self.assertEqual(self.named("Input").toPlainText(), "Neutral unsent draft")
         self.qt.gui.QDesktopServices.openUrl.assert_not_called()
 
+    def test_bridge_preflight_copies_local_status_and_requires_manual_retry(self):
+        self.show()
+        controller = self.controllers[0]
+        self.named("EnableTools").setChecked(True)
+        self.settings.build_chat_mcp_config.side_effect = chat_settings.build_chat_mcp_config
+        paths = {"node_executable": "/fixture/node", "cli_entry": "/fixture/mcp/dist/cli.js"}
+        with patch.object(chat_settings, "validate_mcp_paths", return_value=paths):
+            for status, code in (({"running": False, "stopping": False}, "CHAT_BRIDGE_NOT_RUNNING"),
+                                 ({"running": False, "stopping": True}, "CHAT_BRIDGE_STOPPING")):
+                with self.subTest(code=code):
+                    self.get_status.return_value = status
+                    self.named("Connect").click()
+                    controller.connect.assert_not_called()
+                    self.profile.prepare_chat_profile.assert_not_called()
+                    controller.push()
+                    self.assertTrue(self.named("CopyError").visible)
+                    self.named("CopyError").click()
+                    self.assertTrue(self.qt.clipboard[-1].startswith(code + "\n"))
+                    self.assertIn("本窗口", self.qt.clipboard[-1])
+                    self.assertIn("启动 MCP", self.qt.clipboard[-1])
+            self.get_status.return_value = {"running": True, "port": 17654}
+            controller.connect.assert_not_called()
+            self.named("Connect").click()
+        controller.connect.assert_called_once()
+        self.assertEqual(controller.connect.call_args.kwargs["mcp"]["bridge_url"],
+                         "http://127.0.0.1:17654/")
+        controller.push(phase="connecting", is_busy=True, connection_generation=1)
+        self.assertFalse(self.named("CopyError").visible)
+
     def test_preflight_failure_preserves_unsent_draft(self):
         controller, transport = self.connected_real_chat()
         draft = 'Neutral request to retain after preparation fails'
@@ -912,7 +1005,9 @@ class CompactChatViewTests(unittest.TestCase):
         self.assertEqual(browser.interaction_flags,
             self.qt.core.Qt.TextSelectableByMouse | self.qt.core.Qt.TextSelectableByKeyboard)
         self.assertEqual(browser.word_wrap_mode, self.qt.gui.QTextOption.WrapAtWordBoundaryOrAnywhere)
-        self.assertIsNone(browser.loadResource(2, 'https://example.invalid/neutral-image'))
+        with patch.object(self.qt.core, "QByteArray", bytes, create=True):
+            self.assertEqual(browser.loadResource(2, 'https://example.invalid/neutral-image'),
+                             b"pft-chat-resource-blocked")
         self.controllers[0].push(transcript=[{'role': 'assistant', 'text': '<img src="neutral"> & reply'}],
             message_times=['12:34'])
         self.assertIn('&lt;img src=', browser.html)

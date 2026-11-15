@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import tempfile
 import unicodedata
 
 
@@ -46,6 +47,70 @@ log_user_prompt = false
 '''
 _PROFILE_MARKER = {"owner": "phoenix-freecad-tools", "schema_version": 1,
                    "purpose": "dedicated-native-chat"}
+
+
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+API_PROFILE_CONFIG = (PROFILE_CONFIG
+    .replace('forced_login_method = "chatgpt"', 'forced_login_method = "api"')
+    .replace('cli_auth_credentials_store = "file"', 'cli_auth_credentials_store = "ephemeral"')
+    .replace('model_provider = "openai"', 'model_provider = "openai"\nopenai_base_url = "' + OPENAI_API_BASE_URL + '"'))
+
+
+class _PftTemporaryChatProfile:
+    """Exclusive fresh profile; its owned process confirms exit before removal."""
+    def __init__(self, directory):
+        self.directory = directory
+        info = directory.lstat()
+        self.identity = info.st_dev, info.st_ino
+        self.claimed = False
+
+    def claim(self, home, cwd, _program):
+        if self.claimed or home != str(self.directory / "home") or cwd != str(self.directory / "workspace"):
+            raise PftChatProfileError("无法验证专属 API 聊天目录。")
+        self.claimed = True
+        return self
+
+    def mark_started(self, _pid):
+        pass
+
+    def release_failed_to_start(self):
+        self.release_after_exit()
+
+    def release_after_exit(self):
+        info = self.directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != self.identity
+                or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
+            raise PftChatProfileError("无法验证专属 API 聊天目录。")
+        shutil.rmtree(self.directory)
+
+
+def prepare_chat_api_profile(user_data_directory):
+    """Create a fresh API-only profile. Never read the browser-login profile."""
+    if not isinstance(user_data_directory, str) or not os.path.isabs(user_data_directory):
+        raise PftChatProfileError("无法确定 FreeCAD 用户数据目录。")
+    data = Path(user_data_directory).resolve()
+    lease = None
+    try:
+        info = data.stat()
+        if not stat.S_ISDIR(info.st_mode) or (hasattr(os, "getuid") and
+                (info.st_uid != os.getuid() or info.st_mode & 0o022)):
+            raise OSError("unsafe user data directory")
+        directory = Path(tempfile.mkdtemp(prefix="PhoenixToolsCodexAPI-", dir=data))
+        lease = _PftTemporaryChatProfile(directory)
+        home, workspace = directory / "home", directory / "workspace"
+        home.mkdir(mode=0o700)
+        workspace.mkdir(mode=0o700)
+        fd = os.open(home / "config.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(API_PROFILE_CONFIG)
+        return {"home": str(home), "cwd": str(workspace), "lease": lease}
+    except (OSError, ValueError):
+        if lease is not None:
+            try:
+                lease.release_failed_to_start()
+            except (OSError, ValueError):
+                pass
+        raise PftChatProfileError("无法创建专属 API 聊天目录。") from None
 
 
 def validate_executable(value):

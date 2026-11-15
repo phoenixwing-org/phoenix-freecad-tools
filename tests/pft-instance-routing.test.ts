@@ -19,7 +19,7 @@ function fixture(t: TestContext) {
   t.after(()=>rmSync(directory,{recursive:true,force:true}));return directory;
 }
 function record(instance_id=A,service_id=S,url='http://127.0.0.1:9988/') {
-  return {schema_version:1,owner:'phoenix-freecad-tools',instance_id,service_id,pid:123,url,protocol_version:1,addon_version:'0.4.1'};
+  return {schema_version:1,owner:'phoenix-freecad-tools',instance_id,service_id,pid:123,url,protocol_version:1,addon_version:'0.4.2'};
 }
 function publish(directory:string,value=record(),raw?:string) {
   const path=join(directory,value.instance_id+'.json');writeFileSync(path,raw??JSON.stringify(value),{mode:0o600});chmodSync(path,0o600);return path;
@@ -27,7 +27,7 @@ function publish(directory:string,value=record(),raw?:string) {
 async function bridge(t:TestContext,id=A,service=S) {
   const calls:Array<{method:string;params:Record<string,unknown>;target?:unknown}>=[];
   let seenDocument!:()=>void;const documentStarted=new Promise<void>(resolve=>{seenDocument=resolve;});
-  const state={service,guard:true,guardStatus:false,routing:true,hold:false,addon:'0.4.1',release:()=>{}, statusId:id};
+  const state={service,guard:true,guardStatus:false,routing:true,hold:false,addon:'0.4.2',release:()=>{}, statusId:id};
   const server=httpServer(async(req,res)=>{
     let text='';for await(const chunk of req)text+=chunk;const body=JSON.parse(text);calls.push(body);
     res.setHeader('Content-Type','application/json');
@@ -75,8 +75,8 @@ test('registry rejects duplicate decoded fields, float integer literals and arbi
   const dir=fixture(t),base=JSON.stringify(record());
   const bad=[base.replace('{','{"\\u0075rl":"http://127.0.0.1:9988/",'),base.replace('"pid":123','"pid":1.23e2'),base.replace('"schema_version":1','"schema_version":1.0'),
     base.replace('"pid":123','"pid":true'),base.replace('"pid":123','"pid":9007199254740992'),base.replace('"url":"http://127.0.0.1:9988/"','"url":"http://localhost:9988/"'),
-    base.replace('"owner":"phoenix-freecad-tools"','"owner":"other"'),base.replace('"addon_version":"0.4.1"','"addon_version":"9.0.0"'),
-    base.replace('"addon_version":"0.4.1"','"addon_version":"0.3.2"'),base.replace('"addon_version":"0.4.1"','"addon_version":"0.4.0"'),base.replace('}',',"private":"not accepted"}'),'{"nested":{}}'];
+    base.replace('"owner":"phoenix-freecad-tools"','"owner":"other"'),base.replace('"addon_version":"0.4.2"','"addon_version":"9.0.0"'),
+    base.replace('"addon_version":"0.4.2"','"addon_version":"0.3.2"'),base.replace('"addon_version":"0.4.2"','"addon_version":"0.4.0"'),base.replace('}',',"private":"not accepted"}'),'{"nested":{}}'];
   for(const raw of bad){publish(dir,record(),raw);assert.throws(()=>pftReadInstanceRegistry({directory:dir}),{code:'INSTANCE_REGISTRY_INVALID'});}
 });
 test('registry refuses symlinks hardlinks nonprivate modes unknown entries oversized files and bounded counts',t=>{

@@ -7,6 +7,7 @@ or alter a document. Call start_server() from FreeCAD's Python console or menu.
 
 import itertools
 import importlib.util
+import errno
 from copy import deepcopy
 from pathlib import Path
 import json
@@ -38,7 +39,7 @@ _BUSINESS_METHODS = set(_business.METHODS)
 _EXPORT_METHODS = set(_drawing_export.METHODS)
 _DESIGN_METHODS = set(_design.METHODS)
 SUPPORTED_METHODS = sorted({"ping", "get_status", "list_documents", "view_fit", "view_axonometric"} | _OPERATION_METHODS | _runtime.METHODS | _BUSINESS_METHODS | _EXPORT_METHODS | _DESIGN_METHODS)
-ADDON_VERSION = "0.4.1"
+ADDON_VERSION = "0.4.2"
 PROTOCOL_VERSION = 1
 def _default_port(environ):
     if environ.get("PFT_DEVELOPMENT") != "1":
@@ -74,10 +75,11 @@ _health = {"state": "idle", "job_id": 0, "operation": "", "started": 0.0}
 
 
 class PftBridgeError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, discovery_recovery=None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.discovery_recovery = discovery_recovery
 
 
 def _success(data):
@@ -115,6 +117,7 @@ def get_status():
             "part_previews": {"ttl_seconds": _business.TTL_SECONDS, "max_plans": _business.MAX_PLANS, "max_preview_bytes": _business.MAX_PREVIEW_BYTES, "storage": "memory_only"},
             "part_approvals": dict(_business.APPROVAL_CAPABILITIES),
             "pad_length_write": dict(_business.PAD_LENGTH_CAPABILITIES),
+            "basic_part_create": deepcopy(_business.BASIC_PART_CAPABILITIES),
             "drawing_create": {**_business.DRAWING_CREATE_CAPABILITIES, "views": list(_business.DRAWING_CREATE_CAPABILITIES["views"])},
             "drawing_draft_layout": dict(_business.DRAWING_DRAFT_LAYOUT_CAPABILITIES),
             "drawing_references": dict(_drawing_references.CAPABILITIES),
@@ -505,7 +508,7 @@ class _PftBridgeHttpServer(ThreadingHTTPServer):
 
 
 class _PftRequestHandler(BaseHTTPRequestHandler):
-    server_version = "PhoenixFreeCADTools/0.4.1"
+    server_version = "PhoenixFreeCADTools/0.4.2"
     sys_version = ""
 
     def log_message(self, format, *args):
@@ -576,10 +579,10 @@ class _PftRequestHandler(BaseHTTPRequestHandler):
 def _start_configuration(port):
     """Resolve only for an explicit startup; import/status never touch configuration."""
     if port is not None:
-        return port, {"source": "explicit", "config_path": None, "preferred_port": port}
+        return port, {"source": "explicit", "config_path": None, "preferred_port": port}, None
     if os.environ.get("PFT_DEVELOPMENT") == "1":
         value = _default_port(os.environ)
-        return value, {"source": "development", "config_path": None, "preferred_port": value}
+        return value, {"source": "development", "config_path": None, "preferred_port": value}, None
     try:
         record = _mcp_settings.read_config()
     except _mcp_settings.PftMcpSettingsError as error:
@@ -588,24 +591,30 @@ def _start_configuration(port):
     configuration = {"source": record["source"], "config_path": str(record["config_path"]), "preferred_port": value}
     if record["settings"].get("discovery", {}).get("enabled", False):
         configuration["discovery_enabled"] = True
-        return 0, configuration
-    return value, configuration
+        return 0, configuration, record["etag"]
+    return value, configuration, record["etag"]
 
 
-def start_server(port=None, *, discovery_registration_directory=None):
+def start_server(port=None, *, discovery_registration_directory=None, _expected_discovery_etag=None):
     """Start on the GUI thread; never close, save, reload or edit a document."""
     global _server, _server_thread, _dispatcher, _listener_configuration, _service_identity, _registration, _registration_error
     if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535):
         raise PftBridgeError("INVALID_PORT", "端口必须是 0 到 65535 的整数。")
     with _state_lock:
         if _server is not None:
+            if _expected_discovery_etag is not None:
+                raise PftBridgeError("SERVER_ALREADY_RUNNING", "FreeCAD bridge is already running.")
             return get_status()
         if _stop_thread is not None and _stop_thread.is_alive():
             raise PftBridgeError("SERVER_STOPPING", "服务仍在停止，请稍后重新启动。")
         # Resolve before changing any approval/dispatcher lifecycle. Invalid
         # shared settings cannot cancel a pending approval or fall back to a
         # different address. Explicit/development ports never read that file.
-        selected_port, selected_configuration = _start_configuration(port)
+        selected_port, selected_configuration, etag = _start_configuration(port)
+        if _expected_discovery_etag is not None and (
+                not selected_configuration.get("discovery_enabled") or etag != _expected_discovery_etag):
+            error = _mcp_settings.PftMcpSettingsError("MCP_SETTINGS_CHANGED")
+            raise PftBridgeError(error.code, str(error))
         discovery = selected_configuration.get("discovery_enabled", False) or discovery_registration_directory is not None
         if _registration is not None:
             raise PftBridgeError("INSTANCE_REGISTRY_CLEANUP_REQUIRED", "An earlier instance registration could not be removed safely.")
@@ -625,9 +634,17 @@ def start_server(port=None, *, discovery_registration_directory=None):
         dispatcher = _create_gui_dispatcher()
         try:
             server = _PftBridgeHttpServer(("127.0.0.1", selected_port), _PftRequestHandler)
-        except OSError:
+        except OSError as error:
             dispatcher.close()
-            raise PftBridgeError("PORT_UNAVAILABLE", "端口不可用；没有停止或替换其他服务。")
+            recoverable = (error.errno == errno.EADDRINUSE and not discovery
+                           and selected_configuration["source"] in ("default", "user_config"))
+            if recoverable:
+                try:
+                    _instance_registry._supported()  # Platform gate only; do not resolve or inspect registry paths.
+                except _instance_registry.PftInstanceRegistryError:
+                    recoverable = False
+            raise PftBridgeError("PORT_UNAVAILABLE", "端口不可用；没有停止或替换其他服务。",
+                                 discovery_recovery=(selected_port, etag) if recoverable else None) from None
         except Exception:
             dispatcher.close()
             raise PftBridgeError("START_FAILED", "服务初始化失败。") from None

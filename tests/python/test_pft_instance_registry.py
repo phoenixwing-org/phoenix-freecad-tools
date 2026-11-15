@@ -33,7 +33,7 @@ class InstanceRegistryTests(unittest.TestCase):
         record = {"schema_version": 1, "owner": "phoenix-freecad-tools",
                   "instance_id": format(index, "032x"), "service_id": "f" * 32,
                   "pid": 123, "url": "http://127.0.0.1:23456/", "protocol_version": 1,
-                  "addon_version": "0.4.1"}
+                  "addon_version": "0.4.2"}
         record.update(changes)
         return record
 

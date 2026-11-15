@@ -35,7 +35,7 @@ test('Desk resource has deterministic complete hashes, managed legal bytes and e
   const manifest = JSON.parse(first.manifest.toString('utf8'));
   assert.deepEqual(Object.keys(manifest).sort(), ['addon_dir', 'files', 'installer_entry', 'mcp_entry', 'plugin_version', 'schema_version']);
   assert.equal(manifest.addon_dir, 'addon/PhoenixFreeCADTools'); assert.equal(manifest.mcp_entry, 'dist/cli.mjs');
-  assert.equal(manifest.plugin_version, '0.4.1'); assert.equal(Object.keys(manifest.files).length, first.files.size);
+  assert.equal(manifest.plugin_version, '0.4.2'); assert.equal(Object.keys(manifest.files).length, first.files.size);
   assert.ok(first.files.size <= 512);
   for (const name of ['pft_drawing_export.py', 'pft_drawing_export_profile.py', 'pft_drawing_export_views.py',
     'pft_pdf_contract.py', 'pft_pdf_helper.py', 'pft_pdf_qprocess.py', 'pft_pdf_preview_views.py',

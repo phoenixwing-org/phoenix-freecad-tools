@@ -383,6 +383,42 @@ def confirm_mcp_stop(gui):
     return _dialog_exec(dialog) == widgets.QDialog.Accepted
 
 
+def confirm_mcp_port_conflict(window, port):
+    """Only an explicit click or activation of the affirmative button can continue."""
+    core, widgets = _qt()
+    dialog = widgets.QDialog(window)
+    try:
+        dialog.setObjectName("PhoenixTools_McpPortConflictDialog")
+        dialog.setWindowTitle(tr("Phoenix：MCP 端口已占用"))
+        dialog.resize(570, 170)
+        layout = widgets.QVBoxLayout(dialog)
+        layout.addWidget(_plain_label(widgets, core, tr(
+            "127.0.0.1:%s 已被占用。可以启用共享的自动发现设置，并仅启动本窗口的桥接；不会停止其他服务或切换现有连接。") % port))
+        buttons = widgets.QDialogButtonBox(widgets.QDialogButtonBox.Ok | widgets.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        start = buttons.button(widgets.QDialogButtonBox.Ok)
+        start.setText(tr("改用自动发现实例并启动"))
+        start.setAutoDefault(False)
+        start.setDefault(False)
+        cancel = buttons.button(widgets.QDialogButtonBox.Cancel)
+        cancel.setText(tr("取消"))
+        cancel.setAutoDefault(True)
+        cancel.setDefault(True)
+        cancel.setFocus()
+        confirmed = False
+
+        def accept_start():
+            nonlocal confirmed
+            confirmed = True
+            dialog.accept()
+
+        start.clicked.connect(accept_start)
+        buttons.rejected.connect(dialog.reject)
+        return _dialog_exec(dialog) == widgets.QDialog.Accepted and confirmed
+    finally:
+        dialog.deleteLater()
+
+
 def show_settings_dialog(app, gui, on_applied=None, bridge_snapshot=None):
     """Choose local presentation and startup preferences without CAD access."""
     core, widgets = _qt()

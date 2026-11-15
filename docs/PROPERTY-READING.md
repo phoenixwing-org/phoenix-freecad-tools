@@ -17,6 +17,7 @@
 | PropertyRotation | 原生四元数 x/y/z/w，w为实部；原值无量纲，不改符号或归一化 |
 | PropertyPlacement | 原生Base xyz与Rotation四元数；平移内部mm、旋转无量纲，不应用变换 |
 | PropertyPlacementList | 明确选择的原生位姿列表，逐项复制Base xyz与Rotation四元数，保留顺序、重复及单位位姿；后续修正，尚未发布 |
+| PropertyLink / LinkList / LinkSub / LinkSubList及各自Child / Global / Hidden | 明确选择的原生引用，复制本次文档登记中的目标身份和getter报告的子名称；不解析来源或子元素；后续修正，尚未发布 |
 | PropertyEnumeration | 当前选中字符串；不调用getEnumerationsOfProperty、不取索引或全部选项 |
 | PropertyQuantity / QuantityConstraint | 原生Value与有效八维Signature；组合维度按内部基底表达 |
 | PropertyLength / Distance / Angle | 另核对长度或角度的预期维度 |
@@ -32,7 +33,7 @@
 
 ## 原始值列表与整数精度
 
-只接受普通list或tuple，不遍历自定义容器、嵌套结构或原生对象。StringList每项须为str，IntegerList为非bool的int，FloatList为有限float，BoolList为bool；不把不同类型互相转换。LinkList仍在读取getter之前拒绝；VectorList及PlacementList按下文独立合同处理。不展开引用或数量聚合。
+只接受普通list或tuple，不遍历自定义容器、嵌套结构或原生对象。StringList每项须为str，IntegerList为非bool的int，FloatList为有限float，BoolList为bool；不把不同类型互相转换。VectorList、PlacementList及引用列表按下文各自合同处理，不进行数量聚合。
 
 每字段最多100项；清洗后的完整紧凑JSON列表最多2 KiB UTF-8，包含引号、转义和分隔符。超限时整字段`value:null/status:unknown/truncated:true`，保留`item_count`及`limit_reason:item_limit/utf8_budget`，不发布误导性的列表前缀。空列表是`empty`，与None、缺失及读取失败不同。
 
@@ -48,7 +49,7 @@
 
 标量DTO为`kind:vector/value:{x,y,z}`，列表为`kind:vector_list/value:[{x,y,z},…]`。单位及坐标元数据在字段级保存一次：`unit_source:native_property_type`、`coordinate_scope:reported_property_value`、`coordinate_frame:not_declared_by_property_type`、`placement_applied_by_tool:false`、`link_source_resolved:false`。信息与Markdown格式化同一冻结值并显示这些来源，不把普通向量、位置属性与缓存包围盒尺寸混为一谈，也不宣称本地/继承来源已经验证。
 
-VectorList仅接受原生getter返回的普通list；空`[]`为empty，零向量为有效值。坏成员、缺失分量或非有限数值均不发布部分列表。最多100项且完整紧凑xyz JSON列表最多2 KiB，二者取先到的上限；100项不是保证可容纳的数量。单位元数据另计入整笔128 KiB。原生getter会先生成完整PyList，这些上限只限制后续处理和DTO输出，不限制原生getter的内存或耗时。引用和量值列表仍不支持；Rotation与Placement遵循下节独立合同。
+VectorList仅接受原生getter返回的普通list；空`[]`为empty，零向量为有效值。坏成员、缺失分量或非有限数值均不发布部分列表。最多100项且完整紧凑xyz JSON列表最多2 KiB，二者取先到的上限；100项不是保证可容纳的数量。单位元数据另计入整笔128 KiB。原生getter会先生成完整PyList，这些上限只限制后续处理和DTO输出，不限制原生getter的内存或耗时。量值列表仍不支持，引用遵循后文独立合同；Rotation与Placement遵循下节独立合同。
 
 macOS独立FreeCAD 1.1人工Part::Feature已核对四种原生类型、浮点分量、零向量与空列表，通过实际Qt属性设置按钮读取信息/Markdown，并验证未保存值刷新与原快照冻结。读取保持几何、材质、选择、稳定后的相机、修改状态且无重算事件；未保存CAD。严格坏值和预算边界另有单元回归，不把此样件检查扩展为任意代理、装配或平台通过。
 
@@ -74,6 +75,27 @@ DTO为`kind:placement_list/value:[{base:{x,y,z},rotation:{x,y,z,w}},…]`，保�
 
 独立macOS FreeCAD1.1.4/Qt6.8.3的未保存Part::Feature已完成44项原生检查：真实getter及分量类型、零／单位位姿、非零平移旋转、重复及空列表、实际设置Cancel/OK、信息/Markdown、复制处理器、未保存新值刷新与旧DTO冻结，以及默认五字段恢复。文件选择和复制接收为QA注入，完整Markdown预览及确认采用真实Qt按钮，产物字节精确对应预览。读取阶段几何、材质、选择、相机、修改及待重算状态保持，未发生setter、重算、事务或CAD保存；自有进程正常退出。该样件不证明系统剪贴板、原生文件框、任意代理或跨平台通过。
 
+## 引用属性（后续修正，尚未发布）
+
+仅明确选择字段时处理四族标准引用：`App::PropertyLink`、`App::PropertyLinkList`、`App::PropertyLinkSub`、`App::PropertyLinkSubList`，各自包含无后缀及`Child/Global/Hidden`，合计16个精确类型。其它类型不按名称推断；`PropertyXLink`族、未知派生型、Python对象仍在读取值前拒绝。`App::Link.LinkedObject`的原生类型属于XLink，此扩展不意味着解析Link来源，也不改变默认五个BOM字段。
+
+| 原生getter返回 | 冻结DTO的kind和值 |
+| --- | --- |
+| Link：对象或None | `reference`，`value:{target:{document,object}}`；None为`{target:null}` |
+| LinkList：普通list | `reference_list`，按getter次序复制目标项，保留重复和已报告的None槽；空list为empty |
+| LinkSub：`(对象,list[str])`或None | `subreference`，目标及`subelements`；None为`{target:null,subelements:null}`，不虚构空子名称列表 |
+| LinkSubList：普通list中的`(对象,tuple[str,...])` | `subreference_list`，保留getter实际分组、重复和子名称；空list为empty |
+
+[四种原生getter](https://github.com/FreeCAD/FreeCAD/blob/1.1.4/src/App/PropertyLinks.cpp#L768-L775)的[列表实现](https://github.com/FreeCAD/FreeCAD/blob/1.1.4/src/App/PropertyLinks.cpp#L1033-L1051)、[单子引用](https://github.com/FreeCAD/FreeCAD/blob/1.1.4/src/App/PropertyLinks.cpp#L1451-L1466)与[子引用列表](https://github.com/FreeCAD/FreeCAD/blob/1.1.4/src/App/PropertyLinks.cpp#L2628-L2651)定义getter形状，不能把setter输入作为其无损存储合同。宿主可合并相邻子引用组，子名称也可选择新旧映射形式；工具复制的是getter报告文字，不宣称取得内部未经转换的存储名，不调用getSubObject或验证拓扑。标准列表setter不能据此接受任意None槽；Global作用域也不等同允许跨文档。
+
+目标身份复用本次初始文档扫描的Name／Document及登记反验，保留强引用，以Python `id/is`匹配；编码阶段不额外读取目标Name、Document、Label、Shape或Link来源。字段注明`reference_source:reported_native_reference`、`registry_scope:captured_document_registry`、`registry_membership:registered_at_scan`、`link_source_resolved:false`、`subelement_validation:not_performed`。登记只代表扫描时曾属于该文档，不能当作稍后仍存活的原子保证或写入授权。
+
+None仅表示getter没有报告存活目标，注明`none_semantics:no_live_target_reported`，不推断外部文件不存在或断链根因。目标不在该次登记、同名但身份不同或来自另一文档时，整字段为unknown及`reference_status:not_in_captured_registry`，不发布有效前缀；登记上下文不可用也保留未知。子名称只接受有界普通字符串，控制／格式／代理字符或非法容器使整字段不可用，不通过清洗改变引用含义。
+
+每字段最多100个目标组，子名称累计最多100项；完整紧凑value JSON最多2KiB，任一边界先到即整字段未知并注明截断原因。元数据连同其它属性计入整笔128KiB。这些是getter返回后的处理和输出预算，不限制原生getter的分配或执行耗时。信息、复制和Markdown复用冻结的普通值；不继续遍历引用、计算装配坐标、推导数量或汇总BOM。
+
+当前为读取器及格式化候选，合成测试和实际原生/UI验收分别记录；不以源码类型声明代替原生验收，也未新增专用MCP工具或宣称新的MCP传输链已通过。
+
 ## 内部单位与可选显示单位
 
 `pft_units.py`是无FreeCAD/Qt/文件访问的纯格式化模块，当前文档工具与MCP原生序列化器共享。它仅接受实际list/tuple中的八个非bool整数，指数范围−128…127；基底顺序为`mm,kg,s,A,K,mol,cd,deg`。0次幂省略，1次幂不写指数，组合以`*`连接，全0为`1`。例如密度为`mm^-3*kg`，力为`mm*kg*s^-2`，压力为`mm^-1*kg*s^-2`，功率为`mm^2*kg*s^-3`。
@@ -94,12 +116,12 @@ DTO为`kind:placement_list/value:[{base:{x,y,z},rotation:{x,y,z,w}},…]`，保�
 
 设置Cancel/OK、字段不变仅改单位、关闭重开恢复默认、只选面不扩大范围及完整对象默认勾选均通过；读取、刷新、复制和导出前后几何、材质、选择、相机、修改/待重算标志、事务与单位偏好保持，原生观察器未见setter、重算或CAD保存。实际文件框路径和剪贴板为QA注入，不能代替系统文件框、系统剪贴板或用户人工验收。初始QA导入与样件前置错误回执保留在仓库外；最终自有FreeCAD正常关闭，全部测试实例确认退出。
 
-官方1.1.0原生声明与注册检查未发现`App::PropertyQuantityList`；`PropertyFloatList`是普通double列表，不能按名称猜为量值列表。引用、更多原生类型与跨平台仍单独推进。
+官方1.1.0原生声明与注册检查未发现`App::PropertyQuantityList`；`PropertyFloatList`是普通double列表，不能按名称猜为量值列表。更多原生类型与跨平台仍单独推进，引用的支持及验收范围以上述独立合同为准。
 
 ## 状态、预算与来源
 
 - 字段不在成功读取的PropertiesList中为missing；清单失败为read_failed，不伪装成缺失。
-- 原生值为None、量值元数据缺失/畸形、非有限数值或固定类型维度矛盾为unknown，不发布猜测数值。
+- 非引用属性的原生值为None、量值元数据缺失/畸形、非有限数值或固定类型维度矛盾为unknown，不发布猜测数值；引用None仅按上述getter未报告目标的合同处理。
 - Value、Unit或Signature出现非AttributeError读取异常，字段及对象行保留read_failed；失败后不为补信息继续读取其它量值getter。宿主读层把AttributeError观测为unavailable，因此这类结果为unknown；它不能证明是API缺失还是getter内部的同类错误，不通过额外原生反射猜测。
 - 枚举/字符串保留2KiB UTF-8、控制字符净化和截断标记；整笔属性仍为128KiB，超限整笔拒绝，不静默裁剪成完整结果。
 - 只读明确对象/字段；不显式解析Link来源。原生Link属性可能由宿主报告继承值，本地或继承来源仍为not_verified，不能声称已经证明是实例本地属性。

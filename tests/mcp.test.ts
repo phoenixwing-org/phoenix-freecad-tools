@@ -135,7 +135,7 @@ test('真实 stdio 默认发现28工具；离线清单区分插件运行时能�
   assert.deepEqual(list.tools.map(tool => tool.name).sort(), [...TOOL_NAMES].sort());
   assert.equal(calls.length, 0);
   const capabilities = await client.callTool({ name: 'get_capabilities', arguments: {} });
-  assert.equal(capabilities.structuredContent?.version, '0.4.1');
+  assert.equal(capabilities.structuredContent?.version, '0.4.2');
   assert.equal(capabilities.structuredContent?.runtime_supported_checked, false);
   assert.deepEqual(capabilities.structuredContent?.script_history, { scope: 'bridge_service_session', session_id_field: 'script_session_id', full_results: 20, remembered_request_ids: 4096, expired_requests_reexecute: false });
   assert.equal(calls.length, 0);

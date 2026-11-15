@@ -4,6 +4,8 @@ import { PftNativeReadDataSchema, PftReadCapabilitySchema, PftReadGuardSchema, P
 import { pftInspectDesign, type PftDesignInspectionInput, type PftDesignInspectionData } from '../pft-design-inspection.js';
 import { pftRecomputeDocument, PftRecomputeCapabilitySchema, type PftRecomputeData } from '../pft-recompute.js';
 import { pftPartApproval, PftPartApprovalCapabilitySchema, type PftPartApprovalData } from '../pft-part-approval.js';
+import { PFT_BASIC_PART_OPERATION, PftBasicPartCapabilitySchema, PftBasicPartInputSchema, pftBasicPartPreview,
+  type PftBasicPartInput, type PftBasicPartPreview } from '../pft-basic-part.js';
 import { pftPreparePadLength, PftPadLengthCapabilitySchema, type PftPadLengthInput } from '../pft-pad-length.js';
 import { pftPrepareDrawing, PftDrawingCapabilitySchema, type PftDrawingInput } from '../pft-drawing.js';
 import { pftPrepareDrawingDimensions, PftDrawingDimensionsCapabilitySchema, type PftDrawingDimensionsInput } from '../pft-drawing-dimensions.js';
@@ -31,7 +33,7 @@ export type ObjectsInput = { document: string; objects: string[] };
 export type VisibilityInput = ObjectsInput & { visible: boolean };
 export type PartOperation = 'normalize_names' | 'sync_link_labels' | 'initialize_properties' | 'recommend_properties' | 'set_properties' | 'set_pad_length' | 'create_drawing' | 'add_drawing_dimensions';
 export type BomField = 'PartNumber' | 'PartVersion' | 'TypeCode' | 'ModelSeries' | 'PartName';
-export type PartChangesInput = PftPadLengthInput | PftDrawingInput | PftDrawingDimensionsInput | (ObjectsInput & { operation: Exclude<PartOperation, 'set_pad_length' | 'create_drawing' | 'add_drawing_dimensions'>;
+export type PartChangesInput = PftBasicPartInput | PftPadLengthInput | PftDrawingInput | PftDrawingDimensionsInput | (ObjectsInput & { operation: Exclude<PartOperation, 'set_pad_length' | 'create_drawing' | 'add_drawing_dimensions'>;
   values?: Record<string, Partial<Record<BomField, string | undefined>>> | undefined; body?: never; lengthMm?: never });
 export type CapturedView = { document: string; mime_type: 'image/png'; data: string; width: number; height: number };
 
@@ -90,7 +92,7 @@ export class PftFreeCadClient {
         response.on('data', (chunk: Buffer) => {
           size += chunk.length;
           if (size > responseBytes) {
-            const error = new PftBridgeError('RESPONSE_TOO_LARGE', responseBytes === 1024 * 1024 ? '响应超过 1 MiB 上限' : 'worker 响应超过 6 MiB 上限');
+            const error = new PftBridgeError('RESPONSE_TOO_LARGE', '响应超过 ' + responseBytes + ' 字节上限');
             reject(error); req.destroy(error); response.destroy(); return;
           }
           chunks.push(chunk);
@@ -154,6 +156,9 @@ export class PftFreeCadClient {
     }
     if ('pad_length_write' in status && !PftPadLengthCapabilitySchema.safeParse(status.pad_length_write).success) {
       throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件Pad Length能力声明格式无效；未派发预览。');
+    }
+    if ('basic_part_create' in status && !PftBasicPartCapabilitySchema.safeParse(status.basic_part_create).success) {
+      throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 新建零件能力声明格式无效。');
     }
     if ('drawing_create' in status && !PftDrawingCapabilitySchema.safeParse(status.drawing_create).success) {
       throw new PftBridgeError('INVALID_RESPONSE', 'FreeCAD 插件出图能力声明格式无效；未派发预览。');
@@ -288,7 +293,24 @@ export class PftFreeCadClient {
     return pftRecomputeDocument(document, { status: () => this.status(),
       recompute: params => this.call('recompute_document', params) }, PftBridgeError);
   }
+  private async prepareBasicPart(input: PftBasicPartInput): Promise<PftBasicPartPreview> {
+    const parsed = PftBasicPartInputSchema.safeParse(input);
+    if (!parsed.success) throw new PftBridgeError('INVALID_ARGUMENT', '新建零件仅接受 operation 和严格的 newPart 参数。');
+    const status = await this.status();
+    const methods = status.supported_methods;
+    if (status.running !== true || !Array.isArray(methods)
+      || ['prepare_part_changes', 'request_part_change_approval', 'get_part_change_status'].some(method => !methods.includes(method))
+      || status.basic_part_create === undefined || status.part_approvals === undefined) {
+      throw new PftBridgeError('UNSUPPORTED_CAPABILITY', '当前 FreeCAD 桥接未声明新建零件和原生确认能力。');
+    }
+    const value = await this.call('prepare_part_changes', parsed.data, 8192);
+    const preview = pftBasicPartPreview(value, parsed.data.newPart);
+    if (!preview) throw new PftBridgeError('INVALID_RESPONSE', '零件预览与请求不一致。请检查状态后重新预览。');
+    return preview;
+  }
+
   async preparePartChanges(input: PartChangesInput): Promise<unknown> {
+    if (input.operation === PFT_BASIC_PART_OPERATION) return this.prepareBasicPart(input);
     if (input.operation === 'add_drawing_dimensions') return pftPrepareDrawingDimensions(input,
       { status: () => this.status(), prepare: params => this.call('prepare_part_changes', params) }, PftBridgeError);
     if (['page', 'view', 'dimensions'].some(key => Object.hasOwn(input, key)))

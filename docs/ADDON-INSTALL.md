@@ -1,13 +1,13 @@
 # Phoenix Tools — 手工安装 / Manual installation
 
-本说明用于纯 Python Addon 分发包 `phoenix-freecad-tools-addon-0.3.2.zip`，也可直接作为包内README阅读。正式0.3.2已经发布；当前源码的后续候选继续沿用0.3.2，尚未发布，不能按相同版本号认定内容相同。0.4–0.10是归并前的内部历史，不代表正式发行。核对具体提交、manifest与摘要；正式资产以 [GitHub Releases](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases) 为准，包内版本见 `package.xml`。本地构建可运行 `npm run addon:pack`，产物位于忽略提交的 `artifacts/`。
+本说明可直接作为纯 Python Addon 包内 README 阅读。包内版本见 `package.xml`，内容由 `MANIFEST.json` 与 ZIP 的 SHA-256 校验。0.4.2 为本地待试用候选，正式发行资产可在 [GitHub Releases](https://github.com/phoenixwing-org/phoenix-freecad-tools/releases) 核对。本地构建可运行 `npm run addon:pack`，默认输出到忽略提交的 `artifacts/`。
 
 Phoenix Tools 提供命名修正、正式零件属性填写、Link 名称同步和中文 / English 设置。这些普通工作台按钮**不需要 Node.js、聊天客户端或 API Key**。通过聊天操作 FreeCAD 时，还需要单独安装 Node MCP 并配置支持 MCP 的聊天客户端。
 
 ## 安装前
 
 - 使用带 GUI 的 FreeCAD。初始兼容目标为FreeCAD1.1.0，macOS FreeCAD1.1.4的有限候选已有独立原生验收；Windows、Linux及其它FreeCAD构建的GUI安装、升级和卸载仍须分别验证。源码测试不证明平台验收通过，具体支持范围以对应发行说明及[验证记录](VERIFICATION.md)为准。
-- 有对应正式 Release 时从上述页面下载 ZIP 与 `SHA256SUMS`（单独构建时为同名 `.zip.sha256`）。macOS/Linux 可用 `shasum -a 256 phoenix-freecad-tools-addon-0.3.2.zip`，Windows PowerShell 可用 `Get-FileHash .\phoenix-freecad-tools-addon-0.3.2.zip -Algorithm SHA256`，将结果与 `SHA256SUMS` 中的同名条目核对。
+- 有对应正式 Release 时从上述页面下载 ZIP 与 `SHA256SUMS`（单独构建时为同名 `.zip.sha256`）。macOS/Linux 可用 `shasum -a 256 "实际下载的 ZIP 文件名"`，Windows PowerShell 可用 `Get-FileHash -LiteralPath "实际下载的 ZIP 文件名" -Algorithm SHA256`，将结果与 `SHA256SUMS` 中的同名条目核对。
 - 先保存所有工作。若 Phoenix MCP 正在运行，停止桥接并等待已有请求结束；超时不代表脚本已经取消。确认结束后正常退出 FreeCAD，再安装文件。不要强制关闭仍有未保存修改的会话。
 
 ## 找到正确的 Mod 目录
@@ -109,7 +109,7 @@ PhoenixFreeCADTools/
 5. Restart FreeCAD and choose **Phoenix Tools**. Ordinary workbench tools and language settings work without Node. Chat access requires the separately installed Node MCP service and client configuration.
 6. Upgrade by replacing the whole directory, never by merging files. This manual ZIP has no installer ownership marker; the npm installer intentionally refuses to manage it. Do not copy or fabricate a marker.
 
-FreeCAD 1.1.0 is the initial compatibility target; the limited macOS 1.1.4 candidate has separate native verification. Other builds and platforms still need their own installation, upgrade and removal checks. The published 0.3.2 and later unpublished source candidates can share the version string; verify their exact assets and hashes. This manual addon package does not imply Addon Manager listing or one-click ZIP support.
+FreeCAD 1.1.0 is the initial compatibility target; the limited macOS 1.1.4 candidate has separate native verification. Other builds and platforms still need their own installation, upgrade and removal checks. For the 0.4.2 local trial, verify the exact ZIP, package manifest and checksum supplied with that build. This manual addon package does not imply Addon Manager listing or one-click ZIP support.
 
 源码与问题反馈：[GitHub 仓库](https://github.com/phoenixwing-org/phoenix-freecad-tools) · [Issues](https://github.com/phoenixwing-org/phoenix-freecad-tools/issues)。许可见包内 `LICENSE`，第三方归属与 Logo 来源见 `NOTICE`；FreeCAD 和 Node.js 不包含在本 ZIP 中。
 
@@ -123,8 +123,8 @@ FreeCAD 1.1.0 is the initial compatibility target; the limited macOS 1.1.4 candi
 
 ## 可选 Desk 与聊天入口
 
-当前0.3.2整合了内部迭代形成的Desk Tools和原生AI聊天入口。Desk 面板不要求 MCP 运行，但检查或启动 Desk 需要用户选定兼容的 Node、已构建 CLI 和私有状态目录；打开面板不会自动运行。详细步骤见 [Desk 操作说明](https://github.com/phoenixwing-org/phoenix-freecad-tools/blob/develop/docs/DESK-USAGE.md)。当前仍是本地源码候选，没有 Desk 下载向导或正式捆绑包。
+Desk 面板不要求 MCP 运行，但检查或启动 Desk 需要用户选定兼容的 Node、已构建 CLI 和私有状态目录；打开面板不会自动运行。详细步骤见 [Desk 操作说明](https://github.com/phoenixwing-org/phoenix-freecad-tools/blob/develop/docs/DESK-USAGE.md)。安装包提供 Desk 连接入口，Desk 服务单独配置。
 
-AI聊天是独立原生客户端，明确连接及官方ChatGPT登录后可以发送消息。首行文档/轴测Fit/外观图标旁的齿轮收纳路径、工具、模型/字号、帮助与诊断；主面板按连接状态显示连接或登录，不自动重建已有聊天。命名修正、属性与链接同步仍可独立使用。
+AI 聊天是独立原生客户端。在齿轮中可选择 ChatGPT 登录、Codex · OpenAI API Key 或 DeepSeek · API Key 直连。首行文档/轴测Fit/外观图标旁的齿轮收纳路径、工具、模型/字号、帮助与诊断；主面板按连接状态显示连接或登录，不自动重建已有聊天。命名修正、属性与链接同步仍可独立使用。随包的 [HELP.md](HELP.md) 提供建模和聊天的试用步骤。
 
 当前 Desk 面板可点击“复制配置提示词”，把当前路径或空字段查找要求复制给 AI；该动作不会保存配置或启动后台。详情见 Desk 操作说明。

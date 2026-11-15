@@ -71,9 +71,12 @@ class PftChatProcess:
     A dock can be deleted as soon as its closeEvent returns. The process must
     outlive that dock so asynchronous kill/finished delivery remains safe.
     """
-    def __init__(self, core, parent, lease_factory=None):
+    def __init__(self, core, parent, lease_factory=None, *, mcp_stdio=False):
         self.core, self.parent = core, parent
         self._lease_factory = lease_factory
+        self._environment_keys = (frozenset(("SystemRoot", "SYSTEMROOT", "WINDIR",
+                                             "PHOENIX_FREECAD_TOOL_SCOPE", "PHOENIX_FREECAD_URL"))
+                                  if mcp_stdio else _PFT_ENVIRONMENT)
         self._session = None
 
     @property
@@ -429,7 +432,7 @@ class PftChatProcess:
             session["timeout_connection"] = session["signal_connections"][0]
             environment = core.QProcessEnvironment()
             for key, value in env.items():
-                if key in _PFT_ENVIRONMENT and isinstance(value, str):
+                if key in self._environment_keys and isinstance(value, str):
                     environment.insert(key, value)
             environment.insert("OTEL_SDK_DISABLED", "true")
             environment.insert("DO_NOT_TRACK", "1")

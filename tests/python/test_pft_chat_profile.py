@@ -38,6 +38,26 @@ class ChatProfileTests(unittest.TestCase):
         self.assertIn('cli_auth_credentials_store = "file"', PROFILE_CONFIG)
         self.assertIn('forced_login_method = "chatgpt"', PROFILE_CONFIG)
 
+    def test_api_profile_is_unique_ephemeral_and_keeps_chatgpt_data_separate(self):
+        from pft_chat_profile import prepare_chat_api_profile
+        browser = prepare_chat_profile(str(self.data))
+        keep = Path(browser["home"]) / "auth.json"
+        keep.write_text("neutral fixture")
+        first, second = [prepare_chat_api_profile(str(self.data)) for _ in range(2)]
+        self.assertNotEqual(first["home"], second["home"])
+        config = (Path(first["home"]) / "config.toml").read_text()
+        self.assertIn('forced_login_method = "api"', config)
+        self.assertIn('cli_auth_credentials_store = "ephemeral"', config)
+        self.assertIn('openai_base_url = "https://api.openai.com/v1"', config)
+        self.assertIs(first["lease"].claim(first["home"], first["cwd"], None), first["lease"])
+        with self.assertRaises(PftChatProfileError):
+            first["lease"].claim(first["home"], first["cwd"], None)
+        first["lease"].release_after_exit()
+        self.assertFalse(Path(first["home"]).exists())
+        self.assertTrue(Path(second["home"]).exists())
+        self.assertEqual(keep.read_text(), "neutral fixture")
+        second["lease"].release_failed_to_start()
+
     def test_unknown_existing_directory_and_changed_configuration_are_preserved(self):
         parent = self.data / 'PhoenixTools'
         parent.mkdir()

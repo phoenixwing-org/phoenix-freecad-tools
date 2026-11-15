@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import http.client
+import errno
 import importlib.util
 import json
 from pathlib import Path
@@ -32,7 +33,7 @@ class ProtocolTests(unittest.TestCase):
         status = bridge.process_request({"method": "get_status", "params": {}})
         self.assertTrue(status["ok"])
         self.assertEqual(status["data"]["protocol_version"], 1)
-        self.assertEqual(status["data"]["addon_version"], "0.4.1")
+        self.assertEqual(status["data"]["addon_version"], "0.4.2")
         self.assertFalse(status["data"]["running"])
 
     def test_drawing_capability_is_exact_detached_and_input_dispatch_remains_strict(self):
@@ -509,7 +510,7 @@ class SharedConfigurationIntegrationTests(unittest.TestCase):
             return registration
         with patch.object(bridge._instance_registry,"resolve_instance_directory",return_value=Path("/synthetic/instances")), \
              patch.object(bridge._instance_registry,"publish_instance",side_effect=publish) as writer:
-            first=bridge.start_server()
+            first=bridge.start_server(_expected_discovery_etag=self.record["etag"])
         self.assertTrue(first["instance_routing"]["guard_required"])
         self.assertEqual(first["listener_configuration"]["preferred_port"],12345)
         self.assertEqual(writer.call_count,1)
@@ -613,6 +614,55 @@ class SharedConfigurationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.servers, [])
         self.assertEqual(self.dispatchers, [])
         self.assertEqual(self.threads, [])
+
+    def test_only_regular_fixed_address_in_use_offers_discovery_recovery(self):
+        for explicit, development, discovery, failure, recovery in (
+            (None, False, False, errno.EADDRINUSE, (12345, "a"*64)),
+            (None, False, False, errno.EACCES, None),
+            (12345, False, False, errno.EADDRINUSE, None),
+            (None, True, False, errno.EADDRINUSE, None),
+            (None, False, True, errno.EADDRINUSE, None),
+        ):
+            with self.subTest(explicit=explicit, development=development, discovery=discovery, failure=failure):
+                self.record["settings"] = {"schema_version": 2, "bridge": {"preferred_port": 12345},
+                                           "discovery": {"enabled": discovery}}
+                self.read.side_effect = None
+                self.read.return_value = self.record
+                with patch.dict(bridge.os.environ, {"PFT_DEVELOPMENT": "1"} if development else {}, clear=True), \
+                     patch.object(bridge._instance_registry, "resolve_instance_directory", return_value=Path("/synthetic/instances")), \
+                     patch.object(bridge, "_PftBridgeHttpServer", side_effect=OSError(failure, "synthetic bind error")), \
+                     self.assertRaises(bridge.PftBridgeError) as raised:
+                    bridge.start_server(explicit)
+                self.assertEqual(raised.exception.code, "PORT_UNAVAILABLE")
+                self.assertEqual(raised.exception.discovery_recovery, recovery)
+                self.assertEqual(self.events[-1], "dispatcher-close")
+                self.assertFalse(bridge.get_status()["running"])
+        self.assertEqual(self.threads, [])
+
+    def test_windows_fixed_address_conflict_cannot_offer_unsupported_discovery(self):
+        self.read.side_effect = None
+        self.read.return_value = {**self.record, "source": "default", "etag": None,
+                                  "settings": {"schema_version": 1, "bridge": {"preferred_port": 9876}}}
+        with patch.object(bridge._instance_registry.sys, "platform", "win32"), \
+             patch.object(bridge._instance_registry, "resolve_instance_directory", side_effect=AssertionError("Registry path probe")), \
+             patch.object(bridge, "_PftBridgeHttpServer", side_effect=OSError(errno.EADDRINUSE, "synthetic bind error")), \
+             self.assertRaises(bridge.PftBridgeError) as raised:
+            bridge.start_server()
+        self.assertEqual(raised.exception.code, "PORT_UNAVAILABLE")
+        self.assertIsNone(raised.exception.discovery_recovery)
+        self.assertFalse(bridge.get_status()["running"])
+
+    def test_discovery_retry_rejects_changed_settings_before_startup_side_effects(self):
+        for enabled, etag in ((True, "b"*64), (False, "a"*64)):
+            self.record["settings"] = {"schema_version": 2, "bridge": {"preferred_port": 12345},
+                                       "discovery": {"enabled": enabled}}
+            self.record["etag"] = etag
+            self.read.side_effect = None
+            self.read.return_value = self.record
+            with self.assertRaises(bridge.PftBridgeError) as raised:
+                bridge.start_server(_expected_discovery_etag="a"*64)
+            self.assertEqual(raised.exception.code, "MCP_SETTINGS_CHANGED")
+            self.assertEqual(self.events, [])
 
     def test_existing_running_server_does_not_re_read_or_switch_ports(self):
         self.read.side_effect = None

@@ -14,7 +14,7 @@ const metadata = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'
 test('public npm identity is scoped while CLI and locked dependency identity stay stable', () => {
   const package_ = metadata(), lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
   assert.equal(package_.name, '@phoenix-wing/phoenix-freecad-mcp');
-  assert.equal(package_.version, '0.4.1');
+  assert.equal(package_.version, '0.4.2');
   assert.equal(lock.name, package_.name); assert.equal(lock.packages[''].name, package_.name);
   assert.equal(lock.version, package_.version); assert.equal(lock.packages[''].version, package_.version);
   assert.deepEqual(package_.bin, { 'phoenix-freecad-mcp': 'dist/cli.js' });
@@ -61,7 +61,7 @@ test('actual offline npm tarball has the scoped filename and unchanged CLI bin t
   const result = results[0], package_ = metadata();
   assert.equal(result.id, package_.name + '@' + package_.version);
   assert.equal(result.name, package_.name);
-  assert.equal(result.filename, 'phoenix-wing-phoenix-freecad-mcp-0.4.1.tgz');
+  assert.equal(result.filename, 'phoenix-wing-phoenix-freecad-mcp-0.4.2.tgz');
   const artifact = fs.readFileSync(path.join(temporary, result.filename));
   assert.deepEqual(JSON.parse(tarMember(artifact, 'package/package.json').toString('utf8')), package_);
   assert.deepEqual(tarMember(artifact, 'package/dist/cli.js'), fs.readFileSync(path.join(ROOT, 'dist/cli.js')));

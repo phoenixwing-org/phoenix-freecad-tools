@@ -12,9 +12,25 @@
 
 聊天可从 **工具 → Phoenix → AI 聊天** 打开，不必先切换Phoenix工作台。文档、轴测Fit和外观图标调用同一组已注册的原生命令；外观窗口独立持有本次预览快照和事务，多个入口唤起同一活动窗口，不复制或接管它的预览状态。聊天与进程的Qt信号使用各自持有的QObject接收器，关闭外观窗口不负责断开聊天或释放聊天进程。
 
-版本说明：当前源码候选为 **0.4.1（待发布）**，最后已发布版本仍为0.3.2。旧0.4.0–0.10.0是[未发布内部迭代标签](VERSIONING.md)，保留当时语义；历史运行回执不随源码分发，当前验收范围和实际包状态以[验证记录](VERIFICATION.md)为准。
+版本说明：当前源码候选为 **0.4.2（待试用）**，最新正式版为 0.4.1。旧0.4.0–0.10.0是[未发布内部迭代标签](VERSIONING.md)，保留当时语义；历史运行回执不随源码分发，当前验收范围和实际包状态以[验证记录](VERIFICATION.md)为准。
 
 当前未发布候选明确支持 Codex CLI **0.160.0** 和 **0.167.0-alpha.3.2**，其它版本仍拒绝，不以版本号大小推断协议兼容。客户端更新后，旧插件可能因固定版本检查而拒绝连接；需要对应的兼容修正。登录身份、模型访问和用量由官方服务决定，不能保证任何账户都有指定模型权限。本窗口默认创建临时会话；已有明确开启的插件自有持久会话与选择恢复源码，真实官方认证后的跨进程恢复仍待独立验收。桌面当前会话复用和多窗口并发接管尚未实现。
+
+## Codex · OpenAI API Key（开发中）
+
+在齿轮的 **连接方式** 中选 **Codex · OpenAI API Key**，填入 OpenAI Platform API Key，核对 Codex 执行文件，然后点 **连接 OpenAI API**。本模式已核对 Codex CLI 0.167.0-alpha.3.2 的本机认证协议。Key 载入后，发送一条消息验证可用性。用量由 OpenAI Platform 项目计费。 [OpenAI Docs 的 API Key 登录](https://learn.chatgpt.com/docs/auth#sign-in-with-an-api-key)
+
+该模式使用独立的临时 Codex 配置和内存认证。**记住 Key** 默认开启，首条回复成功后保存到 Phoenix 本地凭据目录，下次留空即可复用。**清除 Key** 会断开当前连接并删除 OpenAI 的保存项。启用 **FreeCAD 工具** 前配置 Node 和 MCP CLI，并启动当前窗口的桥接。聊天主面板显示当前服务商，DeepSeek 回复还显示 API 响应返回的模型 ID。
+
+## DeepSeek 直连（开发中）
+
+在聊天面板的齿轮里选择 **DeepSeek · API Key 直连**，填写 DeepSeek API Key，点击 **测试 DeepSeek 连接**。通过后可以选模型，再发送消息。连接测试读取官方模型列表，实际生成能力及余额由发送消息时核实。该入口只需要 FreeCAD 插件与 DeepSeek API Key。 [DeepSeek 模型列表](https://api-docs.deepseek.com/zh-cn/api/list-models/)
+
+发送后等待完整回复，可停止本地接收。断开后清除会话，切换服务前先断开。可选的 **启用 FreeCAD 工具** 默认关闭。开启时，填好 Node 及 MCP CLI 路径，并先从当前 FreeCAD 窗口启动 Phoenix MCP。连接测试会先核验本窗口身份和工具清单，再请求 DeepSeek 模型列表。
+
+工具模式会把所请求的工具结果随本次会话发给 DeepSeek，CAD 建模仍在 FreeCAD 原生窗口确认。收到确认请求后，本轮停止继续调用工具。请在原生窗口操作后发新消息查询原预览状态。停止回复时，已派发的 FreeCAD 请求可能仍在处理，可通过原预览查询结果。工具模式不提供执行脚本或直接应用建模变更的入口。 [DeepSeek 工具调用](https://api-docs.deepseek.com/guides/tool_calls/)
+
+**记住 Key** 默认开启。输入的新 Key 通过连接测试后，按服务商与 HTTPS API 地址保存在 FreeCAD 用户数据目录的 Phoenix 专用凭据目录。下次可留空并点击测试来复用。关闭勾选时，新输入的 Key 只在本次连接中使用。点 **清除 Key** 会断开本次连接并删除本地已保存的 Key。macOS 和 Linux 使用当前用户专属权限的明文文件，Windows 使用当前用户的 DPAPI 加密。
 
 ## 连接状态与后续修正
 

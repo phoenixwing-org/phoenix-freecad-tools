@@ -459,7 +459,7 @@ class PftDocumentReadTests(unittest.TestCase):
     def test_custom_fields_do_not_read_unselected_values_or_resolve_link_sources_or_extra_shapes(self):
         source = PftBomObject(self.doc, "SourceOnly", {"Custom": AssertionError("source value forbidden")})
         picked = PftBomObject(self.doc, "InstanceOnly", {"Custom": "instance report", "LinkedObject": source,
-            "Shape": PftOpaqueValue()}, {"LinkedObject": "App::PropertyLink", "Shape": "Part::PropertyPartShape"}, kind="App::Link")
+            "Shape": PftOpaqueValue()}, {"LinkedObject": "App::PropertyXLink", "Shape": "Part::PropertyPartShape"}, kind="App::Link")
         result = self.read([picked.Name], ["Custom", "LinkedObject", "Shape"])
         fields = result["properties"][0]["fields"]
         self.assertEqual(fields[0]["value"], "instance report")
@@ -848,7 +848,7 @@ class PftDocumentReadTests(unittest.TestCase):
         values = {"PartNumber": ["public"], "Links": AssertionError("must not read links"),
                   "Vectors": [],
                   "Placements": [], "Tags": ["explicit only"]}
-        kinds = {"PartNumber": "App::PropertyStringList", "Links": "App::PropertyLinkList",
+        kinds = {"PartNumber": "App::PropertyStringList", "Links": "App::PropertyXLinkList",
                  "Vectors": "App::PropertyVectorList", "Placements": "App::PropertyPlacementList",
                  "Tags": "App::PropertyStringList"}
         picked = PftBomObject(self.doc, "ListScope", values, kinds)
@@ -985,7 +985,7 @@ class PftDocumentReadTests(unittest.TestCase):
                   "Links": AssertionError("must not get links"), "Python": AssertionError("must not get arbitrary python")}
         kinds = {"PartNumber": "App::PropertyVector", "Raw": "App::PropertyVector", "Point": "App::PropertyPosition",
                  "Points": "App::PropertyVectorList", "Placements": "App::PropertyPlacementList", "Matrix": "App::PropertyMatrix",
-                 "Links": "App::PropertyLinkList", "Python": "App::PropertyPythonObject"}
+                 "Links": "App::PropertyXLinkList", "Python": "App::PropertyPythonObject"}
         picked = PftBomObject(self.doc, "VectorScope", values, kinds)
         row = self.read([picked.Name])["properties"][0]
         self.assertEqual([field["name"] for field in row["fields"]], [name for name, _ in tools.BOM_FIELDS])
@@ -1202,7 +1202,7 @@ class PftDocumentReadTests(unittest.TestCase):
                   "Placements": [Placement()],
                   "Matrix": AssertionError("must not read matrices"), "Reference": AssertionError("must not read links")}
         kinds = {"PartNumber": "App::PropertyRotation", "Orientation": "App::PropertyRotation", "Placement": "App::PropertyPlacement",
-                 "Placements": "App::PropertyPlacementList", "Matrix": "App::PropertyMatrix", "Reference": "App::PropertyLink"}
+                 "Placements": "App::PropertyPlacementList", "Matrix": "App::PropertyMatrix", "Reference": "App::PropertyXLink"}
         picked = PftBomObject(self.doc, "ExplicitTransformScope", values, kinds, kind="App::Link")
         other = PftBomObject(self.doc, "UnselectedTransform", {"Placement": AssertionError("must not read another object")},
                              {"Placement": "App::PropertyPlacement"})
